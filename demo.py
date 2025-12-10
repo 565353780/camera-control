@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 import open3d as o3d
+import time
 
 
 def project_points_to_uv(points_xyz, camera):
@@ -196,16 +197,105 @@ def create_camera_at_position(camera_pos, look_at=np.array([0, 0, 0]), up=np.arr
     return R, t
 
 
-def visualize_with_open3d(mesh, points_xyz, uv, camera, camera_pos):
+def create_camera_frustum(camera_pos, R_np, width, height, fx, fy, far=0.1):
     """
-    使用open3d可视化网格、采样点、相机位置、图像平面和连线
+    创建相机视锥体（四棱锥）
+    
+    Args:
+        camera_pos: 相机位置，形状为 (3,)
+        R_np: 旋转矩阵，形状为 (3, 3)
+        width: 图像宽度
+        height: 图像高度
+        fx: x方向焦距
+        fy: y方向焦距
+        far: 远平面距离（图像平面距离）
+    
+    Returns:
+        frustum: 视锥体网格
+    """
+    # 计算图像平面的四个角点（在相机坐标系中）
+    half_width = (width / fx) * far
+    half_height = (height / fy) * far
+    
+    # 近平面和远平面的角点（相机坐标系）
+    far_corners = np.array([
+        [-half_width, half_height, far],
+        [half_width, half_height, far],
+        [half_width, -half_height, far],
+        [-half_width, -half_height, far],
+    ])
+    
+    # 转换到世界坐标系
+    far_corners_world = (R_np @ far_corners.T).T + camera_pos
+    
+    # 创建视锥体（四棱锥）
+    vertices = np.vstack([far_corners_world, camera_pos.reshape(1, 3)])
+    # 顶点索引：0-3远平面，4相机位置
+    
+    # 创建三角形面
+    triangles = []
+    # 远平面
+    triangles.append([0, 2, 1])
+    triangles.append([0, 3, 2])
+    # 四个侧面（从相机位置到远平面的四个角）
+    triangles.append([4, 0, 1])  # 左-上
+    triangles.append([4, 1, 2])  # 上-右
+    triangles.append([4, 2, 3])  # 右-下
+    triangles.append([4, 3, 0])  # 下-左
+   
+    frustum = o3d.geometry.TriangleMesh()
+    frustum.vertices = o3d.utility.Vector3dVector(vertices)
+    frustum.triangles = o3d.utility.Vector3iVector(triangles)
+    frustum.paint_uniform_color([0, 0, 1])  # 蓝色
+    frustum.compute_vertex_normals()
+    
+    return frustum
+
+
+def create_coordinate_frame(origin=np.array([0, 0, 0]), size=0.2):
+    """
+    创建坐标轴
+    
+    Args:
+        origin: 原点位置
+        size: 轴的长度
+    
+    Returns:
+        coord_frame: 坐标轴LineSet
+    """
+    points = np.array([
+        origin,  # 0: 原点
+        origin + [size, 0, 0],  # 1: X轴
+        origin + [0, size, 0],  # 2: Y轴
+        origin + [0, 0, size],  # 3: Z轴
+    ])
+    
+    lines = o3d.geometry.LineSet()
+    lines.points = o3d.utility.Vector3dVector(points)
+    lines.lines = o3d.utility.Vector2iVector([
+        [0, 1],  # X轴（红色）
+        [0, 2],  # Y轴（绿色）
+        [0, 3],  # Z轴（蓝色）
+    ])
+    lines.colors = o3d.utility.Vector3dVector([
+        [1, 0, 0],  # X轴红色
+        [0, 1, 0],  # Y轴绿色
+        [0, 0, 1],  # Z轴蓝色
+    ])
+    
+    return lines
+
+
+def visualize_with_open3d_animated(mesh, points_xyz, camera_base, base_camera_pos, n_frames=360):
+    """
+    使用open3d可视化网格、采样点、相机位置、图像平面和连线，并创建旋转动画
     
     Args:
         mesh: open3d TriangleMesh对象
-        points_xyz: 采样点，形状为 (N, 3)，numpy数组或torch tensor
-        uv: UV坐标，形状为 (N, 2)，torch tensor
-        camera: 相机参数字典
-        camera_pos: 相机位置，形状为 (3,)
+        points_xyz: 采样点，形状为 (N, 3)，torch tensor
+        camera_base: 基础相机参数字典（用于提取内参）
+        base_camera_pos: 基础相机位置，形状为 (3,)
+        n_frames: 动画帧数
     """
     # 转换为numpy
     if isinstance(points_xyz, torch.Tensor):
@@ -213,19 +303,11 @@ def visualize_with_open3d(mesh, points_xyz, uv, camera, camera_pos):
     else:
         points_xyz_np = points_xyz
     
-    if isinstance(uv, torch.Tensor):
-        uv_np = uv.detach().cpu().numpy()
-    else:
-        uv_np = uv
-    
-    # 提取相机参数
-    width = camera["width"]
-    height = camera["height"]
-    fx = camera["fx"]
-    fy = camera["fy"]
-    cx = camera["cx"]
-    cy = camera["cy"]
-    R = camera["R"]
+    # 提取相机内参
+    width = camera_base["width"]
+    height = camera_base["height"]
+    fx = camera_base["fx"]
+    fy = camera_base["fy"]
     
     if isinstance(width, torch.Tensor):
         width = width.item()
@@ -235,100 +317,208 @@ def visualize_with_open3d(mesh, points_xyz, uv, camera, camera_pos):
         fx = fx.item()
     if isinstance(fy, torch.Tensor):
         fy = fy.item()
-    if isinstance(cx, torch.Tensor):
-        cx = cx.item()
-    if isinstance(cy, torch.Tensor):
-        cy = cy.item()
-    if isinstance(R, torch.Tensor):
-        R_np = R.detach().cpu().numpy()
-    else:
-        R_np = R
     
-    # 创建点云
+    # 创建点云（固定，不随相机旋转变化）
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(points_xyz_np)
+    pcd.paint_uniform_color([0.5, 0.5, 0.5])  # 灰色点云
     
-    # 根据UV有效性设置颜色
-    valid_mask = ~np.isnan(uv_np[:, 0])
-    colors = np.zeros((len(points_xyz_np), 3))
-    colors[valid_mask] = [0, 1, 0]  # 绿色：有效点
-    colors[~valid_mask] = [1, 0, 0]  # 红色：相机背面点
-    pcd.colors = o3d.utility.Vector3dVector(colors)
+    # 创建坐标轴
+    coord_frame = create_coordinate_frame(origin=np.array([0, 0, 0]), size=0.3)
     
-    # 创建相机位置可视化（蓝色球体）
-    camera_sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.05)
-    camera_sphere.translate(camera_pos)
-    camera_sphere.paint_uniform_color([0, 0, 1])  # 蓝色
+    # 创建可视化器
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(window_name="Camera Rotation Animation", width=1200, height=800)
+    
+    # 添加固定几何体
+    vis.add_geometry(mesh)
+    vis.add_geometry(pcd)
+    vis.add_geometry(coord_frame)
+    
+    # 相机位置固定在(-1, 0, 0)，相机围绕Y轴旋转
+    camera_pos = base_camera_pos.copy()  # 固定位置(-1, 0, 0)
+    
+    # 初始角度（相机初始朝向原点）
+    initial_angle = 0.0
+    
+    # 创建初始相机（初始朝向原点）
+    look_at = np.array([0.0, 0.0, 0.0])
+    up = np.array([0.0, 1.0, 0.0])  # Y轴向上
+    R_np, t_np = create_camera_at_position(camera_pos, look_at=look_at, up=up)
+    R = torch.from_numpy(R_np).float()
+    t = torch.from_numpy(t_np).float()
+    
+    camera = {
+        "width": width,
+        "height": height,
+        "fx": fx,
+        "fy": fy,
+        "cx": width / 2.0,
+        "cy": height / 2.0,
+        "R": R,
+        "t": t,
+    }
+    
+    # 投影并计算有效点
+    uv = project_points_to_uv(points_xyz, camera)
+    valid_mask = ~torch.isnan(uv[:, 0])
+    valid_points = points_xyz_np[valid_mask]
+    
+    # 创建相机视锥体
+    camera_frustum = create_camera_frustum(camera_pos, R_np, width, height, fx, fy)
+    vis.add_geometry(camera_frustum)
     
     # 创建图像平面
-    # 图像平面在相机坐标系中位于z=1的位置（假设焦距为1的归一化单位）
-    # 图像平面的大小由width和height以及fx, fy决定
-    # 在相机坐标系中，图像平面的四个角点：
-    # 左上: (-width/2/fx, height/2/fy, 1)
-    # 右上: (width/2/fx, height/2/fy, 1)
-    # 右下: (width/2/fx, -height/2/fy, 1)
-    # 左下: (-width/2/fx, -height/2/fy, 1)
-    
-    # 使用一个合理的距离（例如0.5）来显示图像平面
     image_distance = 0.5
     half_width_world = (width / fx) * image_distance
     half_height_world = (height / fy) * image_distance
-    
-    # 在相机坐标系中的四个角点
     corners_camera = np.array([
-        [-half_width_world, half_height_world, image_distance],   # 左上
-        [half_width_world, half_height_world, image_distance],    # 右上
-        [half_width_world, -half_height_world, image_distance],   # 右下
-        [-half_width_world, -half_height_world, image_distance],  # 左下
+        [-half_width_world, half_height_world, image_distance],
+        [half_width_world, half_height_world, image_distance],
+        [half_width_world, -half_height_world, image_distance],
+        [-half_width_world, -half_height_world, image_distance],
     ])
-    
-    # 转换到世界坐标系
-    # P_world = R @ P_cam + camera_pos
     corners_world = (R_np @ corners_camera.T).T + camera_pos
     
-    # 创建图像平面（使用LineSet绘制边框）
-    image_lines = o3d.geometry.LineSet()
-    image_lines.points = o3d.utility.Vector3dVector(corners_world)
-    image_lines.lines = o3d.utility.Vector2iVector([
-        [0, 1], [1, 2], [2, 3], [3, 0]  # 四个边
-    ])
-    image_lines.colors = o3d.utility.Vector3dVector([[1, 1, 0] for _ in range(4)])  # 黄色边框
-    
-    # 创建图像平面（半透明平面）
     image_plane = o3d.geometry.TriangleMesh()
     image_plane.vertices = o3d.utility.Vector3dVector(corners_world)
-    image_plane.triangles = o3d.utility.Vector3iVector([
-        [0, 1, 2], [0, 2, 3]  # 两个三角形组成平面
-    ])
-    image_plane.paint_uniform_color([1, 1, 0])  # 黄色
+    image_plane.triangles = o3d.utility.Vector3iVector([[0, 1, 2], [0, 2, 3]])
+    image_plane.paint_uniform_color([1, 1, 0])
     image_plane.compute_vertex_normals()
+    vis.add_geometry(image_plane)
     
-    # 创建点到相机的连线（只显示有效点）
-    line_points = []
-    line_indices = []
-    valid_points = points_xyz_np[valid_mask]
-    
-    for i, point in enumerate(valid_points):
-        line_points.append(camera_pos)
-        line_points.append(point)
-        line_indices.append([i * 2, i * 2 + 1])
-    
-    if len(line_points) > 0:
+    # 创建连线
+    if len(valid_points) > 0:
+        line_points = []
+        line_indices = []
+        for i, point in enumerate(valid_points):
+            line_points.append(camera_pos)
+            line_points.append(point)
+            line_indices.append([i * 2, i * 2 + 1])
+        
         lines = o3d.geometry.LineSet()
         lines.points = o3d.utility.Vector3dVector(line_points)
         lines.lines = o3d.utility.Vector2iVector(line_indices)
-        lines.colors = o3d.utility.Vector3dVector([[0.5, 0.5, 0.5] for _ in range(len(line_indices))])  # 灰色连线
+        lines.colors = o3d.utility.Vector3dVector([[0.3, 0.3, 0.3] for _ in range(len(line_indices))])
+        vis.add_geometry(lines)
     else:
         lines = None
     
-    # 可视化所有对象
-    geometries = [mesh, pcd, camera_sphere, image_lines, image_plane]
-    if lines is not None:
-        geometries.append(lines)
+    # 设置相机视角
+    ctr = vis.get_view_control()
+    ctr.set_front([0, 0, -1])
+    ctr.set_lookat([0, 0, 0])
+    ctr.set_up([0, 1, 0])
+    ctr.set_zoom(0.7)
     
-    o3d.visualization.draw_geometries(geometries,
-                                      window_name="Mesh, Points, Camera and Image Plane",
-                                      width=1200, height=800)
+    print("开始动画，按Q退出...")
+    
+    # 动画循环
+    frame = 0
+    last_time = time.time()
+    frame_duration = 1.0 / 30.0  # 30 FPS
+    
+    while True:
+        if not vis.poll_events():
+            break
+        
+        current_time = time.time()
+        if current_time - last_time < frame_duration:
+            continue
+        last_time = current_time
+        
+        # 相机位置固定，围绕Y轴旋转
+        angle = 2 * np.pi * frame / n_frames
+        
+        # 计算围绕Y轴旋转的look_at点
+        # 初始方向是从相机到原点，即(1, 0, 0)方向
+        # 围绕Y轴旋转这个方向
+        initial_forward = np.array([1.0, 0.0, 0.0])  # 从(-1,0,0)指向原点的方向
+        
+        # 围绕Y轴旋转
+        cos_a = np.cos(angle)
+        sin_a = np.sin(angle)
+        # Y轴旋转矩阵
+        R_y = np.array([
+            [cos_a, 0, sin_a],
+            [0, 1, 0],
+            [-sin_a, 0, cos_a]
+        ])
+        
+        # 旋转后的forward方向
+        rotated_forward = R_y @ initial_forward
+        
+        # 计算look_at点（相机位置 + 旋转后的方向 * 距离）
+        look_at_distance = 1.0  # 可以调整这个距离
+        look_at = camera_pos + rotated_forward * look_at_distance
+        
+        # up向量保持为Y轴方向
+        up = np.array([0.0, 1.0, 0.0])
+        
+        # 更新相机参数（位置固定，朝向围绕Y轴旋转）
+        R_np, t_np = create_camera_at_position(camera_pos, look_at=look_at, up=up)
+        R = torch.from_numpy(R_np).float()
+        t = torch.from_numpy(t_np).float()
+        
+        camera = {
+            "width": width,
+            "height": height,
+            "fx": fx,
+            "fy": fy,
+            "cx": width / 2.0,
+            "cy": height / 2.0,
+            "R": R,
+            "t": t,
+        }
+        
+        # 重新投影
+        uv = project_points_to_uv(points_xyz, camera)
+        valid_mask = ~torch.isnan(uv[:, 0])
+        valid_points = points_xyz_np[valid_mask]
+        
+        # 更新相机视锥体
+        new_frustum = create_camera_frustum(camera_pos, R_np, width, height, fx, fy)
+        camera_frustum.vertices = new_frustum.vertices
+        camera_frustum.triangles = new_frustum.triangles
+        camera_frustum.compute_vertex_normals()
+        vis.update_geometry(camera_frustum)
+        
+        # 更新图像平面
+        corners_world = (R_np @ corners_camera.T).T + camera_pos
+        image_plane.vertices = o3d.utility.Vector3dVector(corners_world)
+        image_plane.compute_vertex_normals()
+        vis.update_geometry(image_plane)
+        
+        # 更新连线
+        if len(valid_points) > 0:
+            line_points = []
+            line_indices = []
+            for i, point in enumerate(valid_points):
+                line_points.append(camera_pos)
+                line_points.append(point)
+                line_indices.append([i * 2, i * 2 + 1])
+            
+            if lines is None:
+                lines = o3d.geometry.LineSet()
+                vis.add_geometry(lines)
+            
+            lines.points = o3d.utility.Vector3dVector(line_points)
+            lines.lines = o3d.utility.Vector2iVector(line_indices)
+            lines.colors = o3d.utility.Vector3dVector([[0.3, 0.3, 0.3] for _ in range(len(line_indices))])
+            vis.update_geometry(lines)
+        elif lines is not None:
+            # 如果没有有效点，清空连线
+            lines.points = o3d.utility.Vector3dVector([])
+            lines.lines = o3d.utility.Vector2iVector([])
+            vis.update_geometry(lines)
+        
+        vis.update_renderer()
+        
+        frame += 1
+        if frame >= n_frames:
+            frame = 0  # 循环播放
+    
+    vis.destroy_window()
 
 
 if __name__ == "__main__":
@@ -392,6 +582,6 @@ if __name__ == "__main__":
     print(f"\n前5个点的UV坐标:")
     print(uv[:5])
     
-    # 使用open3d可视化
+    # 使用open3d可视化动画
     print("\n正在打开可视化窗口...")
-    visualize_with_open3d(mesh, points_xyz, uv, camera, camera_pos)
+    visualize_with_open3d_animated(mesh, points_xyz, camera, camera_pos, n_frames=360)
