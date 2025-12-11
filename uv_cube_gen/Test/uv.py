@@ -3,59 +3,10 @@ import torch
 import numpy as np
 import open3d as o3d
 
-from uv_cube_gen.Method.mesh import normalize_mesh
+from uv_cube_gen.Method.mesh import normalize_mesh, sample_points_from_mesh
 from uv_cube_gen.Method.data import toTensor
+from uv_cube_gen.Method.render import create_coordinate_frame
 from uv_cube_gen.Module.camera import Camera
-
-
-def sample_points_from_mesh(mesh, n_points):
-    """
-    从网格表面采样点
-    
-    Args:
-        mesh: open3d TriangleMesh对象
-        n_points: 采样点数
-    
-    Returns:
-        points: 采样点，形状为 (n_points, 3)，numpy数组
-    """
-    pcd = mesh.sample_points_uniformly(number_of_points=n_points)
-    points = np.asarray(pcd.points)
-    return points
-
-
-def create_coordinate_frame(origin=np.array([0, 0, 0]), size=0.2):
-    """
-    创建坐标轴
-    
-    Args:
-        origin: 原点位置
-        size: 轴的长度
-    
-    Returns:
-        coord_frame: 坐标轴LineSet
-    """
-    points = np.array([
-        origin,  # 0: 原点
-        origin + [size, 0, 0],  # 1: X轴
-        origin + [0, size, 0],  # 2: Y轴
-        origin + [0, 0, size],  # 3: Z轴
-    ])
-    
-    lines = o3d.geometry.LineSet()
-    lines.points = o3d.utility.Vector3dVector(points)
-    lines.lines = o3d.utility.Vector2iVector([
-        [0, 1],  # X轴（红色）
-        [0, 2],  # Y轴（绿色）
-        [0, 3],  # Z轴（蓝色）
-    ])
-    lines.colors = o3d.utility.Vector3dVector([
-        [1, 0, 0],  # X轴红色
-        [0, 1, 0],  # Y轴绿色
-        [0, 0, 1],  # Z轴蓝色
-    ])
-    
-    return lines
 
 
 def visualize_with_open3d_animated(mesh, points_xyz, camera_base, n_frames=360):
@@ -242,7 +193,7 @@ def visualize_with_open3d_animated(mesh, points_xyz, camera_base, n_frames=360):
     vis.destroy_window()
 
 
-if __name__ == "__main__":
+def test():
     mesh_file_path = "/Users/chli/chLi/Dataset/Bunny/bunny/reconstruction/bun_zipper.ply"
     n_points = 10000
 
@@ -273,3 +224,4 @@ if __name__ == "__main__":
     # 使用open3d可视化动画
     print("\n正在打开可视化窗口...")
     visualize_with_open3d_animated(mesh, points_xyz, camera, n_frames=360)
+    return True

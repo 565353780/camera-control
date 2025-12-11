@@ -35,3 +35,18 @@ def normalize_mesh(mesh: o3d.geometry.TriangleMesh) -> o3d.geometry.TriangleMesh
     normalized_mesh.triangle_normals = mesh.triangle_normals
     
     return normalized_mesh
+
+def sample_points_from_mesh(mesh, n_points):
+    """
+    从网格表面采样点
+    
+    Args:
+        mesh: open3d TriangleMesh对象
+        n_points: 采样点数
+    
+    Returns:
+        points: 采样点，形状为 (n_points, 3)，numpy数组
+    """
+    pcd = mesh.sample_points_uniformly(number_of_points=n_points)
+    points = np.asarray(pcd.points)
+    return points
