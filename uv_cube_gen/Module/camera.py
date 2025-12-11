@@ -60,50 +60,48 @@ class Camera(CameraData):
         points = points[valid_mask]
         uv = uv[valid_mask]
         n_points = points.shape[0]
-
-        # UV坐标定义：ui = (ui, vi) ∈ [0,1]^2，相机中心为(0,0)
-        # 投影方程：ui = π(P, xi)，其中P = K[R|t]是投影矩阵
-        # 最小化重投影误差：P* = arg min_P sum_i ||π(P, xi) - ui||^2
-
-        points_np = points.detach().cpu().numpy()
-        uv_np = uv.detach().cpu().numpy()
+        device = points.device
+        dtype = points.dtype
 
         # Hartley归一化：提高数值稳定性
         # 归一化3D点
-        points_mean = points_np.mean(axis=0)
-        points_centered = points_np - points_mean
-        points_scale = max(np.sqrt((points_centered ** 2).sum(axis=1).mean()) / np.sqrt(3.0), 1e-8)
+        points_mean = points.mean(dim=0)
+        points_centered = points - points_mean
+        points_scale = (points_centered ** 2).sum(dim=1).mean() / 3.0
+        points_scale = torch.clamp(torch.sqrt(points_scale), min=1e-8)
         points_norm = points_centered / points_scale
         
         # 归一化2D点（UV坐标转换为像素坐标）
-        image_points = uv_np * np.array([width, height])
-        image_mean = image_points.mean(axis=0)
+        scale_2d = torch.tensor([width, height], device=device, dtype=dtype)
+        image_points = uv * scale_2d
+        image_mean = image_points.mean(dim=0)
         image_centered = image_points - image_mean
-        image_scale = max(np.sqrt((image_centered ** 2).sum(axis=1).mean()) / np.sqrt(2.0), 1e-8)
+        image_scale = (image_centered ** 2).sum(dim=1).mean() / 2.0
+        image_scale = torch.clamp(torch.sqrt(image_scale), min=1e-8)
         image_points_norm = image_centered / image_scale
 
         # 向量化构建DLT矩阵A
         X, Y, Z = points_norm.T
         u, v = image_points_norm.T
-        ones = np.ones(n_points)
+        ones = torch.ones(n_points, device=device, dtype=dtype)
         
-        A = np.zeros((2 * n_points, 12))
-        A[0::2, 0:4] = np.column_stack([X, Y, Z, ones])
-        A[0::2, 8:12] = np.column_stack([-u * X, -u * Y, -u * Z, -u])
-        A[1::2, 4:8] = np.column_stack([X, Y, Z, ones])
-        A[1::2, 8:12] = np.column_stack([-v * X, -v * Y, -v * Z, -v])
+        A = torch.zeros(2 * n_points, 12, device=device, dtype=dtype)
+        A[0::2, 0:4] = torch.stack([X, Y, Z, ones], dim=1)
+        A[0::2, 8:12] = torch.stack([-u * X, -u * Y, -u * Z, -u], dim=1)
+        A[1::2, 4:8] = torch.stack([X, Y, Z, ones], dim=1)
+        A[1::2, 8:12] = torch.stack([-v * X, -v * Y, -v * Z, -v], dim=1)
 
         # SVD求解投影矩阵
-        _, _, Vt = np.linalg.svd(A, full_matrices=False)
+        _, _, Vt = torch.linalg.svd(A, full_matrices=False)
         P_norm = Vt[-1].reshape(3, 4)
 
         # 反归一化
         inv_points_scale = 1.0 / points_scale
-        T_3d = np.eye(4)
+        T_3d = torch.eye(4, device=device, dtype=dtype)
         T_3d[:3, :3] *= inv_points_scale
         T_3d[:3, 3] = -points_mean * inv_points_scale
         
-        T_2d_inv = np.eye(3)
+        T_2d_inv = torch.eye(3, device=device, dtype=dtype)
         T_2d_inv[:2, :2] *= image_scale
         T_2d_inv[:2, 2] = image_mean
         
@@ -113,39 +111,40 @@ class Camera(CameraData):
         M = P[:, :3]
         
         # RQ分解：M = K @ R（使用翻转技巧）
-        J = np.array([[0, 0, 1], [0, 1, 0], [1, 0, 0]], dtype=np.float32)
-        Q_flip, R_qr_flip = np.linalg.qr((J @ M @ J).T)
+        J = torch.tensor([[0, 0, 1], [0, 1, 0], [1, 0, 0]], device=device, dtype=dtype)
+        M_flip = J @ M @ J
+        Q_flip, R_qr_flip = torch.linalg.qr(M_flip.T)
         K = J @ R_qr_flip.T @ J
         R = J @ Q_flip.T @ J
 
         # 确保K对角元素为正
-        diag_signs = np.sign(np.diag(K))
-        K *= diag_signs[:, None]
-        R *= diag_signs[None, :]
+        diag_signs = torch.sign(torch.diag(K))
+        K = K * diag_signs.unsqueeze(1)
+        R = R * diag_signs.unsqueeze(0)
 
         # 提取t并归一化K
-        K_inv = np.linalg.inv(K)
+        K_inv = torch.linalg.inv(K)
         Rt = K_inv @ P
         t = Rt[:, 3]
         k_scale = K[2, 2]
-        if abs(k_scale) > 1e-8:
+        if abs(k_scale.item()) > 1e-8:
             K = K / k_scale
 
         # 提取内参
-        fx_est = K[0, 0]
-        fy_est = K[1, 1]
-        cx_est = K[0, 2] + width / 2.0
-        cy_est = K[1, 2] + height / 2.0
+        fx_est = K[0, 0].item()
+        fy_est = K[1, 1].item()
+        cx_est = (K[0, 2] + width / 2.0).item()
+        cy_est = (K[1, 2] + height / 2.0).item()
 
         # SVD正交化R
-        U, _, Vt_svd = np.linalg.svd(Rt[:, :3], full_matrices=False)
+        U, _, Vt_svd = torch.linalg.svd(Rt[:, :3], full_matrices=False)
         R = U @ Vt_svd
-        if np.linalg.det(R) < 0:
+        if torch.linalg.det(R) < 0:
             R = -R
 
         # 转换为相机参数（左手坐标系）
-        rot_tensor = -toTensor(R)
-        pos_tensor = -toTensor(R.T @ t)
+        rot_tensor = -R
+        pos_tensor = -(R.T @ t)
 
         return cls(
             width=width,
