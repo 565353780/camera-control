@@ -132,9 +132,15 @@ def visualize_with_open3d_animated(mesh, points_xyz, camera_base, n_frames=360):
             [0, 1, 0],
             [-sin_a, 0, cos_a]
         ])
+        R_z = np.array([
+            [cos_a, sin_a, 0],
+            [-sin_a, cos_a, 0],
+            [0, 0, 1]
+        ])
+        R = R_z @ R_y
 
         # 旋转后的forward方向
-        rotated_forward = R_y @ initial_forward
+        rotated_forward = R @ initial_forward
 
         # 计算look_at点（相机位置 + 旋转后的方向 * 距离）
         look_at_distance = 1.0  # 可以调整这个距离
@@ -197,7 +203,7 @@ def test():
     mesh_file_path = "/Users/chli/chLi/Dataset/Bunny/bunny/reconstruction/bun_zipper.ply"
     n_points = 10000
 
-    camera = Camera(pos=[-1, 0, 0], look_at=[0, 0, 0], up=[0, 1, 0])
+    camera = Camera(pos=[-1, 0, 0], look_at=[0, 0, 0], down=[0, 1, 0])
 
     mesh = o3d.io.read_triangle_mesh(mesh_file_path)
     print(f"原始网格顶点数: {len(mesh.vertices)}")

@@ -17,7 +17,7 @@ class Camera(CameraData):
         cy: float = 240.0,
         pos: Union[torch.Tensor, np.ndarray, list] = [0, 0, 0],
         look_at: Union[torch.Tensor, np.ndarray, list] = [1, 0, 0],
-        up: Union[torch.Tensor, np.ndarray, list] = [0, 1, 0],
+        down: Union[torch.Tensor, np.ndarray, list] = [0, 1, 0],
         rot: Union[torch.Tensor, np.ndarray, list, None] = None,
     ) -> None:
         CameraData.__init__(
@@ -30,7 +30,7 @@ class Camera(CameraData):
             cy,
             pos,
             look_at,
-            up,
+            down,
             rot,
         )
         return
@@ -166,7 +166,7 @@ class Camera(CameraData):
         if points.ndim == 1:
             points = points.unsqueeze(0)
 
-        points_camera = torch.matmul(points - self.pos, self.rot.T)
+        points_camera = torch.matmul(points - self.pos, self.rot)
 
         x, y, z = points_camera[..., 0], points_camera[..., 1], points_camera[..., 2]
 
