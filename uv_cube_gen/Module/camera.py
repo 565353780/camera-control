@@ -139,11 +139,12 @@ class Camera(CameraData):
         # SVD正交化R
         U, _, Vt_svd = torch.linalg.svd(Rt[:, :3], full_matrices=False)
         R = U @ Vt_svd
+
+        pos_tensor = -(R.T @ t)
+
         if torch.linalg.det(R) < 0:
             R = -R
-
-        rot_tensor = R
-        pos_tensor = -(R.T @ t)
+        rot_tensor = R.T
 
         return cls(
             width=width,
@@ -152,8 +153,8 @@ class Camera(CameraData):
             fy=fy_est,
             cx=cx_est,
             cy=cy_est,
-            pos=-pos_tensor,
-            rot=-rot_tensor,
+            pos=pos_tensor,
+            rot=rot_tensor,
         )
 
     def project_points_to_uv(
