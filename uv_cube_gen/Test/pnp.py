@@ -27,9 +27,9 @@ def sample_points_in_front_of_camera(camera, n_points=100, distance_range=(1.0, 
     # 获取相机坐标系基向量
     forward = camera.rot[:, 2].numpy()  # 前向方向（Z轴）
     right = camera.rot[:, 0].numpy()    # 右方向（X轴）
-    up = camera.rot[:, 1].numpy()       # 上方向（Y轴）
+    down = camera.rot[:, 1].numpy()       # 下方向（Y轴）
     pos = camera.pos.numpy()
-    
+
     # 在相机坐标系中直接生成点（向量化操作）
     # 随机距离
     distances = np.random.uniform(distance_range[0], distance_range[1], n_points)
@@ -37,21 +37,21 @@ def sample_points_in_front_of_camera(camera, n_points=100, distance_range=(1.0, 
     angles_x = np.random.uniform(fov_range[0], fov_range[1], n_points)
     # 随机垂直角度（相对于前向）
     angles_y = np.random.uniform(fov_range[0], fov_range[1], n_points)
-    
+
     # 计算点在相机坐标系中的偏移
     # 使用tan计算横向和纵向偏移
     offsets_x = np.tan(angles_x) * distances  # 右方向偏移
     offsets_y = np.tan(angles_y) * distances   # 上方向偏移
-    
+
     # 批量转换到世界坐标系（向量化）
-    # 每个点 = pos + offset_x * right + offset_y * up + distance * forward
+    # 每个点 = pos + offset_x * right + offset_y * down + distance * forward
     points_world = (
         pos + 
         offsets_x[:, np.newaxis] * right + 
-        offsets_y[:, np.newaxis] * up + 
+        offsets_y[:, np.newaxis] * down + 
         distances[:, np.newaxis] * forward
     )
-    
+
     return points_world
 
 
@@ -108,20 +108,20 @@ def test():
         if estimated_camera is None:
             print(f"  警告: 相机 {i+1} 求解失败!")
             continue
-        
+
         estimated_cameras.append((estimated_camera, i))
-        
+
         # 保存点云数据用于可视化
         camera_data.append((points, valid_points.numpy(), i))
-        
+
         # 计算误差
         pos_error = torch.norm(estimated_camera.pos - camera.pos).item()
         rot_error = torch.norm(estimated_camera.rot - camera.rot).item()
         print(f"  位置误差: {pos_error:.6f}")
         print(f"  旋转误差: {rot_error:.6f}")
-    
+
     print(f"\n成功求解 {len(estimated_cameras)}/{N} 个相机")
-    
+
     # 使用Open3D可视化
     print("\n创建可视化...")
     geometries = []
@@ -132,7 +132,7 @@ def test():
         cam_pos = camera.pos.numpy()
         
         # 添加当前相机（绿色）
-        mesh = camera.toO3DMesh(far=2.0, color=[0, 1, 0])
+        mesh = camera.toO3DMesh(far=1.0, color=[0, 1, 0])
         geometries.append(mesh)
         
         # 添加所有采样点云（浅灰色）
@@ -157,7 +157,7 @@ def test():
     # 添加估计的相机（蓝色）和连接线（红色）
     for estimated_camera, orig_idx in estimated_cameras:
         # 添加估计的相机
-        est_mesh = estimated_camera.toO3DMesh(far=2.0, color=[0, 0, 1])
+        est_mesh = estimated_camera.toO3DMesh(far=1.0, color=[0, 0, 1])
         geometries.append(est_mesh)
         
         # 添加连接线（红色），显示位置误差
