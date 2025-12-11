@@ -1,5 +1,7 @@
+import torch
 import numpy as np
 import open3d as o3d
+from typing import Union
 
 
 def create_coordinate_frame(origin=np.array([0, 0, 0]), size=0.2):
@@ -34,3 +36,16 @@ def create_coordinate_frame(origin=np.array([0, 0, 0]), size=0.2):
     ])
 
     return lines
+
+def toPcd(points: Union[torch.Tensor, np.ndarray, list]) -> o3d.geometry.PointCloud:
+    if isinstance(points, list):
+        points = np.asarray(points)
+    if isinstance(points, torch.Tensor):
+        points = points.detach().cpu().numpy()
+
+    points = points.astype(np.float64)
+
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
+
+    return pcd

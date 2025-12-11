@@ -2,6 +2,7 @@ import torch
 import numpy as np
 import open3d as o3d
 
+from uv_cube_gen.Method.render import toPcd
 from uv_cube_gen.Module.camera import Camera
 
 
@@ -86,18 +87,22 @@ def test():
 
         # 计算UV坐标
         uv = camera.project_points_to_uv(points_tensor)
-        
+
         # 过滤有效点
         valid_mask = ~torch.isnan(uv[:, 0])
         valid_points = points_tensor[valid_mask]
         valid_uv = uv[valid_mask]
-        
+
         print(f"  有效点数: {len(valid_points)}/{n_points}")
-        
+
         if len(valid_points) < 6:
             print(f"  警告: 相机 {i+1} 有效点不足，跳过求解")
+
+            camera_mesh = camera.toO3DMesh()
+            pcd = toPcd(points)
+            o3d.visualization.draw_geometries([camera_mesh, pcd])
             continue
-        
+
         # 使用fromUVPoints求解相机参数
         estimated_camera = Camera.fromUVPoints(valid_points, valid_uv, width=camera.width, height=camera.height)
         if estimated_camera is None:
