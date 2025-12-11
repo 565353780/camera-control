@@ -9,7 +9,7 @@ def test():
     mesh_file_path = "/Users/chli/chLi/Dataset/Bunny/bunny/reconstruction/bun_zipper.ply"
     n_points = 100
 
-    camera = Camera(pos=[-1, 2, 3], look_at=[1, -2, 3], up=[0, 1, 0])
+    camera = Camera(pos=[-10, 2, 3], look_at=[1, -2, 3], up=[0, 1, 0])
 
     mesh = o3d.io.read_triangle_mesh(mesh_file_path)
     print(f"原始网格顶点数: {len(mesh.vertices)}")
