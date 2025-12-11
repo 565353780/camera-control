@@ -69,136 +69,85 @@ class Camera(CameraData):
         uv_np = uv.detach().cpu().numpy()
 
         # Hartley归一化：提高数值稳定性
-        # 1. 归一化3D点
+        # 归一化3D点
         points_mean = points_np.mean(axis=0)
         points_centered = points_np - points_mean
-        points_scale = np.sqrt((points_centered ** 2).sum(axis=1).mean()) / np.sqrt(3.0)
-        if points_scale < 1e-8:
-            points_scale = 1.0
-        T_3d = np.eye(4)
-        T_3d[:3, :3] = np.eye(3) / points_scale
-        T_3d[:3, 3] = -points_mean / points_scale
-        points_norm = (points_np - points_mean) / points_scale
-
-        # 2. 归一化2D点（UV坐标，范围[0,1]^2，相机中心为0）
-        # UV坐标已经是归一化的，但我们需要转换为像素坐标进行归一化
-        # u_pixel = u * width, v_pixel = v * height（相对于相机中心的像素坐标）
-        u_pixel = uv_np[:, 0] * width
-        v_pixel = uv_np[:, 1] * height
-        image_points = np.stack([u_pixel, v_pixel], axis=1)
+        points_scale = max(np.sqrt((points_centered ** 2).sum(axis=1).mean()) / np.sqrt(3.0), 1e-8)
+        points_norm = points_centered / points_scale
+        
+        # 归一化2D点（UV坐标转换为像素坐标）
+        image_points = uv_np * np.array([width, height])
         image_mean = image_points.mean(axis=0)
         image_centered = image_points - image_mean
-        image_scale = np.sqrt((image_centered ** 2).sum(axis=1).mean()) / np.sqrt(2.0)
-        if image_scale < 1e-8:
-            image_scale = 1.0
-        T_2d = np.eye(3)
-        T_2d[:2, :2] = np.eye(2) / image_scale
-        T_2d[:2, 2] = -image_mean / image_scale
-        image_points_norm = (image_points - image_mean) / image_scale
+        image_scale = max(np.sqrt((image_centered ** 2).sum(axis=1).mean()) / np.sqrt(2.0), 1e-8)
+        image_points_norm = image_centered / image_scale
 
-        # 使用DLT算法（最小二乘）求解投影矩阵P
-        # 投影方程: s * [u_norm, v_norm, 1]^T = P * [X, Y, Z, 1]^T
-        # 其中(u_norm, v_norm)是归一化后的图像坐标
+        # 向量化构建DLT矩阵A
+        X, Y, Z = points_norm.T
+        u, v = image_points_norm.T
+        ones = np.ones(n_points)
+        
         A = np.zeros((2 * n_points, 12))
-        for i in range(n_points):
-            X, Y, Z = points_norm[i]
-            u, v = image_points_norm[i]
+        A[0::2, 0:4] = np.column_stack([X, Y, Z, ones])
+        A[0::2, 8:12] = np.column_stack([-u * X, -u * Y, -u * Z, -u])
+        A[1::2, 4:8] = np.column_stack([X, Y, Z, ones])
+        A[1::2, 8:12] = np.column_stack([-v * X, -v * Y, -v * Z, -v])
 
-            # 第一个方程: u * (p31*X + p32*Y + p33*Z + p34) = p11*X + p12*Y + p13*Z + p14
-            A[2*i, 0] = X
-            A[2*i, 1] = Y
-            A[2*i, 2] = Z
-            A[2*i, 3] = 1
-            A[2*i, 8] = -u * X
-            A[2*i, 9] = -u * Y
-            A[2*i, 10] = -u * Z
-            A[2*i, 11] = -u
-
-            # 第二个方程: v * (p31*X + p32*Y + p33*Z + p34) = p21*X + p22*Y + p23*Z + p24
-            A[2*i+1, 4] = X
-            A[2*i+1, 5] = Y
-            A[2*i+1, 6] = Z
-            A[2*i+1, 7] = 1
-            A[2*i+1, 8] = -v * X
-            A[2*i+1, 9] = -v * Y
-            A[2*i+1, 10] = -v * Z
-            A[2*i+1, 11] = -v
-
-        # 使用SVD求解最小二乘问题：P* = arg min ||A * vec(P)||^2
-        _, _, Vt = np.linalg.svd(A)
+        # SVD求解投影矩阵
+        _, _, Vt = np.linalg.svd(A, full_matrices=False)
         P_norm = Vt[-1].reshape(3, 4)
 
-        # 反归一化：P = T_2d^{-1} * P_norm * T_3d
-        T_2d_inv = np.linalg.inv(T_2d)
+        # 反归一化
+        inv_points_scale = 1.0 / points_scale
+        T_3d = np.eye(4)
+        T_3d[:3, :3] *= inv_points_scale
+        T_3d[:3, 3] = -points_mean * inv_points_scale
+        
+        T_2d_inv = np.eye(3)
+        T_2d_inv[:2, :2] *= image_scale
+        T_2d_inv[:2, 2] = image_mean
+        
         P = T_2d_inv @ P_norm @ T_3d
 
-        # RQ分解：将P分解为K和[R|t]
-        # P = K[R|t]，其中K是内参矩阵（上三角），R是旋转矩阵，t是平移向量
-        # 提取P的前3列：M = P[:, :3] = K @ R
+        # RQ分解：P = K[R|t]，提取K和[R|t]
         M = P[:, :3]
+        
+        # RQ分解：M = K @ R（使用翻转技巧）
+        J = np.array([[0, 0, 1], [0, 1, 0], [1, 0, 0]], dtype=np.float32)
+        Q_flip, R_qr_flip = np.linalg.qr((J @ M @ J).T)
+        K = J @ R_qr_flip.T @ J
+        R = J @ Q_flip.T @ J
 
-        # RQ分解：M = K @ R，其中K是上三角矩阵，R是正交矩阵
-        # 使用翻转技巧实现RQ分解
-        # 创建翻转矩阵J（上下翻转然后左右翻转）
-        J = np.array([[0, 0, 1], [0, 1, 0], [1, 0, 0]])
-        M_flip = J @ M @ J
-        # 对M_flip^T做QR分解
-        Q_flip, R_qr_flip = np.linalg.qr(M_flip.T)
-        # M_flip = R_qr_flip^T @ Q_flip^T = K_flip @ R_flip
-        K_flip = R_qr_flip.T  # 下三角
-        R_flip = Q_flip.T     # 正交
-        # 翻转回来得到上三角K和正交R
-        K = J @ K_flip @ J
-        R = J @ R_flip @ J
+        # 确保K对角元素为正
+        diag_signs = np.sign(np.diag(K))
+        K *= diag_signs[:, None]
+        R *= diag_signs[None, :]
 
-        # 确保K的对角元素为正（内参矩阵的焦距应该为正）
-        # 同时调整R以保持M = K @ R的关系
-        for i in range(3):
-            if K[i, i] < 0:
-                K[:, i] = -K[:, i]
-                R[i, :] = -R[i, :]
-
-        # 在归一化K之前，先从P提取平移向量t（保持原始尺度）
-        # P = K[R|t]，所以 [R|t] = K^{-1} @ P
+        # 提取t并归一化K
         K_inv = np.linalg.inv(K)
         Rt = K_inv @ P
-        R_extracted = Rt[:, :3]
         t = Rt[:, 3]
-        
-        # 归一化K，使K[2,2] = 1
-        # 注意：归一化K不会影响R和t，因为它们已经从P中提取出来了
         k_scale = K[2, 2]
         if abs(k_scale) > 1e-8:
             K = K / k_scale
 
-        # 从K提取内参
-        # K = [[fx, s, cx_offset], [0, fy, cy_offset], [0, 0, 1]]
-        # 其中cx_offset和cy_offset是相对于相机中心的偏移（像素单位）
+        # 提取内参
         fx_est = K[0, 0]
         fy_est = K[1, 1]
-        cx_offset = K[0, 2]  # 相对于相机中心的x偏移（像素）
-        cy_offset = K[1, 2]  # 相对于相机中心的y偏移（像素）
-        # 转换为相对于图像左上角的像素坐标
-        cx_est = cx_offset + width / 2.0
-        cy_est = cy_offset + height / 2.0
+        cx_est = K[0, 2] + width / 2.0
+        cy_est = K[1, 2] + height / 2.0
 
-        # 使用从Rt提取的R（更准确），并进行SVD正交化以确保是有效的旋转矩阵
-        U, _, Vt_svd = np.linalg.svd(R_extracted)
+        # SVD正交化R
+        U, _, Vt_svd = np.linalg.svd(Rt[:, :3], full_matrices=False)
         R = U @ Vt_svd
-
-        # 确保行列式为1（右手坐标系）
         if np.linalg.det(R) < 0:
             R = -R
 
-        rot_cam = R
-        pos_cam = -R.T @ t
+        # 转换为相机参数（左手坐标系）
+        rot_tensor = -toTensor(R)
+        pos_tensor = -toTensor(R.T @ t)
 
-        # FIXME: left hand coords as default
-        rot_tensor = -toTensor(rot_cam)
-        pos_tensor = -toTensor(pos_cam)
-
-        # 创建相机对象（使用从K提取的内参）
-        camera = cls(
+        return cls(
             width=width,
             height=height,
             fx=fx_est,
@@ -208,8 +157,6 @@ class Camera(CameraData):
             pos=pos_tensor,
             rot=rot_tensor,
         )
-
-        return camera
 
     def project_points_to_uv(
         self,
