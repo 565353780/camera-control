@@ -138,6 +138,7 @@ def visualize_with_open3d_animated(mesh, points_xyz, camera_base, n_frames=360):
             [0, 0, 1]
         ])
         R = R_z @ R_y
+        R = R_z
 
         # 旋转后的forward方向
         rotated_forward = R @ initial_forward
@@ -203,7 +204,7 @@ def test():
     mesh_file_path = "/Users/chli/chLi/Dataset/Bunny/bunny/reconstruction/bun_zipper.ply"
     n_points = 10000
 
-    camera = Camera(pos=[-1, 0, 0], look_at=[0, 0, 0], down=[0, 1, 0])
+    camera = Camera(pos=[-1, 0, 0], look_at=[0, 0, 0], up=[0, 0, 1])
 
     mesh = o3d.io.read_triangle_mesh(mesh_file_path)
     print(f"原始网格顶点数: {len(mesh.vertices)}")

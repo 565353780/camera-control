@@ -17,7 +17,7 @@ class CameraData(object):
         cy: float = 240.0,
         pos: Union[torch.Tensor, np.ndarray, list] = [0, 0, 0],
         look_at: Union[torch.Tensor, np.ndarray, list] = [1, 0, 0],
-        down: Union[torch.Tensor, np.ndarray, list] = [0, 1, 0],
+        up: Union[torch.Tensor, np.ndarray, list] = [0, 0, 1],
         rot: Union[torch.Tensor, np.ndarray, list, None] = None,
     ) -> None:
         self.width = width
@@ -32,7 +32,7 @@ class CameraData(object):
         if rot is not None:
             self.rot = toTensor(rot)
         else:
-            self.setPoseByLookAt(look_at, down)
+            self.setPoseByLookAt(look_at, up)
         return
 
     def clone(self):
@@ -41,11 +41,11 @@ class CameraData(object):
     def setPoseByLookAt(
         self,
         look_at: Union[torch.Tensor, np.ndarray, list],
-        down: Union[torch.Tensor, np.ndarray, list] = [0, 1, 0],
+        up: Union[torch.Tensor, np.ndarray, list] = [0, 0, 1],
         pos: Union[torch.Tensor, np.ndarray, list, None] = None,
     ) -> bool:
         look_at = toTensor(look_at)
-        down = toTensor(down)
+        up = toTensor(up)
 
         if pos is not None:
             pos = toTensor(pos)
@@ -55,24 +55,24 @@ class CameraData(object):
         # 确保所有向量都是1D tensor
         if look_at.ndim > 1:
             look_at = look_at.flatten()
-        if down.ndim > 1:
-            down = down.flatten()
+        if up.ndim > 1:
+            up = up.flatten()
         if pos.ndim > 1:
             pos = pos.flatten()
 
         forward = look_at - pos
         forward = forward / (torch.linalg.norm(forward) + 1e-8)
 
-        down = down - torch.dot(down, forward) * forward
-        down = down / (torch.linalg.norm(down) + 1e-8)
+        up = up - torch.dot(up, forward) * forward
+        up = up / (torch.linalg.norm(up) + 1e-8)
 
-        right = torch.linalg.cross(down, forward)
+        right = torch.linalg.cross(forward, up)
         right = right / (torch.linalg.norm(right) + 1e-8)
 
-        down_refined = torch.linalg.cross(forward, right)
-        down_refined = down_refined / (torch.linalg.norm(down_refined) + 1e-8)
+        down = torch.linalg.cross(forward, right)
+        down = down / (torch.linalg.norm(down) + 1e-8)
 
-        rot = torch.stack([right, down_refined, forward], dim=1)
+        rot = torch.stack([right, down, forward], dim=1)
 
         self.pos = pos
         self.rot = rot

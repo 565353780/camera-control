@@ -17,7 +17,7 @@ class Camera(CameraData):
         cy: float = 240.0,
         pos: Union[torch.Tensor, np.ndarray, list] = [0, 0, 0],
         look_at: Union[torch.Tensor, np.ndarray, list] = [1, 0, 0],
-        down: Union[torch.Tensor, np.ndarray, list] = [0, 1, 0],
+        up: Union[torch.Tensor, np.ndarray, list] = [0, 0, 1],
         rot: Union[torch.Tensor, np.ndarray, list, None] = None,
     ) -> None:
         CameraData.__init__(
@@ -30,7 +30,7 @@ class Camera(CameraData):
             cy,
             pos,
             look_at,
-            down,
+            up,
             rot,
         )
         return
@@ -142,7 +142,6 @@ class Camera(CameraData):
         if torch.linalg.det(R) < 0:
             R = -R
 
-        # 转换为相机参数（左手坐标系）
         rot_tensor = R
         pos_tensor = -(R.T @ t)
 
