@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+import open3d as o3d
 from typing import Union
 from copy import deepcopy
 
@@ -77,6 +78,38 @@ class CameraData(object):
         self.pos = pos
         self.rot = rot
         return True
+
+    def toO3DMesh(
+        self,
+        far: float=1.0,
+        color: list=[0, 1, 0],
+    ) -> o3d.geometry.TriangleMesh:
+        half_width = (self.width / self.fx) * far
+        half_height = (self.height / self.fy) * far
+
+        far_corners = np.array([
+            [-half_width, -half_height, far],
+            [half_width, -half_height, far],
+            [half_width, half_height, far],
+            [-half_width, half_height, far],
+        ])
+
+        pos = self.pos.numpy()
+        far_corners_world = far_corners @ self.rot.numpy().T + pos
+
+        vertices = np.vstack([far_corners_world, pos.reshape(1, 3)])
+
+        lines = np.array([
+            [0, 1], [1, 2], [2, 3], [3, 0],
+            [4, 0], [4, 1], [4, 2], [4, 3],
+        ], dtype=np.int64)
+
+        frustum = o3d.geometry.LineSet()
+        frustum.points = o3d.utility.Vector3dVector(vertices)
+        frustum.lines = o3d.utility.Vector2iVector(lines)
+        frustum.paint_uniform_color(color)
+
+        return frustum
 
     def outputInfo(
         self,

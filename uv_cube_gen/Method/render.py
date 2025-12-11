@@ -49,3 +49,80 @@ def toPcd(points: Union[torch.Tensor, np.ndarray, list]) -> o3d.geometry.PointCl
     pcd.points = o3d.utility.Vector3dVector(points)
 
     return pcd
+
+def create_line_set(
+    start_pos: Union[torch.Tensor, np.ndarray, list],
+    end_pos: Union[torch.Tensor, np.ndarray, list],
+    color=[1, 0, 0],
+) -> o3d.geometry.LineSet:
+    """
+    创建线段集合
+    
+    Args:
+        start_pos: 起点位置，可以是单个点(3或1x3)或多个点(Nx3)
+        end_pos: 终点位置，可以是单个点(3或1x3)或多个点(Nx3)
+        color: 线段颜色，默认红色
+    
+    支持的4种情况：
+        1. 单点到单点：一条线段
+        2. 单点到多点：从单个起点到多个终点，多条线段
+        3. 多点到单点：从多个起点到单个终点，多条线段
+        4. 相同数量的起点和终点：逐点连线，N条线段
+    
+    Returns:
+        line_set: LineSet对象
+    """
+    # 转换为numpy数组
+    def to_numpy(x):
+        if isinstance(x, list):
+            x = np.asarray(x)
+        if isinstance(x, torch.Tensor):
+            x = x.detach().cpu().numpy()
+        return np.asarray(x, dtype=np.float64)
+    
+    start_pos = to_numpy(start_pos)
+    end_pos = to_numpy(end_pos)
+    
+    # 规范化形状：确保是 Nx3 格式
+    if start_pos.ndim == 1:
+        start_pos = start_pos.reshape(1, 3)
+    elif start_pos.ndim == 2 and start_pos.shape[1] != 3:
+        raise ValueError(f"start_pos的形状不正确，期望为(N, 3)，得到{start_pos.shape}")
+    
+    if end_pos.ndim == 1:
+        end_pos = end_pos.reshape(1, 3)
+    elif end_pos.ndim == 2 and end_pos.shape[1] != 3:
+        raise ValueError(f"end_pos的形状不正确，期望为(N, 3)，得到{end_pos.shape}")
+    
+    num_start = start_pos.shape[0]
+    num_end = end_pos.shape[0]
+    
+    # 判断并处理4种情况
+    if num_start == 1 and num_end == 1:
+        # 情况1：单点到单点
+        points = np.vstack([start_pos, end_pos])
+        lines = np.array([[0, 1]])
+    elif num_start == 1 and num_end > 1:
+        # 情况2：单点到多点
+        points = np.vstack([start_pos, end_pos])
+        lines = np.array([[0, i+1] for i in range(num_end)])
+    elif num_start > 1 and num_end == 1:
+        # 情况3：多点到单点
+        points = np.vstack([start_pos, end_pos])
+        end_idx = num_start  # 终点的索引
+        lines = np.array([[i, end_idx] for i in range(num_start)])
+    elif num_start == num_end:
+        # 情况4：相同数量的起点和终点，逐点连线
+        points = np.vstack([start_pos, end_pos])
+        lines = np.array([[i, i + num_start] for i in range(num_start)])
+    else:
+        raise ValueError(
+            f"不支持的输入形状组合：start_pos有{num_start}个点，end_pos有{num_end}个点。"
+            f"仅支持：1-1, 1-N, N-1, 或 N-N（N相同）"
+        )
+    
+    line_set = o3d.geometry.LineSet()
+    line_set.points = o3d.utility.Vector3dVector(points)
+    line_set.lines = o3d.utility.Vector2iVector(lines)
+    line_set.paint_uniform_color(color)
+    return line_set

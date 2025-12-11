@@ -1,6 +1,5 @@
 import torch
 import numpy as np
-import open3d as o3d
 from typing import Union
 
 from uv_cube_gen.Data.camera import CameraData
@@ -184,41 +183,3 @@ class Camera(CameraData):
         uv = torch.stack([u, v], dim=-1)
 
         return uv
-
-    def toO3DMesh(
-        self,
-        far: float=0.1,
-        color: list=[0, 1, 0],
-    ) -> o3d.geometry.TriangleMesh:
-        half_width = (self.width / self.fx) * far
-        half_height = (self.height / self.fy) * far
-
-        far_corners = np.array([
-            [-half_width, half_height, far],
-            [half_width, half_height, far],
-            [half_width, -half_height, far],
-            [-half_width, -half_height, far],
-        ])
-
-        pos = self.pos.numpy()
-        far_corners_world = (self.rot.numpy() @ far_corners.T).T + pos
-
-        vertices = np.vstack([far_corners_world, pos.reshape(1, 3)])
-
-        triangles = []
-
-        triangles.append([0, 2, 1])
-        triangles.append([0, 3, 2])
-
-        triangles.append([4, 0, 1])
-        triangles.append([4, 1, 2])
-        triangles.append([4, 2, 3])
-        triangles.append([4, 3, 0])
-
-        frustum = o3d.geometry.TriangleMesh()
-        frustum.vertices = o3d.utility.Vector3dVector(vertices)
-        frustum.triangles = o3d.utility.Vector3iVector(triangles)
-        frustum.paint_uniform_color(color)
-        frustum.compute_vertex_normals()
-
-        return frustum
