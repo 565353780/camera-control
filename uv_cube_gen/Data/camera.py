@@ -75,26 +75,21 @@ class CameraData(object):
         self.rot = rot
         return True
 
-    def getLookAt(self) -> Tuple[torch.Tensor, torch.Tensor]:
-        forward = self.rot[:, 2]
-        up = self.rot[:, 1]
-
-        look_at = self.pos + forward
-
-        return look_at, up
-
     def outputInfo(
         self,
         info_level: int = 0,
     ) -> bool:
         line_start = '\t' * info_level
 
-        look_at, up = self.getLookAt()
+        right = self.rot[:, 0]
+        up = self.rot[:, 1]
+        forward = self.rot[:, 2]
 
         print(line_start + '[INFO][CameraData]')
         print(line_start + '\t image_size: [', self.width, ',', self.height, ']')
         print(line_start + '\t focal: [', self.fx, ',', self.fy, ',', self.cx, ',', self.cy, ']')
         print(line_start + '\t pos:', self.pos.numpy().tolist())
-        print(line_start + '\t look_at:', look_at.numpy().tolist())
+        print(line_start + '\t forward:', forward.numpy().tolist())
         print(line_start + '\t up:', up.numpy().tolist())
+        print(line_start + '\t right:', right.numpy().tolist())
         return True
