@@ -143,7 +143,7 @@ class Camera(CameraData):
             R = -R
 
         # 转换为相机参数（左手坐标系）
-        rot_tensor = -R
+        rot_tensor = R
         pos_tensor = -(R.T @ t)
 
         return cls(
@@ -153,8 +153,8 @@ class Camera(CameraData):
             fy=fy_est,
             cx=cx_est,
             cy=cy_est,
-            pos=pos_tensor,
-            rot=rot_tensor,
+            pos=-pos_tensor,
+            rot=-rot_tensor,
         )
 
     def project_points_to_uv(

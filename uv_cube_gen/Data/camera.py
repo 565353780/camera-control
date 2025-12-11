@@ -1,7 +1,7 @@
 import torch
 import numpy as np
+from typing import Union
 from copy import deepcopy
-from typing import Union, Tuple
 
 from uv_cube_gen.Method.data import toTensor
 
