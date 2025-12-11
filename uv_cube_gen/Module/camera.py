@@ -69,7 +69,7 @@ class Camera(CameraData):
         points_scale = (points_centered ** 2).sum(dim=1).mean() / 3.0
         points_scale = torch.clamp(torch.sqrt(points_scale), min=1e-8)
         points_norm = points_centered / points_scale
-        
+
         # 归一化2D点（UV坐标转换为像素坐标）
         scale_2d = torch.tensor([width, height], device=device, dtype=dtype)
         image_points = uv * scale_2d
@@ -83,7 +83,7 @@ class Camera(CameraData):
         X, Y, Z = points_norm.T
         u, v = image_points_norm.T
         ones = torch.ones(n_points, device=device, dtype=dtype)
-        
+
         A = torch.zeros(2 * n_points, 12, device=device, dtype=dtype)
         A[0::2, 0:4] = torch.stack([X, Y, Z, ones], dim=1)
         A[0::2, 8:12] = torch.stack([-u * X, -u * Y, -u * Z, -u], dim=1)
@@ -99,16 +99,16 @@ class Camera(CameraData):
         T_3d = torch.eye(4, device=device, dtype=dtype)
         T_3d[:3, :3] *= inv_points_scale
         T_3d[:3, 3] = -points_mean * inv_points_scale
-        
+
         T_2d_inv = torch.eye(3, device=device, dtype=dtype)
         T_2d_inv[:2, :2] *= image_scale
         T_2d_inv[:2, 2] = image_mean
-        
+
         P = T_2d_inv @ P_norm @ T_3d
 
         # RQ分解：P = K[R|t]，提取K和[R|t]
         M = P[:, :3]
-        
+
         # RQ分解：M = K @ R（使用翻转技巧）
         J = torch.tensor([[0, 0, 1], [0, 1, 0], [1, 0, 0]], device=device, dtype=dtype)
         M_flip = J @ M @ J

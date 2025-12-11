@@ -8,7 +8,7 @@ from uv_cube_gen.Module.camera import Camera
 
 
 def demo():
-    n_points = 100
+    n_points = 100000
 
     pos = np.random.randn(3) * 5.0
     # 随机看向的方向（在相机前方）
@@ -19,8 +19,11 @@ def demo():
 
     camera = Camera(pos=pos, look_at=look_at, up=up)
 
-    points = sample_points_in_front_of_camera(camera, n_points)
+    points = sample_points_in_front_of_camera(camera, n_points, distance_range=(2, 4))
     uv = camera.project_points_to_uv(points)
+
+    noise = 0.3 * (torch.rand_like(uv) - 0.5) * 2
+    uv += noise
 
     estimated_camera = Camera.fromUVPoints(
         points,
@@ -43,7 +46,12 @@ def demo():
 
     lineset = create_line_set(camera.pos, valid_points, color=[0, 1, 1])
     geometry_list.append(lineset)
- 
+
+    camera.outputInfo()
+    estimated_camera.outputInfo()
+
+    print(camera.pos - estimated_camera.pos)
+    print(camera.rot - estimated_camera.rot)
 
     geometry_list += [
         camera.toO3DMesh(far=1.0, color=[0, 1, 0]),
