@@ -2,8 +2,8 @@ import torch
 import numpy as np
 from typing import Union
 
-from uv_cube_gen.Data.camera import CameraData
-from uv_cube_gen.Method.data import toTensor
+from camera_control.Data.camera import CameraData
+from camera_control.Method.data import toTensor
 
 class Camera(CameraData):
     def __init__(

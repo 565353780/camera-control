@@ -4,7 +4,7 @@ import open3d as o3d
 from typing import Union
 from copy import deepcopy
 
-from uv_cube_gen.Method.data import toTensor
+from camera_control.Method.data import toTensor
 
 
 class CameraData(object):
@@ -83,7 +83,7 @@ class CameraData(object):
         self,
         far: float=1.0,
         color: list=[0, 1, 0],
-    ) -> o3d.geometry.TriangleMesh:
+    ) -> o3d.geometry.LineSet:
         half_width = (self.width / self.fx) * far
         half_height = (self.height / self.fy) * far
 

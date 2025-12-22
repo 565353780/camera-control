@@ -3,10 +3,10 @@ import torch
 import numpy as np
 import open3d as o3d
 
-from uv_cube_gen.Method.mesh import normalize_mesh, sample_points_from_mesh
-from uv_cube_gen.Method.data import toTensor
-from uv_cube_gen.Method.render import create_coordinate_frame
-from uv_cube_gen.Module.camera import Camera
+from camera_control.Method.mesh import normalize_mesh, sample_points_from_mesh
+from camera_control.Method.data import toTensor
+from camera_control.Method.render import create_coordinate_frame
+from camera_control.Module.camera import Camera
 
 
 def visualize_with_open3d_animated(mesh, points_xyz, camera_base, n_frames=360):
@@ -157,9 +157,8 @@ def visualize_with_open3d_animated(mesh, points_xyz, camera_base, n_frames=360):
 
         # 更新相机视锥体
         new_frustum = vis_camera.toO3DMesh()
-        camera_frustum.vertices = new_frustum.vertices
-        camera_frustum.triangles = new_frustum.triangles
-        camera_frustum.compute_vertex_normals()
+        camera_frustum.points = new_frustum.points
+        camera_frustum.lines = new_frustum.lines
         vis.update_geometry(camera_frustum)
 
         # 更新图像平面

@@ -2,9 +2,9 @@ import torch
 import numpy as np
 import open3d as o3d
 
-from uv_cube_gen.Method.random_sample import sample_points_in_front_of_camera
-from uv_cube_gen.Method.render import create_line_set
-from uv_cube_gen.Module.camera import Camera
+from camera_control.Method.random_sample import sample_points_in_front_of_camera
+from camera_control.Method.render import create_line_set
+from camera_control.Module.camera import Camera
 
 
 def demo():

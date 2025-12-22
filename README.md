@@ -1,10 +1,10 @@
-# UV Cube Gen
+# Camera Control
 
 ## Setup
 
 ```bash
-conda create -n uv python=3.11
-conda activate uv
+conda create -n camera python=3.11
+conda activate camera
 ./setup.sh
 ```
 

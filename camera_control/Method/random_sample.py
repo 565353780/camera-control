@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 
-from uv_cube_gen.Method.data import toTensor
+from camera_control.Method.data import toTensor
 
 
 def sample_points_in_front_of_camera(
