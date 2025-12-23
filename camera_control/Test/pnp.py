@@ -8,7 +8,14 @@ from camera_control.Module.camera import Camera
 
 
 def create_random_camera(seed=None):
-    """创建随机相机"""
+    """
+    创建随机相机
+    
+    相机坐标系定义：
+    - X轴：向右
+    - Y轴：向上
+    - Z轴：向后（相机看向 -Z 方向）
+    """
     if seed is not None:
         np.random.seed(seed)
 
@@ -24,6 +31,22 @@ def create_random_camera(seed=None):
 
 
 def test():
+    """
+    测试PnP求解算法
+    
+    通过随机生成相机和3D点，投影到UV坐标，然后使用fromUVPoints恢复相机参数，
+    计算恢复的相机与原始相机之间的误差。
+    
+    相机坐标系定义：
+    - X轴：向右
+    - Y轴：向上
+    - Z轴：向后（相机看向 -Z 方向）
+    
+    UV坐标系定义：
+    - 原点在 (0, 0) 左下角
+    - u沿X轴（向右）
+    - v沿Y轴（向上）
+    """
     N = 5  # 相机数量
     n_points = 100  # 每个相机采样的点数
 
@@ -59,6 +82,14 @@ def test():
             o3d.visualization.draw_geometries([camera_mesh, pcd])
             continue
 
+        # #region agent log
+        try:
+            import json, time
+            with open('/Users/chli/github/MATCH/.cursor/debug.log','a') as f:
+                f.write(json.dumps({'location':'pnp.py:85','message':'原始相机参数','data':{'camera_id':i,'fx':camera.fx,'fy':camera.fy,'cx':camera.cx,'cy':camera.cy,'pos':camera.pos.tolist(),'rot_det':float(torch.linalg.det(camera.rot))},'timestamp':time.time()*1000,'sessionId':'debug-session','hypothesisId':'ALL'})+'\n')
+        except: pass
+        # #endregion
+        
         # 使用fromUVPoints求解相机参数
         estimated_camera = Camera.fromUVPoints(valid_points, valid_uv, width=camera.width, height=camera.height)
         if estimated_camera is None:
@@ -73,8 +104,14 @@ def test():
         # 计算误差
         pos_error = torch.norm(estimated_camera.pos - camera.pos).item()
         rot_error = torch.norm(estimated_camera.rot - camera.rot).item()
+        
+        # 计算重投影误差
+        uv_reprojected = estimated_camera.project_points_to_uv(valid_points)
+        reproj_error = torch.linalg.norm(valid_uv - uv_reprojected, dim=1).mean().item()
+        
         print(f"  位置误差: {pos_error:.6f}")
-        print(f"  旋转误差: {rot_error:.6f}")
+        print(f"  旋转矩阵误差 (Frobenius范数): {rot_error:.6f}")
+        print(f"  重投影误差: {reproj_error:.6f}")
 
     print(f"\n成功求解 {len(estimated_cameras)}/{N} 个相机")
 

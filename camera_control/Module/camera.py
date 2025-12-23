@@ -17,7 +17,7 @@ class Camera(CameraData):
         pos: Union[torch.Tensor, np.ndarray, list] = [0, 0, 0],
         look_at: Union[torch.Tensor, np.ndarray, list] = [1, 0, 0],
         up: Union[torch.Tensor, np.ndarray, list] = [0, 0, 1],
-        rot: Union[torch.Tensor, np.ndarray, list, None] = None,
+        world2camera: Union[torch.Tensor, np.ndarray, list, None] = None,
     ) -> None:
         CameraData.__init__(
             self,
@@ -30,7 +30,7 @@ class Camera(CameraData):
             pos,
             look_at,
             up,
-            rot,
+            world2camera,
         )
         return
 
@@ -145,38 +145,66 @@ class Camera(CameraData):
             R = -R
         rot_tensor = R.T
 
-        return cls(
+        camera = cls(
             width=width,
             height=height,
             fx=fx_est,
             fy=fy_est,
             cx=cx_est,
             cy=cy_est,
-            pos=pos_tensor,
-            rot=rot_tensor,
         )
+
+        camera.setWorld2CameraByRotAndPos(rot_tensor, pos_tensor)
+        return camera
 
     def project_points_to_uv(
         self,
         points: Union[torch.Tensor, np.ndarray, list],
     ) -> torch.Tensor:
+        """
+        将世界坐标系中的3D点投影到UV坐标
+
+        坐标系定义：
+        - 相机坐标系：X右，Y上，Z朝向相机背后（相机看向-Z）
+        - UV坐标系：原点在左下角(0,0)，u向右，v向上
+        - 投影公式：u_pixel = fx * X / (-Z) + cx，v_pixel = fy * Y / (-Z) + cy
+        - 可见点条件：Z < 0（点在相机前方）
+
+        Returns:
+            uv: shape (..., 2)，范围 [0, 1]
+            对于不可见的点（Z >= 0或太近），返回NaN
+        """
         points = toTensor(points)
 
         if points.ndim == 1:
             points = points.unsqueeze(0)
 
-        points_camera = torch.matmul(points - self.pos, self.rot)
+        # 转换到相机坐标系
+        # 使用齐次坐标：P_camera = world2camera @ P_world
+        points_homo = torch.cat([points, torch.ones_like(points[..., :1])], dim=-1)
+        points_camera_homo = torch.matmul(points_homo, self.world2camera.T)
+        points_camera = points_camera_homo[..., :3]
 
         x, y, z = points_camera[..., 0], points_camera[..., 1], points_camera[..., 2]
 
-        z_safe = torch.where(z > 1e-8, z, torch.ones_like(z) * 1e-8)
-        u_pixel = self.fx * x / z_safe + self.cx
-        v_pixel = self.fy * y / z_safe + self.cy
+        # 相机看向-Z方向，可见点应该在Z < 0的区域
+        # 投影公式：u_pixel = fx * X / (-Z) + cx
+        # 即除以 (-Z)，对于Z<0的点，-Z>0是正数
 
-        u = (u_pixel - self.width / 2.0) / self.width
-        v = (v_pixel - self.height / 2.0) / self.height
+        # 标记无效点（在相机后方 Z>=0 或太近 Z>=-1e-6的点）
+        invalid_mask = z >= -1e-6
 
-        invalid_mask = z <= 1e-8
+        # 对于有效点，计算投影
+        # 为避免除零，将z限制在安全范围内
+        z_safe = torch.clamp(z, max=-1e-6)
+        u_pixel = self.fx * x / (-z_safe) + self.cx
+        v_pixel = self.fy * y / (-z_safe) + self.cy
+
+        # UV坐标归一化：原点在(0, 0)左下角
+        u = u_pixel / self.width
+        v = v_pixel / self.height
+
+        # 将无效点标记为NaN
         u = torch.where(invalid_mask, torch.full_like(u, float('nan')), u)
         v = torch.where(invalid_mask, torch.full_like(v, float('nan')), v)
 
