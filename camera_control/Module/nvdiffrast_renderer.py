@@ -57,6 +57,10 @@ class NVDiffRastRenderer(object):
             num_verts = len(self.mesh.vertices)
             vertex_colors = np.tile(np.array(color), (num_verts, 1))
             self.mesh.visual.vertex_colors = vertex_colors
+
+        if not hasattr(self.mesh, 'vertex_normals') or self.mesh.vertex_normals is None:
+            self.mesh.compute_vertex_normals()
+
         return True
 
     def renderImage(
@@ -104,36 +108,30 @@ class NVDiffRastRenderer(object):
 
         vertices = torch.from_numpy(self.mesh.vertices).float().to(self.device)  # [V, 3]
         faces = torch.from_numpy(self.mesh.faces).int().to(self.device)  # [F, 3]
-
-        # 确保mesh有法向量，如果没有则计算
-        if not hasattr(self.mesh, 'vertex_normals') or self.mesh.vertex_normals is None:
-            self.mesh.compute_vertex_normals()
-
         vertex_normals = torch.from_numpy(self.mesh.vertex_normals).float().to(self.device)  # [V, 3]
 
         # 设置光照方向（世界坐标系）
         light_direction = toTensor(light_direction, device=self.device)
         light_direction = light_direction / (torch.norm(light_direction) + 1e-8)
 
-        # 4. 构建投影矩阵
+        # 4. 构建投影矩阵（根据相机内参）
+        # 计算 near 和 far 裁剪面
         bbox_size = np.linalg.norm(np.max(self.mesh.vertices, axis=0) - np.min(self.mesh.vertices, axis=0))
-
         near = bbox_size * 0.1
         far = bbox_size * 10.0
 
-        def perspective_projection(fovy_radians, aspect, n, f):
-            """构建OpenGL透视投影矩阵"""
-            y = np.tan(fovy_radians / 2)
-            return np.array([
-                [1/(y*aspect),    0,            0,              0],
-                [           0, 1/-y,            0,              0],
-                [           0,    0, -(f+n)/(f-n), -(2*f*n)/(f-n)],
-                [           0,    0,           -1,              0]
-            ], dtype=np.float32)
-
-        fovy = 2 * np.arctan(height / (2 * fy))
-        aspect = width / height
-        proj_mtx = torch.from_numpy(perspective_projection(fovy, aspect, near, far)).to(self.device)
+        # 从相机内参构建 OpenGL 投影矩阵
+        # 参考：https://ksimek.github.io/2013/06/03/calibrated_cameras_in_opengl/
+        proj_mtx = torch.zeros((4, 4), dtype=torch.float32, device=self.device)
+        
+        # 使用完整的相机内参：fx, fy, cx, cy
+        proj_mtx[0, 0] = 2.0 * fx / width
+        proj_mtx[1, 1] = 2.0 * fy / height
+        proj_mtx[0, 2] = (width - 2.0 * cx) / width
+        proj_mtx[1, 2] = (2.0 * cy - height) / height
+        proj_mtx[2, 2] = (far + near) / (near - far)
+        proj_mtx[2, 3] = (2.0 * far * near) / (near - far)
+        proj_mtx[3, 2] = -1.0
 
         # 5. 构建视图矩阵
         # Camera类的rot是从Camera坐标系到世界坐标系的变换
