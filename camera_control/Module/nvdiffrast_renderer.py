@@ -92,16 +92,24 @@ class NVDiffRastRenderer(object):
         pos = camera.pos.float().to(self.device)  # [3]
         rot = camera.rot.float().to(self.device)  # [3, 3]
 
-        # Camera类的坐标系: X=right, Y=down, Z=forward
-        # OpenGL/nvdiffrast坐标系: X=right, Y=up, Z=-forward
-        # 需要坐标系转换矩阵 C，将Camera类坐标系转换到OpenGL坐标系
-        # C = [1,  0,  0]    (right -> right)
-        #     [0, -1,  0]    (down -> up)
-        #     [0,  0, -1]    (forward -> -forward)
-        coord_conversion = torch.tensor([
+        # 坐标系转换矩阵定义：
+        # 1. Camera类坐标系 -> OpenGL坐标系
+        #    Camera: X=right, Y=down, Z=forward
+        #    OpenGL: X=right, Y=up, Z=-forward
+        camera_to_opengl = torch.tensor([
             [1.0,  0.0,  0.0],
             [0.0, -1.0,  0.0],
             [0.0,  0.0, -1.0]
+        ], dtype=torch.float32, device=self.device)
+        
+        # 2. OpenGL坐标系 -> 图像坐标系（用于投影后的Y轴翻转）
+        #    OpenGL: 原点左下角，Y向上
+        #    Image:  原点左上角，Y向下
+        opengl_to_image = torch.tensor([
+            [1.0,  0.0,  0.0,  0.0],
+            [0.0, -1.0,  0.0,  0.0],
+            [0.0,  0.0,  1.0,  0.0],
+            [0.0,  0.0,  0.0,  1.0]
         ], dtype=torch.float32, device=self.device)
 
         glctx = dr.RasterizeCudaContext(device=self.device)
@@ -120,11 +128,11 @@ class NVDiffRastRenderer(object):
         near = bbox_size * 0.1
         far = bbox_size * 10.0
 
-        # 从相机内参构建 OpenGL 投影矩阵
+        # 从相机内参构建标准 OpenGL 投影矩阵
         # 参考：https://ksimek.github.io/2013/06/03/calibrated_cameras_in_opengl/
         proj_mtx = torch.zeros((4, 4), dtype=torch.float32, device=self.device)
         
-        # 使用完整的相机内参：fx, fy, cx, cy
+        # 使用完整的相机内参：fx, fy, cx, cy（标准OpenGL投影，不含坐标系转换）
         proj_mtx[0, 0] = 2.0 * fx / width
         proj_mtx[1, 1] = 2.0 * fy / height
         proj_mtx[0, 2] = (width - 2.0 * cx) / width
@@ -136,16 +144,17 @@ class NVDiffRastRenderer(object):
         # 5. 构建视图矩阵
         # Camera类的rot是从Camera坐标系到世界坐标系的变换
         # rot.T 是从世界坐标系到Camera坐标系的变换
-        # 然后通过coord_conversion转换到OpenGL坐标系
-        # R_view = C @ rot.T，其中C是坐标系转换矩阵
+        # 然后通过camera_to_opengl转换到OpenGL坐标系
         R_world_to_camera = rot.T  # [3, 3] 世界坐标系 -> Camera类坐标系
-        R_view = coord_conversion @ R_world_to_camera  # [3, 3] 世界坐标系 -> OpenGL坐标系
+        R_view = camera_to_opengl @ R_world_to_camera  # [3, 3] 世界坐标系 -> OpenGL坐标系
 
         view_mtx = torch.eye(4, dtype=torch.float32, device=self.device)
         view_mtx[:3, :3] = R_view
         view_mtx[:3, 3] = -R_view @ pos  # 平移部分
 
-        mvp = proj_mtx @ view_mtx  # [4, 4]
+        # 6. 组合变换矩阵：图像坐标系 <- OpenGL <- 世界坐标系
+        # MVP = (OpenGL->Image) @ Projection @ View
+        mvp = opengl_to_image @ proj_mtx @ view_mtx  # [4, 4]
 
         # 顶点变换到裁剪空间
         vertices_homo = torch.cat([
