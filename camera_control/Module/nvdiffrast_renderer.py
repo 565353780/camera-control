@@ -112,8 +112,6 @@ class NVDiffRastRenderer(object):
             [0.0,  0.0,  0.0,  1.0]
         ], dtype=torch.float32, device=self.device)
 
-        glctx = dr.RasterizeCudaContext(device=self.device)
-
         vertices = torch.from_numpy(self.mesh.vertices).float().to(self.device)  # [V, 3]
         faces = torch.from_numpy(self.mesh.faces).int().to(self.device)  # [F, 3]
         vertex_normals = torch.from_numpy(self.mesh.vertex_normals).float().to(self.device)  # [V, 3]
@@ -166,6 +164,8 @@ class NVDiffRastRenderer(object):
         vertices_clip_batch = vertices_clip.unsqueeze(0).contiguous()
 
         # 光栅化
+        glctx = dr.RasterizeCudaContext(device=self.device)
+
         rast_out, rast_out_db = dr.rasterize(
             glctx,
             vertices_clip_batch,  # [1, V, 4]
