@@ -131,7 +131,7 @@ class NVDiffRastRenderer(object):
         # 从相机内参构建标准 OpenGL 投影矩阵
         # 参考：https://ksimek.github.io/2013/06/03/calibrated_cameras_in_opengl/
         proj_mtx = torch.zeros((4, 4), dtype=torch.float32, device=self.device)
-        
+
         # 使用完整的相机内参：fx, fy, cx, cy（标准OpenGL投影，不含坐标系转换）
         proj_mtx[0, 0] = 2.0 * fx / width
         proj_mtx[1, 1] = 2.0 * fy / height
