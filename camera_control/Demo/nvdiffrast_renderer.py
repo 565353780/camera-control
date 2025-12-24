@@ -9,12 +9,11 @@ from camera_control.Module.nvdiffrast_renderer import NVDiffRastRenderer
 def demo():
     home = os.environ['HOME']
     mesh_file_path = home + '/chLi/Dataset/MM/Match/1024result/c6c113443a8ebb331ed307f33b1385c31a7d0c2fa8ed97b511511048e9e1a4afv1_5_-1_stagetwo_1024.glb'
-    device = "cuda:0"
     color = [178, 178, 178]
+    device = "cuda:0"
 
     nvdiffrast_renderer = NVDiffRastRenderer(
         mesh_file_path,
-        device,
         color,
     )
 

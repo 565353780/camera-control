@@ -13,11 +13,9 @@ class NVDiffRastRenderer(object):
     def __init__(
         self,
         mesh_file_path: Optional[str]=None,
-        device: str = 'cuda:0',
         color: list=[178, 178, 178],
     ) -> None:
         self.mesh: trimesh.Trimesh = None
-        self.device = device
 
         if mesh_file_path is not None:
             self.loadMeshFile(mesh_file_path, color)
