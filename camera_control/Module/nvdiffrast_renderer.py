@@ -5,7 +5,7 @@ import numpy as np
 import nvdiffrast.torch as dr
 from typing import Optional, Union
 
-from camera_control.Method.data import toTensor
+from camera_control.Method.data import toNumpy, toTensor
 from camera_control.Module.camera import Camera
 
 
@@ -63,6 +63,44 @@ class NVDiffRastRenderer(object):
 
         return True
 
+    @staticmethod
+    def getWorld2NVDiffRast(
+        camera: Camera,
+        bbox_length: Union[torch.Tensor, np.ndarray, list]=[2, 2, 2],
+    ) -> torch.Tensor:
+        """
+        构建 nvdiffrast 的 world -> clip(MVP) 变换矩阵，利用 camera 的所有参数（包括外参和内参）
+
+        1. 相机外参：world2camera
+        2. 相机内参：fx, fy, cx, cy, width, height
+        3. OpenGL 项目经过 Y flip 适配 nvdiffrast
+        """
+
+        # 计算合适的 near/far
+        bbox_size = torch.linalg.norm(toTensor(bbox_length, camera.dtype, camera.device))
+        near = bbox_size * 0.1
+        far = bbox_size * 10.0
+
+        # Step 1: 计算 OpenGL 投影矩阵（右手，左下原点 Y 向上）
+        proj = torch.zeros((4, 4), dtype=torch.float32, device=camera.device)
+
+        proj[0, 0] = 2 * camera.fx / camera.width
+        proj[1, 1] = 2 * camera.fy / camera.height
+        proj[0, 2] = 1 - 2 * camera.cx / camera.width
+        proj[1, 2] = 2 * camera.cy / camera.height - 1
+        proj[2, 2] = (far + near) / (near - far)
+        proj[2, 3] = 2 * far * near / (near - far)
+        proj[3, 2] = -1.0
+
+        # Step 2: OpenGL 到 nvdiffrast: Y 轴翻转，即 NDC 原点从左下变左上。等价于：
+        ndc_y_flip = torch.eye(4, dtype=torch.float32, device=camera.device)
+        ndc_y_flip[1, 1] = -1
+
+        # 总变换矩阵
+        mvp = ndc_y_flip @ proj @ camera.world2camera
+
+        return mvp
+
     def renderImage(
         self,
         camera: Camera,
@@ -82,132 +120,77 @@ class NVDiffRastRenderer(object):
                 - rasterize_output: [H, W, 4] rasterize主输出 (u, v, z/w, triangle_id)
                 - bary_derivs: [H, W, 4] 重心坐标的图像空间导数 (du/dX, du/dY, dv/dX, dv/dY)
         """
-        width = camera.width
-        height = camera.height
-        fx = camera.fx
-        fy = camera.fy
-        cx = camera.cx
-        cy = camera.cy
-
-        pos = camera.pos.float().to(self.device)  # [3]
-        rot = camera.rot.float().to(self.device)  # [3, 3]
-
-        # 坐标系转换矩阵定义：
-        # 1. Camera类坐标系 -> OpenGL坐标系
-        #    Camera: X=right, Y=down, Z=forward
-        #    OpenGL: X=right, Y=up, Z=-forward
-        camera_to_opengl = torch.tensor([
-            [1.0,  0.0,  0.0],
-            [0.0, -1.0,  0.0],
-            [0.0,  0.0, -1.0]
-        ], dtype=torch.float32, device=self.device)
-        
-        # 2. OpenGL坐标系 -> 图像坐标系（用于投影后的Y轴翻转）
-        #    OpenGL: 原点左下角，Y向上
-        #    Image:  原点左上角，Y向下
-        opengl_to_image = torch.tensor([
-            [1.0,  0.0,  0.0,  0.0],
-            [0.0, -1.0,  0.0,  0.0],
-            [0.0,  0.0,  1.0,  0.0],
-            [0.0,  0.0,  0.0,  1.0]
-        ], dtype=torch.float32, device=self.device)
-
-        vertices = torch.from_numpy(self.mesh.vertices).float().to(self.device)  # [V, 3]
-        faces = torch.from_numpy(self.mesh.faces).int().to(self.device)  # [F, 3]
-        vertex_normals = torch.from_numpy(self.mesh.vertex_normals).float().to(self.device)  # [V, 3]
+        # 获取三角网格信息
+        vertices = toTensor(self.mesh.vertices, torch.float32, camera.device)  # [V, 3]
+        faces = toTensor(self.mesh.faces, torch.int32, camera.device)  # [F, 3]
+        vertex_normals = toTensor(self.mesh.vertex_normals, torch.float32, camera.device)  # [V, 3]
+        if hasattr(self.mesh.visual, 'vertex_colors') and self.mesh.visual.vertex_colors is not None:
+            vertex_colors = toTensor(self.mesh.visual.vertex_colors[:, :3] / 255.0, torch.float32, camera.device)  # [V, 3]
+        else:
+            vertex_colors = torch.ones((vertices.shape[0], 3), dtype=torch.float32, device=camera.device)
 
         # 设置光照方向（世界坐标系）
-        light_direction = toTensor(light_direction, device=self.device)
+        light_direction = toTensor(light_direction, device=camera.device)
         light_direction = light_direction / (torch.norm(light_direction) + 1e-8)
 
-        # 4. 构建投影矩阵（根据相机内参）
-        # 计算 near 和 far 裁剪面
-        bbox_size = np.linalg.norm(np.max(self.mesh.vertices, axis=0) - np.min(self.mesh.vertices, axis=0))
-        near = bbox_size * 0.1
-        far = bbox_size * 10.0
-
-        # 从相机内参构建标准 OpenGL 投影矩阵
-        # 参考：https://ksimek.github.io/2013/06/03/calibrated_cameras_in_opengl/
-        proj_mtx = torch.zeros((4, 4), dtype=torch.float32, device=self.device)
-
-        # 使用完整的相机内参：fx, fy, cx, cy（标准OpenGL投影，不含坐标系转换）
-        proj_mtx[0, 0] = 2.0 * fx / width
-        proj_mtx[1, 1] = 2.0 * fy / height
-        proj_mtx[0, 2] = (width - 2.0 * cx) / width
-        proj_mtx[1, 2] = (2.0 * cy - height) / height
-        proj_mtx[2, 2] = (far + near) / (near - far)
-        proj_mtx[2, 3] = (2.0 * far * near) / (near - far)
-        proj_mtx[3, 2] = -1.0
-
-        # 5. 构建视图矩阵
-        # Camera类的rot是从Camera坐标系到世界坐标系的变换
-        # rot.T 是从世界坐标系到Camera坐标系的变换
-        # 然后通过camera_to_opengl转换到OpenGL坐标系
-        R_world_to_camera = rot.T  # [3, 3] 世界坐标系 -> Camera类坐标系
-        R_view = camera_to_opengl @ R_world_to_camera  # [3, 3] 世界坐标系 -> OpenGL坐标系
-
-        view_mtx = torch.eye(4, dtype=torch.float32, device=self.device)
-        view_mtx[:3, :3] = R_view
-        view_mtx[:3, 3] = -R_view @ pos  # 平移部分
-
-        # 6. 组合变换矩阵：图像坐标系 <- OpenGL <- 世界坐标系
-        # MVP = (OpenGL->Image) @ Projection @ View
-        mvp = opengl_to_image @ proj_mtx @ view_mtx  # [4, 4]
-
-        # 顶点变换到裁剪空间
+        # 顶点转为齐次裁剪空间
         vertices_homo = torch.cat([
             vertices,
-            torch.ones((vertices.shape[0], 1), dtype=torch.float32, device=self.device)
+            torch.ones((vertices.shape[0], 1), dtype=torch.float32, device=camera.device)
         ], dim=1)  # [V, 4]
 
-        vertices_clip = torch.matmul(vertices_homo, mvp.t())  # [V, 4]
-        vertices_clip_batch = vertices_clip.unsqueeze(0).contiguous()
+        # 得到 nvdiffrast 所需 MVP 变换
+        bbox_length = torch.max(vertices, dim=0)[0] - torch.min(vertices, dim=0)[0]
+        mvp = self.getWorld2NVDiffRast(camera, bbox_length)
 
-        # 光栅化
-        glctx = dr.RasterizeCudaContext(device=self.device)
+        # 顶点裁剪
+        vertices_clip_batch = torch.matmul(vertices_homo, mvp.T).unsqueeze(0).contiguous()  # [1, V, 4]
+
+        glctx = dr.RasterizeCudaContext(device=camera.device)
 
         rast_out, rast_out_db = dr.rasterize(
             glctx,
             vertices_clip_batch,  # [1, V, 4]
             faces,
-            resolution=[height, width]
-        )
+            resolution=[camera.height, camera.width]
+        )  # rast_out: [1, H, W, 4]
 
-        # 法向着色：插值顶点法向量
-        normals_interp, _ = dr.interpolate(
-            vertex_normals.unsqueeze(0),  # [1, V, 3]
-            rast_out,
-            faces
-        )
+        # 执行属性插值：normals 和 colors
+        vert_normals_batch = vertex_normals.unsqueeze(0)    # [1, V, 3]
+        vert_colors_batch = vertex_colors.unsqueeze(0)      # [1, V, 3]
+
+        normals_interp, _ = dr.interpolate(vert_normals_batch, rast_out, faces)  # [1, H, W, 3]
+        colors_interp, _ = dr.interpolate(vert_colors_batch, rast_out, faces)    # [1, H, W, 3]
 
         # 归一化插值后的法向量
-        normals_interp = normals_interp / (torch.norm(normals_interp, dim=-1, keepdim=True) + 1e-8)
+        normals_interp = normals_interp / (torch.norm(normals_interp, dim=-1, keepdim=True) + 1e-8)  # [1, H, W, 3]
+        colors_interp = torch.clamp(colors_interp, 0.0, 1.0)  # [1, H, W, 3]
 
-        # 将法向量从世界坐标系转换到OpenGL相机坐标系
-        # 注意：法向量的变换使用R_view.T（而不是view矩阵的逆）
-        normals_cam = torch.matmul(normals_interp[0], R_view.T)  # [H, W, 3]
-
-        # 将光照方向也转换到OpenGL相机坐标系
-        light_dir_cam = torch.matmul(light_direction, R_view.T)  # [3]
+        # 获取世界到相机坐标的旋转部分，将法线和光照从世界变换到相机
+        # R_view: camera.world2camera 的左上3x3部分
+        R_view = camera.R   # [3,3]
+        normals_cam = torch.matmul(normals_interp, R_view.T)    # [1, H, W, 3]
+        light_dir_cam = torch.matmul(light_direction, R_view.T) # [3]
         light_dir_cam = light_dir_cam / (torch.norm(light_dir_cam) + 1e-8)
 
-        # 计算Lambert着色
-        diffuse = torch.sum(normals_cam * light_dir_cam, dim=-1, keepdim=False)  # [H, W]
+        # Lambert 着色
+        diffuse = torch.sum(normals_cam * light_dir_cam[None, None, None, :], dim=-1)  # [1, H, W]
         diffuse = torch.clamp(diffuse, min=0.0, max=1.0)
-
-        # 添加环境光
         ambient = 0.3
-        image = ambient + (1.0 - ambient) * diffuse  # [H, W]
+        shaded = ambient + (1.0 - ambient) * diffuse     # [1, H, W]
 
-        # 处理背景
-        mask = rast_out[0, :, :, 3] > 0  # [H, W]
-        background = torch.ones_like(image)  # 白色背景
-        image = torch.where(mask, image, background)
-        render_image = image.detach().cpu().numpy()
-        render_image_np = np.clip(np.rint(render_image * 255), 0, 255).astype(np.uint8)
+        # 应用插值颜色并拼出RGB图像
+        image = colors_interp * shaded.unsqueeze(-1)     # [1, H, W, 3]
+        image = image[0]                                 # [H, W, 3]
+
+        # 处理背景为白色
+        mask = rast_out[0, :, :, 3] > 0                  # [H, W]
+        background = torch.ones_like(image)
+        image = torch.where(mask.unsqueeze(-1), image, background)
+        render_image_np = np.clip(np.rint(toNumpy(image) * 255), 0, 255).astype(np.uint8)
 
         result = {
-            'image': render_image_np,  # [H, W]
+            'image': render_image_np,  # [H, W, 3]
             'rasterize_output': rast_out[0],  # [H, W, 4]
             'bary_derivs': rast_out_db[0] if rast_out_db is not None else torch.zeros_like(rast_out[0]),  # [H, W, 4]
         }

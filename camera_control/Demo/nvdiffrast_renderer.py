@@ -1,4 +1,5 @@
 import os
+import cv2
 import numpy as np
 
 from camera_control.Module.camera import Camera
@@ -24,11 +25,10 @@ def demo():
     camera = Camera(
         width=2560,
         height=1440,
-        cx=1280,
-        cy=720,
         pos=center + [0, 0, 1],
         look_at=center,
         up=[0, 1, 0],
+        device=device,
     )
     light_direction = [1, 1, 1]
 
@@ -47,4 +47,5 @@ def demo():
         except:
             pass
 
+    cv2.imwrite('./output/test_render.png', render_dict['image'])
     return True

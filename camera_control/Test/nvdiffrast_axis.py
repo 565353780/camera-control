@@ -24,7 +24,7 @@ def test():
         width=640,
         height=480,
         pos=[0, 0, 2],
-        look_at=[0, 0, -1],
+        look_at=[0, 0, 0],
         up=[0, 1, 0],
         device=device,
     )

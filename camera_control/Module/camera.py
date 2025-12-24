@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from typing import Union
+from typing import Union, Optional
 
 from camera_control.Data.camera import CameraData
 from camera_control.Method.data import toTensor
@@ -12,8 +12,8 @@ class Camera(CameraData):
         height: int = 480,
         fx: float = 500.0,
         fy: float = 500.0,
-        cx: float = 320.0,
-        cy: float = 240.0,
+        cx: Optional[float] = None,
+        cy: Optional[float] = None,
         pos: Union[torch.Tensor, np.ndarray, list] = [0, 0, 0],
         look_at: Union[torch.Tensor, np.ndarray, list] = [1, 0, 0],
         up: Union[torch.Tensor, np.ndarray, list] = [0, 0, 1],
