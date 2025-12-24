@@ -18,6 +18,8 @@ class Camera(CameraData):
         look_at: Union[torch.Tensor, np.ndarray, list] = [1, 0, 0],
         up: Union[torch.Tensor, np.ndarray, list] = [0, 0, 1],
         world2camera: Union[torch.Tensor, np.ndarray, list, None] = None,
+        dtype=torch.float32,
+        device: str = 'cpu',
     ) -> None:
         CameraData.__init__(
             self,
@@ -31,6 +33,8 @@ class Camera(CameraData):
             look_at,
             up,
             world2camera,
+            dtype,
+            device,
         )
         return
 

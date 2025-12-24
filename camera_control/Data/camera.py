@@ -1,10 +1,10 @@
 import torch
 import numpy as np
 import open3d as o3d
-from typing import Union
 from copy import deepcopy
+from typing import Union, Optional
 
-from camera_control.Method.data import toTensor
+from camera_control.Method.data import toNumpy, toTensor
 
 
 class CameraData(object):
@@ -14,12 +14,14 @@ class CameraData(object):
         height: int = 480,
         fx: float = 500.0,
         fy: float = 500.0,
-        cx: float = 320.0,
-        cy: float = 240.0,
+        cx: Optional[float] = None,
+        cy: Optional[float] = None,
         pos: Union[torch.Tensor, np.ndarray, list] = [0, 0, 0],
         look_at: Union[torch.Tensor, np.ndarray, list] = [1, 0, 0],
         up: Union[torch.Tensor, np.ndarray, list] = [0, 0, 1],
         world2camera: Union[torch.Tensor, np.ndarray, list, None] = None,
+        dtype=torch.float32,
+        device: str = 'cpu',
     ) -> None:
         """
         相机坐标系定义：
@@ -37,11 +39,19 @@ class CameraData(object):
         self.height = height
         self.fx = fx
         self.fy = fy
-        self.cx = cx
-        self.cy = cy
+        if cx is None:
+            self.cx = 0.5 * self.width
+        else:
+            self.cx = cx
+        if cy is None:
+            self.cy = 0.5 * self.height
+        else:
+            self.cy = cy
+        self.dtype = dtype
+        self.device = device
 
         if world2camera is not None:
-            self.world2camera = toTensor(world2camera)
+            self.world2camera = toTensor(world2camera, self.dtype, self.device)
         else:
             pos = toTensor(pos)
             self.setWorld2Camera(look_at, up, pos)
@@ -79,7 +89,7 @@ class CameraData(object):
         """
         R_T = self.R.T
 
-        camera2world = torch.eye(4, dtype=self.world2camera.dtype, device=self.world2camera.device)
+        camera2world = torch.eye(4, dtype=self.dtype, device=self.device)
         camera2world[:3, :3] = R_T  # R的转置
         camera2world[:3, 3] = -R_T @ self.t  # -R^T @ t
 
@@ -90,10 +100,10 @@ class CameraData(object):
         R: Union[torch.Tensor, np.ndarray, list],
         t: Union[torch.Tensor, np.ndarray, list],
     ) -> bool:
-        R = toTensor(R).reshape(3, 3)
-        t = toTensor(t).reshape(3)
+        R = toTensor(R, self.dtype, self.device).reshape(3, 3)
+        t = toTensor(t, self.dtype, self.device).reshape(3)
 
-        self.world2camera = torch.eye(4, dtype=R.dtype, device=R.device)
+        self.world2camera = torch.eye(4, dtype=self.dtype, device=self.device)
         self.world2camera[:3, :3] = R
         self.world2camera[:3, 3] = t
         return True
@@ -117,13 +127,13 @@ class CameraData(object):
             up: 世界坐标系中的上方向向量
             pos: 相机在世界坐标系中的位置
         """
-        look_at = toTensor(look_at)
-        up = toTensor(up)
+        look_at = toTensor(look_at, self.dtype, self.device)
+        up = toTensor(up, self.dtype, self.device)
 
         if pos is None:
             pos = self.pos
         else:
-            pos = toTensor(pos)
+            pos = toTensor(pos, self.dtype, self.device)
 
         look_at = look_at.flatten()
         up = up.flatten()
@@ -182,19 +192,17 @@ class CameraData(object):
             [-half_width, half_height, -far],   # 左上
         ])
 
-        # 转换到世界坐标系
-        camera2world = self.camera2world
-
         # 将相机坐标系中的点转换到世界坐标系（使用torch计算）
-        far_corners_camera_torch = torch.from_numpy(far_corners_camera).to(camera2world.dtype)
+        far_corners_camera_torch = torch.from_numpy(far_corners_camera).to(
+            dtype=self.dtype, device=self.device)
         far_corners_camera_homo = torch.cat([
             far_corners_camera_torch, 
-            torch.ones((4, 1), dtype=camera2world.dtype)
+            torch.ones((4, 1), dtype=self.dtype, device=self.device)
         ], dim=1)
-        far_corners_world_homo = (camera2world @ far_corners_camera_homo.T).T
-        far_corners_world = far_corners_world_homo[:, :3].numpy()
+        far_corners_world_homo = far_corners_camera_homo @ self.camera2world.T
+        far_corners_world = toNumpy(far_corners_world_homo[:, :3])
 
-        pos = self.pos.numpy()
+        pos = toNumpy(self.pos)
         vertices = np.vstack([far_corners_world, pos.reshape(1, 3)])
 
         lines = np.array([
@@ -224,9 +232,9 @@ class CameraData(object):
         print(line_start + '[INFO][CameraData]')
         print(line_start + '\t image_size: [', self.width, ',', self.height, ']')
         print(line_start + '\t focal: [', self.fx, ',', self.fy, ',', self.cx, ',', self.cy, ']')
-        print(line_start + '\t pos:', self.pos.numpy().tolist())
-        print(line_start + '\t x_axis (right):', x_axis.numpy().tolist())
-        print(line_start + '\t y_axis (up):', y_axis.numpy().tolist())
-        print(line_start + '\t z_axis (back):', z_axis.numpy().tolist())
-        print(line_start + '\t look_at direction:', (-z_axis).numpy().tolist())
+        print(line_start + '\t pos:', toNumpy(self.pos).tolist())
+        print(line_start + '\t x_axis (right):', toNumpy(x_axis).tolist())
+        print(line_start + '\t y_axis (up):', toNumpy(y_axis).tolist())
+        print(line_start + '\t z_axis (back):', toNumpy(z_axis).tolist())
+        print(line_start + '\t look_at direction:', (-toNumpy(z_axis)).tolist())
         return True
