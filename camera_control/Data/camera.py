@@ -216,7 +216,7 @@ class CameraData(object):
         line_start = '\t' * info_level
 
         # 从旋转矩阵中提取坐标轴
-        R = self.rot
+        R = self.R
         x_axis = R[0, :]  # 相机X轴（右）在世界坐标系中的方向
         y_axis = R[1, :]  # 相机Y轴（上）在世界坐标系中的方向
         z_axis = R[2, :]  # 相机Z轴（后）在世界坐标系中的方向

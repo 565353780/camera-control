@@ -86,24 +86,22 @@ def create_line_set(
         if isinstance(x, torch.Tensor):
             x = x.detach().cpu().numpy()
         return np.asarray(x, dtype=np.float64)
-    
+
     start_pos = to_numpy(start_pos)
     end_pos = to_numpy(end_pos)
-    
-    # 规范化形状：确保是 Nx3 格式
-    if start_pos.ndim == 1:
-        start_pos = start_pos.reshape(1, 3)
-    elif start_pos.ndim == 2 and start_pos.shape[1] != 3:
-        raise ValueError(f"start_pos的形状不正确，期望为(N, 3)，得到{start_pos.shape}")
-    
-    if end_pos.ndim == 1:
-        end_pos = end_pos.reshape(1, 3)
-    elif end_pos.ndim == 2 and end_pos.shape[1] != 3:
-        raise ValueError(f"end_pos的形状不正确，期望为(N, 3)，得到{end_pos.shape}")
-    
+
+    if start_pos.shape[-1] != 3:
+        start_pos = start_pos[..., :3]
+
+    if end_pos.shape[-1] != 3:
+        end_pos = end_pos[..., :3]
+
+    start_pos = start_pos.reshape(-1, 3)
+    end_pos = end_pos.reshape(-1, 3)
+
     num_start = start_pos.shape[0]
     num_end = end_pos.shape[0]
-    
+
     # 判断并处理4种情况
     if num_start == 1 and num_end == 1:
         # 情况1：单点到单点
@@ -127,7 +125,7 @@ def create_line_set(
             f"不支持的输入形状组合：start_pos有{num_start}个点，end_pos有{num_end}个点。"
             f"仅支持：1-1, 1-N, N-1, 或 N-N（N相同）"
         )
-    
+
     line_set = o3d.geometry.LineSet()
     line_set.points = o3d.utility.Vector3dVector(points)
     line_set.lines = o3d.utility.Vector2iVector(lines)

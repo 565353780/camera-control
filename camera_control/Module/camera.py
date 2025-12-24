@@ -35,14 +35,22 @@ class Camera(CameraData):
         return
 
     @classmethod
-    def fromUVPoints(
+    def fromUVPointsOld(
         cls,
         points: Union[torch.Tensor, np.ndarray, list],
         uv: Union[torch.Tensor, np.ndarray, list],
         width: int = 640,
         height: int = 480,
     ):
-        points = toTensor(points).reshape(-1, 3)
+        points = toTensor(points)
+        if points.shape[-1] == 3:
+            points_homo = torch.cat([points, torch.ones_like(points[..., :1])], dim=-1)
+        else:
+            points_homo = points
+
+        points_homo = points_homo.reshape(-1, 4)
+
+        points = points_homo[..., :3]
         uv = toTensor(uv).reshape(-1, 2)
 
         if points.shape[0] != uv.shape[0]:
@@ -154,7 +162,64 @@ class Camera(CameraData):
             cy=cy_est,
         )
 
-        camera.setWorld2CameraByRotAndPos(rot_tensor, pos_tensor)
+        camera.setWorld2CameraByRt(rot_tensor, pos_tensor)
+        return camera
+
+    @classmethod
+    def fromUVPoints(
+        cls,
+        points: Union[torch.Tensor, np.ndarray, list],
+        uv: Union[torch.Tensor, np.ndarray, list],
+        width: int = 640,
+        height: int = 480,
+    ):
+        points = toTensor(points)
+
+        if points.shape[-1] == 3:
+            points_homo = torch.cat([points, torch.ones_like(points[..., :1])], dim=-1)
+        else:
+            points_homo = points
+
+        points_homo = points_homo.reshape(-1, 4)
+        uv = toTensor(uv).reshape(-1, 2)
+
+        if points_homo.shape[0] != uv.shape[0]:
+            print('[ERROR][Camera::fromUVPoints]')
+            print('\t points and uv num not matched!')
+            return None
+
+        valid_mask = ~(torch.isnan(uv[:, 0]) | torch.isnan(uv[:, 1]))
+        if valid_mask.sum() < 6:
+            print('[ERROR][Camera::fromUVPoints]')
+            print('\t Not enough valid points (need at least 6)!')
+            return None
+
+        points_homo = points_homo[valid_mask]
+        uv = uv[valid_mask]
+
+        C3 = torch.diag(torch.tensor([1, -1, -1], device=points_homo.device, dtype=points_homo.dtype))
+        C4 = torch.diag(torch.tensor([1, -1, -1, 1], device=points_homo.device, dtype=points_homo.dtype))
+
+        flip_points_homo = points_homo @ C4
+
+        center_uv = uv - 0.5
+        flip_uv = center_uv
+        flip_uv[:, 1] *= -1.0
+
+        camera = cls.fromUVPointsOld(
+            flip_points_homo,
+            flip_uv,
+            width,
+            height,
+        )
+
+        R = camera.R.T
+        t = camera.t
+
+        R = C3 @ R @ C3
+        t = C3 @ t
+
+        camera.setWorld2CameraByRt(R, t)
         return camera
 
     def project_points_to_uv(
@@ -179,11 +244,11 @@ class Camera(CameraData):
         if points.ndim == 1:
             points = points.unsqueeze(0)
 
-        # 转换到相机坐标系
-        # 使用齐次坐标：P_camera = world2camera @ P_world
-        points_homo = torch.cat([points, torch.ones_like(points[..., :1])], dim=-1)
-        points_camera_homo = torch.matmul(points_homo, self.world2camera.T)
-        points_camera = points_camera_homo[..., :3]
+        if points.shape[-1] == 3:
+            points_homo = torch.cat([points, torch.ones_like(points[..., :1])], dim=-1)
+        else:
+            points_homo = points
+        points_camera = torch.matmul(points_homo, self.world2camera.T)[..., :3]
 
         x, y, z = points_camera[..., 0], points_camera[..., 1], points_camera[..., 2]
 

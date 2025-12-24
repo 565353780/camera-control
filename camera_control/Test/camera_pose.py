@@ -19,9 +19,9 @@ def test():
         fy=500,
         cx=320,
         cy=240,
-        pos=[0, 1, 2],
-        look_at=[3, 4, 5],
-        up=[0, 0, 1],
+        pos=pos,
+        look_at=look_at,
+        up=up,
     )
 
     print(camera.world2camera)
@@ -44,15 +44,13 @@ def test():
         pcd_camera = toPcd(points_camera, [1, 0, 0])
         camera_mesh = camera.toO3DMesh(0.5, [0, 0, 1])
 
-        # 添加open3d的坐标轴可视化
-
         # 使用LineSet画三条不同颜色的轴线
         points_axis = np.array([
             [0, 0, 0],    # origin
-            [0.5, 0, 0],  # X
-            [0, 0.5, 0],  # Y
-            [0, 0, 0.5],  # Z
-        ])
+            [1, 0, 0],  # X
+            [0, 1, 0],  # Y
+            [0, 0, 1],  # Z
+        ], dtype=np.float64)
         lines_axis = [
             [0, 1],  # X
             [0, 2],  # Y
