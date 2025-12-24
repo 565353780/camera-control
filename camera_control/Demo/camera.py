@@ -35,7 +35,7 @@ def demo():
     uv = camera.project_points_to_uv(points)
 
     # 添加噪声
-    noise = 0.3 * (torch.rand_like(uv) - 0.5) * 2
+    noise = 0.1 * (torch.rand_like(uv) - 0.5) * 2
     uv_noisy = uv + noise
 
     # 从带噪声的UV坐标估计相机
@@ -79,7 +79,7 @@ def demo():
 
     # 添加有效点云（红色）
     pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(valid_points.numpy())
+    pcd.points = o3d.utility.Vector3dVector(valid_points[..., :3])
     pcd.paint_uniform_color([1, 0, 0])
     geometry_list.append(pcd)
 
