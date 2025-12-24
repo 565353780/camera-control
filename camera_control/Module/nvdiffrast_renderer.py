@@ -17,7 +17,7 @@ class NVDiffRastRenderer(object):
         color: list=[178, 178, 178],
     ) -> None:
         self.mesh: trimesh.Trimesh = None
-        self.device = torch.device(device)
+        self.device = device
 
         if mesh_file_path is not None:
             self.loadMeshFile(mesh_file_path, color)
