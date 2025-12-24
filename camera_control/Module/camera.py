@@ -213,11 +213,8 @@ class Camera(CameraData):
             height,
         )
 
-        R = camera.R.T
-        t = camera.t
-
-        R = C3 @ R @ C3
-        t = C3 @ t
+        R = C3 @ camera.R.T @ C3
+        t = -R @ C3 @ camera.t
 
         camera.setWorld2CameraByRt(R, t)
         return camera
