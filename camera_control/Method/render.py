@@ -4,6 +4,26 @@ import open3d as o3d
 from typing import Union
 
 
+def toPcd(
+    points: Union[torch.Tensor, np.ndarray, list],
+    color: list=[1, 0, 0],
+) -> o3d.geometry.PointCloud:
+    if isinstance(points, list):
+        points = np.array(points)
+    elif isinstance(points, torch.Tensor):
+        points = points.detach().cpu().numpy()
+
+    if points.shape[-1] == 4:
+        points = points[..., :3]
+
+    points = points.reshape(-1, 3).astype(np.float64)
+
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
+
+    pcd.paint_uniform_color(color)
+    return pcd
+
 def create_coordinate_frame(origin=np.array([0, 0, 0]), size=0.2):
     """
     创建坐标轴
@@ -36,19 +56,6 @@ def create_coordinate_frame(origin=np.array([0, 0, 0]), size=0.2):
     ])
 
     return lines
-
-def toPcd(points: Union[torch.Tensor, np.ndarray, list]) -> o3d.geometry.PointCloud:
-    if isinstance(points, list):
-        points = np.asarray(points)
-    if isinstance(points, torch.Tensor):
-        points = points.detach().cpu().numpy()
-
-    points = points.astype(np.float64)
-
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(points)
-
-    return pcd
 
 def create_line_set(
     start_pos: Union[torch.Tensor, np.ndarray, list],

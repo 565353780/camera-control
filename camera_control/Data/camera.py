@@ -51,16 +51,19 @@ class CameraData(object):
         return deepcopy(self)
 
     @property
-    def pos(self) -> torch.Tensor:
-        """从 world2camera 矩阵中提取相机位置（世界坐标系中）"""
-        R = self.world2camera[:3, :3]
-        t = self.world2camera[:3, 3]
-        return -R.T @ t
-
-    @property
-    def rot(self) -> torch.Tensor:
+    def R(self) -> torch.Tensor:
         """从 world2camera 矩阵中提取旋转矩阵（世界到相机）"""
         return self.world2camera[:3, :3]
+
+    @property
+    def t(self) -> torch.Tensor:
+        """从 world2camera 矩阵中提取平移矩阵（世界到相机）"""
+        return self.world2camera[:3, 3]
+
+    @property
+    def pos(self) -> torch.Tensor:
+        """从 world2camera 矩阵中提取相机位置（世界坐标系中）"""
+        return -self.R.T @ self.t
 
     @property
     def camera2world(self) -> torch.Tensor:
@@ -74,27 +77,25 @@ class CameraData(object):
         camera2world = [R^T | -R^T @ t]
                        [0   | 1       ]
         """
-        R = self.world2camera[:3, :3]  # 旋转部分
-        t = self.world2camera[:3, 3]   # 平移部分
+        R_T = self.R.T
 
-        # 构建camera2world矩阵
         camera2world = torch.eye(4, dtype=self.world2camera.dtype, device=self.world2camera.device)
-        camera2world[:3, :3] = R.T  # R的转置
-        camera2world[:3, 3] = -R.T @ t  # -R^T @ t
+        camera2world[:3, :3] = R_T  # R的转置
+        camera2world[:3, 3] = -R_T @ self.t  # -R^T @ t
 
         return camera2world
 
-    def setWorld2CameraByRotAndPos(
+    def setWorld2CameraByRt(
         self,
-        rot: Union[torch.Tensor, np.ndarray, list],
-        pos: Union[torch.Tensor, np.ndarray, list],
+        R: Union[torch.Tensor, np.ndarray, list],
+        t: Union[torch.Tensor, np.ndarray, list],
     ) -> bool:
-        rot = toTensor(rot).reshape(3, 3)
-        pos = toTensor(pos).reshape(3)
+        R = toTensor(R).reshape(3, 3)
+        t = toTensor(t).reshape(3)
 
-        self.world2camera = torch.eye(4, dtype=pos.dtype, device=pos.device)
-        self.world2camera[:3, :3] = rot
-        self.world2camera[:3, 3] = pos
+        self.world2camera = torch.eye(4, dtype=R.dtype, device=R.device)
+        self.world2camera[:3, :3] = R
+        self.world2camera[:3, 3] = t
         return True
 
     def setWorld2Camera(
@@ -120,18 +121,13 @@ class CameraData(object):
         up = toTensor(up)
 
         if pos is None:
-            # 如果没有提供 pos，从当前 world2camera 中提取
             pos = self.pos
         else:
             pos = toTensor(pos)
 
-        # 确保所有向量都是1D tensor
-        if look_at.ndim > 1:
-            look_at = look_at.flatten()
-        if up.ndim > 1:
-            up = up.flatten()
-        if pos.ndim > 1:
-            pos = pos.flatten()
+        look_at = look_at.flatten()
+        up = up.flatten()
+        pos = pos.flatten()
 
         # 计算相机的朝向（Z轴指向后方，所以相机看向的方向是 -Z）
         forward_world = look_at - pos
@@ -161,7 +157,7 @@ class CameraData(object):
         # 构建平移向量 t
         t = -R @ pos
 
-        self.setWorld2CameraByRotAndPos(R, t)
+        self.setWorld2CameraByRt(R, t)
         return True
 
     def toO3DMesh(
