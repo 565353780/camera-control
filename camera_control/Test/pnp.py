@@ -82,7 +82,13 @@ def test():
             continue
 
         # 使用fromUVPoints求解相机参数
-        estimated_camera = Camera.fromUVPoints(valid_points, valid_uv, width=camera.width, height=camera.height)
+        estimated_camera = Camera.fromUVPoints(
+            valid_points,
+            valid_uv,
+            width=camera.width,
+            height=camera.height,
+            device=camera.device,
+        )
         if estimated_camera is None:
             print(f"  警告: 相机 {i+1} 求解失败!")
             continue

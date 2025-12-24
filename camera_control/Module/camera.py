@@ -45,8 +45,10 @@ class Camera(CameraData):
         uv: Union[torch.Tensor, np.ndarray, list],
         width: int = 640,
         height: int = 480,
+        dtype=torch.float32,
+        device: str = 'cpu',
     ):
-        points = toTensor(points)
+        points = toTensor(points, dtype, device)
         if points.shape[-1] == 3:
             points_homo = torch.cat([points, torch.ones_like(points[..., :1])], dim=-1)
         else:
@@ -55,7 +57,7 @@ class Camera(CameraData):
         points_homo = points_homo.reshape(-1, 4)
 
         points = points_homo[..., :3]
-        uv = toTensor(uv).reshape(-1, 2)
+        uv = toTensor(uv, dtype, device).reshape(-1, 2)
 
         if points.shape[0] != uv.shape[0]:
             print('[ERROR][Camera::fromUVPoints]')
@@ -71,8 +73,6 @@ class Camera(CameraData):
         points = points[valid_mask]
         uv = uv[valid_mask]
         n_points = points.shape[0]
-        device = points.device
-        dtype = points.dtype
 
         # Hartley归一化：提高数值稳定性
         # 归一化3D点
@@ -164,6 +164,8 @@ class Camera(CameraData):
             fy=fy_est,
             cx=cx_est,
             cy=cy_est,
+            dtype=dtype,
+            device=device,
         )
 
         camera.setWorld2CameraByRt(rot_tensor, pos_tensor)
@@ -176,8 +178,10 @@ class Camera(CameraData):
         uv: Union[torch.Tensor, np.ndarray, list],
         width: int = 640,
         height: int = 480,
+        dtype=torch.float32,
+        device: str = 'cpu',
     ):
-        points = toTensor(points)
+        points = toTensor(points, dtype, device)
 
         if points.shape[-1] == 3:
             points_homo = torch.cat([points, torch.ones_like(points[..., :1])], dim=-1)
@@ -185,7 +189,7 @@ class Camera(CameraData):
             points_homo = points
 
         points_homo = points_homo.reshape(-1, 4)
-        uv = toTensor(uv).reshape(-1, 2)
+        uv = toTensor(uv, dtype, device).reshape(-1, 2)
 
         if points_homo.shape[0] != uv.shape[0]:
             print('[ERROR][Camera::fromUVPoints]')
@@ -201,8 +205,8 @@ class Camera(CameraData):
         points_homo = points_homo[valid_mask]
         uv = uv[valid_mask]
 
-        C3 = torch.diag(torch.tensor([1, -1, -1], device=points_homo.device, dtype=points_homo.dtype))
-        C4 = torch.diag(torch.tensor([1, -1, -1, 1], device=points_homo.device, dtype=points_homo.dtype))
+        C3 = torch.diag(torch.tensor([1, -1, -1], device=device, dtype=dtype))
+        C4 = torch.diag(torch.tensor([1, -1, -1, 1], device=device, dtype=dtype))
 
         flip_points_homo = points_homo @ C4
 
@@ -215,6 +219,8 @@ class Camera(CameraData):
             flip_uv,
             width,
             height,
+            dtype,
+            device,
         )
 
         R = C3 @ camera.R.T @ C3

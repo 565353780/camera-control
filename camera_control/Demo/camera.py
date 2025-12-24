@@ -44,6 +44,7 @@ def demo():
         uv_noisy,
         width=camera.width,
         height=camera.height,
+        device=camera.device,
     )
     assert estimated_camera is not None
 
@@ -52,12 +53,12 @@ def demo():
     print("=" * 60)
 
     # 计算误差
-    pos_error = torch.linalg.norm(camera.pos - estimated_camera.pos)
-    rot_error = torch.linalg.norm(camera.rot - estimated_camera.rot, ord='fro')
-    
-    print(f"\n位置误差: {pos_error.item():.6f}")
-    print(f"旋转矩阵误差 (Frobenius范数): {rot_error.item():.6f}")
-    
+    R_error = torch.linalg.norm(camera.R - estimated_camera.R, ord='fro')
+    t_error = torch.linalg.norm(camera.t - estimated_camera.t)
+
+    print(f"旋转矩阵误差 (Frobenius范数): {R_error.item():.6f}")
+    print(f"\n位置误差: {t_error.item():.6f}")
+
     # 计算重投影误差
     uv_reprojected = estimated_camera.project_points_to_uv(points)
     valid_mask = ~(torch.isnan(uv[:, 0]) | torch.isnan(uv_reprojected[:, 0]))
@@ -67,7 +68,7 @@ def demo():
             dim=1
         ).mean()
         print(f"平均重投影误差: {reproj_error.item():.6f}")
-    
+
     print("=" * 60)
 
     # 可视化
