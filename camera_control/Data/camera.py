@@ -61,6 +61,14 @@ class CameraData(object):
         return deepcopy(self)
 
     @property
+    def intrinsic(self) -> torch.Tensor:
+        return torch.tensor([
+            [self.fx, 0.0, self.cx],
+            [0.0, self.fy, self.cy],
+            [0.0, 0.0, 1.0],
+        ], dtype=self.dtype, device=self.device)
+
+    @property
     def R(self) -> torch.Tensor:
         """从 world2camera 矩阵中提取旋转矩阵（世界到相机）"""
         return self.world2camera[:3, :3]

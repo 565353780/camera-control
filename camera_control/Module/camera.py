@@ -1,9 +1,10 @@
+import cv2
 import torch
 import numpy as np
 from typing import Union, Optional
 
 from camera_control.Data.camera import CameraData
-from camera_control.Method.data import toTensor
+from camera_control.Method.data import toNumpy, toTensor
 
 class Camera(CameraData):
     def __init__(
@@ -39,7 +40,7 @@ class Camera(CameraData):
         return
 
     @classmethod
-    def fromUVPointsOld(
+    def fromUVPointsKernel(
         cls,
         points: Union[torch.Tensor, np.ndarray, list],
         uv: Union[torch.Tensor, np.ndarray, list],
@@ -60,7 +61,7 @@ class Camera(CameraData):
         uv = toTensor(uv, dtype, device).reshape(-1, 2)
 
         if points.shape[0] != uv.shape[0]:
-            print('[ERROR][Camera::fromUVPoints]')
+            print('[ERROR][Camera::fromUVPointsKernel]')
             print('\t points and uv num not matched!')
             return None
 
@@ -172,7 +173,7 @@ class Camera(CameraData):
         return camera
 
     @classmethod
-    def fromUVPoints(
+    def fromUVPointsV1(
         cls,
         points: Union[torch.Tensor, np.ndarray, list],
         uv: Union[torch.Tensor, np.ndarray, list],
@@ -192,13 +193,13 @@ class Camera(CameraData):
         uv = toTensor(uv, dtype, device).reshape(-1, 2)
 
         if points_homo.shape[0] != uv.shape[0]:
-            print('[ERROR][Camera::fromUVPoints]')
+            print('[ERROR][Camera::fromUVPointsV1]')
             print('\t points and uv num not matched!')
             return None
 
         valid_mask = ~(torch.isnan(uv[:, 0]) | torch.isnan(uv[:, 1]))
         if valid_mask.sum() < 6:
-            print('[ERROR][Camera::fromUVPoints]')
+            print('[ERROR][Camera::fromUVPointsV1]')
             print('\t Not enough valid points (need at least 6)!')
             return None
 
@@ -214,7 +215,7 @@ class Camera(CameraData):
         flip_uv = center_uv
         flip_uv[:, 1] *= -1.0
 
-        camera = cls.fromUVPointsOld(
+        camera = cls.fromUVPointsKernel(
             flip_points_homo,
             flip_uv,
             width,
@@ -228,6 +229,98 @@ class Camera(CameraData):
 
         camera.setWorld2CameraByRt(R, t)
         return camera
+
+    @classmethod
+    def fromUVPointsV2(
+        cls,
+        points: Union[torch.Tensor, np.ndarray, list],
+        uv: Union[torch.Tensor, np.ndarray, list],
+        width: int = 640,
+        height: int = 480,
+        dtype=torch.float64,
+        device: str = 'cpu',
+    ):
+        fx = 500
+        fy = 500
+
+        points = toNumpy(points)
+
+        if points.shape[-1] != 3:
+            points = points[..., :3]
+
+        points = points.reshape(-1, 3)
+        uv = toNumpy(uv).reshape(-1, 2)
+
+        if points.shape[0] != uv.shape[0]:
+            print('[ERROR][Camera::fromUVPointsV2]')
+            print('\t points and uv num not matched!')
+            return None
+
+        valid_mask = ~(np.isnan(uv[:, 0]) | np.isnan(uv[:, 1]))
+        if valid_mask.sum() < 6:
+            print('[ERROR][Camera::fromUVPointsV2]')
+            print('\t Not enough valid points (need at least 6)!')
+            return None
+
+        points = points[valid_mask]
+        uv = uv[valid_mask]
+
+        uv[:, 1] = 1.0 - uv[:, 1]
+
+        pixels = uv * np.array([width, height], dtype=np.float64)
+
+        K = np.array([
+            [fx, 0.0, width / 2.0],
+            [0.0, fy, height / 2.0],
+            [0.0, 0.0, 1.0],
+        ], dtype=np.float64)
+
+        dist_coeffs = np.zeros((4, 1))
+
+        ret, rvec_est, tvec_est = cv2.solvePnP(
+            points,
+            pixels,
+            K,
+            dist_coeffs,
+            flags=cv2.SOLVEPNP_EPNP,
+        )
+
+        ret, rvec_final, tvec_final = cv2.solvePnP(
+            points,
+            pixels,
+            K,
+            dist_coeffs,
+            rvec=rvec_est,
+            tvec=tvec_est,
+            useExtrinsicGuess=True,
+            flags=cv2.SOLVEPNP_ITERATIVE,
+        )
+
+        if not ret:
+            print('[ERROR][Camera::fromUVPointsV2]')
+            print('\t solvePnP via opencv failed!')
+            exit()
+
+        R_mat, _ = cv2.Rodrigues(rvec_final)
+
+        camera = cls(
+            width,
+            height,
+            fx,
+            fy,
+            dtype=dtype,
+            device=device,
+        )
+
+        C = np.diag([-1, 1, -1])
+
+        R = C @ R_mat
+        t = C @ tvec_final.flatten()
+
+        camera.setWorld2CameraByRt(R, t)
+
+        return camera
+
 
     def project_points_to_uv(
         self,

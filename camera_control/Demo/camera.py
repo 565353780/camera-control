@@ -35,11 +35,11 @@ def demo():
     uv = camera.project_points_to_uv(points)
 
     # 添加噪声
-    noise = 0.1 * (torch.rand_like(uv) - 0.5) * 2
+    noise = 0.3 * (torch.rand_like(uv) - 0.5) * 2
     uv_noisy = uv + noise
 
     # 从带噪声的UV坐标估计相机
-    estimated_camera = Camera.fromUVPoints(
+    estimated_camera = Camera.fromUVPointsV2(
         points,
         uv_noisy,
         width=camera.width,
