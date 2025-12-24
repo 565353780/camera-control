@@ -1,24 +1,21 @@
 import os
 import torch
-from camera_control.Method.data import toNumpy
 import imageio
 import numpy as np
 import nvdiffrast.torch as dr
 
+from camera_control.Method.data import toNumpy, toTensor
 from camera_control.Module.camera import Camera
-from camera_control.Module.nvdiffrast_renderer import NVDiffRastRenderer
 
-def tensor(*args, **kwargs):
-    return torch.tensor(*args, device='cuda', **kwargs)
 
 def test():
     device = 'cuda:0'
 
     glctx = dr.RasterizeCudaContext(device=device)
 
-    pos = tensor([[[-0.8, -0.8, 0, 1], [0.8, -0.8, 0, 1], [-0.8, 0.8, 0, 1]]], dtype=torch.float32)
-    col = tensor([[[1, 0, 0], [0, 1, 0], [0, 0, 1]]], dtype=torch.float32)
-    tri = tensor([[0, 1, 2]], dtype=torch.int32)
+    pos = toTensor([[[-0.8, -0.8, 0, 1], [0.8, -0.8, 0, 1], [-0.8, 0.8, 0, 1]]], torch.float32, device)
+    col = toTensor([[[1, 0, 0], [0, 1, 0], [0, 0, 1]]], torch.float32, device)
+    tri = toTensor([[0, 1, 2]], torch.int32, device)
 
     camera = Camera(
         width=640,
@@ -29,18 +26,18 @@ def test():
         device=device,
     )
 
-    mvp = NVDiffRastRenderer.getWorld2NVDiffRast(camera, [2, 2, 2])
+    mvp = camera.getWorld2NVDiffRast(bbox_length=[2, 2, 2])
 
-    vertices_clip_batch = torch.matmul(pos, mvp.T).contiguous()  # [1, V, 4]
+    pos_clip = torch.matmul(pos, mvp.T).contiguous()  # [1, V, 4]
 
     rast, _ = dr.rasterize(
         glctx,
-        vertices_clip_batch,  # [1, V, 4]
+        pos_clip,
         tri,
         resolution=[camera.height, camera.width]
-    )  # rast_out: [1, H, W, 4]
+    )
 
-    out, _ = dr.interpolate(col, rast, tri)  # [1, H, W, 3]
+    out, _ = dr.interpolate(col, rast, tri)
 
     img = np.clip(np.rint(toNumpy(out)[0] * 255), 0, 255).astype(np.uint8)
 

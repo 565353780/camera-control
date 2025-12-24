@@ -217,6 +217,43 @@ class CameraData(object):
 
         return frustum
 
+    def getWorld2NVDiffRast(
+        self,
+        bbox_length: Union[torch.Tensor, np.ndarray, list]=[2, 2, 2],
+    ) -> torch.Tensor:
+        """
+        构建 nvdiffrast 的 world -> clip(MVP) 变换矩阵，利用 camera 的所有参数（包括外参和内参）
+
+        1. 相机外参：world2camera
+        2. 相机内参：fx, fy, cx, cy, width, height
+        3. OpenGL 项目经过 Y flip 适配 nvdiffrast
+        """
+
+        # 计算合适的 near/far
+        bbox_size = torch.linalg.norm(toTensor(bbox_length, self.dtype, self.device))
+        near = bbox_size * 0.1
+        far = bbox_size * 10.0
+
+        # Step 1: 计算 OpenGL 投影矩阵（右手，左下原点 Y 向上）
+        proj = torch.zeros((4, 4), dtype=torch.float32, device=self.device)
+
+        proj[0, 0] = 2 * self.fx / self.width
+        proj[1, 1] = 2 * self.fy / self.height
+        proj[0, 2] = 1 - 2 * self.cx / self.width
+        proj[1, 2] = 2 * self.cy / self.height - 1
+        proj[2, 2] = (far + near) / (near - far)
+        proj[2, 3] = 2 * far * near / (near - far)
+        proj[3, 2] = -1.0
+
+        # Step 2: OpenGL 到 nvdiffrast: Y 轴翻转，即 NDC 原点从左下变左上。等价于：
+        ndc_y_flip = torch.eye(4, dtype=torch.float32, device=self.device)
+        ndc_y_flip[1, 1] = -1
+
+        # 总变换矩阵
+        mvp = ndc_y_flip @ proj @ self.world2camera
+
+        return mvp
+
     def outputInfo(
         self,
         info_level: int = 0,
