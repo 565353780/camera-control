@@ -237,7 +237,7 @@ class Camera(CameraData):
         uv: Union[torch.Tensor, np.ndarray, list],
         width: int = 640,
         height: int = 480,
-        dtype=torch.float64,
+        dtype=torch.float32,
         device: str = 'cpu',
     ):
         fx = 500
