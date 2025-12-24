@@ -246,7 +246,7 @@ class Camera(CameraData):
             uv: shape (..., 2)，范围 [0, 1]
             对于不可见的点（Z >= 0或太近），返回NaN
         """
-        points = toTensor(points)
+        points = toTensor(points, self.dtype, self.device)
 
         if points.ndim == 1:
             points = points.unsqueeze(0)
