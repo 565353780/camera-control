@@ -312,7 +312,7 @@ class Camera(CameraData):
             device=device,
         )
 
-        C = np.diag([-1, 1, -1])
+        C = np.diag([1, -1, -1])
 
         R = C @ R_mat
         t = C @ tvec_final.flatten()
