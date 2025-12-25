@@ -21,6 +21,6 @@ def toTensor(
     if isinstance(data, list):
         data = np.asarray(data)
     if isinstance(data, np.ndarray):
-        data = torch.from_numpy(data)
+        data = torch.from_numpy(data.copy())
     data = data.to(device, dtype=dtype)
     return data
