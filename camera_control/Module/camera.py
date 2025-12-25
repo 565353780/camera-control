@@ -5,6 +5,7 @@ from typing import Union, Optional
 
 from camera_control.Data.camera import CameraData
 from camera_control.Method.data import toNumpy, toTensor
+from camera_control.Module.camera_refiner import solve_and_refine
 
 class Camera(CameraData):
     def __init__(
@@ -269,53 +270,30 @@ class Camera(CameraData):
 
         pixels = uv * np.array([width, height], dtype=np.float64)
 
-        K = np.array([
-            [fx, 0.0, width / 2.0],
-            [0.0, fy, height / 2.0],
-            [0.0, 0.0, 1.0],
-        ], dtype=np.float64)
-
-        dist_coeffs = np.zeros((4, 1))
-
-        ret, rvec_est, tvec_est = cv2.solvePnP(
+        R, t, K = solve_and_refine(
             points,
             pixels,
-            K,
-            dist_coeffs,
-            flags=cv2.SOLVEPNP_EPNP,
-        )
-
-        ret, rvec_final, tvec_final = cv2.solvePnP(
-            points,
-            pixels,
-            K,
-            dist_coeffs,
-            rvec=rvec_est,
-            tvec=tvec_est,
-            useExtrinsicGuess=True,
-            flags=cv2.SOLVEPNP_ITERATIVE,
-        )
-
-        if not ret:
-            print('[ERROR][Camera::fromUVPointsV2]')
-            print('\t solvePnP via opencv failed!')
-            exit()
-
-        R_mat, _ = cv2.Rodrigues(rvec_final)
-
-        camera = cls(
             width,
             height,
             fx,
             fy,
+        )
+
+        camera = cls(
+            width,
+            height,
+            fx=K[0, 0],
+            fy=K[1, 1],
+            cx=K[0, 2],
+            cy=K[1, 2],
             dtype=dtype,
             device=device,
         )
 
         C = np.diag([1, -1, -1])
 
-        R = C @ R_mat
-        t = C @ tvec_final.flatten()
+        R = C @ R
+        t = C @ t
 
         camera.setWorld2CameraByRt(R, t)
 
