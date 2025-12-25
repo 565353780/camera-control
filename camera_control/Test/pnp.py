@@ -82,7 +82,7 @@ def test():
             continue
 
         # 使用fromUVPoints求解相机参数
-        estimated_camera = Camera.fromUVPointsV2(
+        estimated_camera = Camera.fromUVPoints(
             valid_points,
             valid_uv,
             width=camera.width,

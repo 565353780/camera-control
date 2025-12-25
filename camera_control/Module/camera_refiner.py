@@ -6,16 +6,33 @@ import numpy as np
 
 # --- 1. 之前定义的可微模型 ---
 class CameraRefiner(nn.Module):
-    def __init__(self, rvec_init, tvec_init, K_init):
+    def __init__(self, rvec_init, tvec_init, K_init, fix_principal_point=False, width=None, height=None):
         super(CameraRefiner, self).__init__()
         # 确保输入是 float32 且为 Tensor
         self.rvec = nn.Parameter(torch.tensor(rvec_init, dtype=torch.float32).flatten())
         self.tvec = nn.Parameter(torch.tensor(tvec_init, dtype=torch.float32).flatten())
         
-        # 内参优化变量: fx, fy, cx, cy
-        self.intrinsics = nn.Parameter(torch.tensor([
-            K_init[0, 0], K_init[1, 1], K_init[0, 2], K_init[1, 2]
-        ], dtype=torch.float32))
+        self.fix_principal_point = fix_principal_point
+        
+        if fix_principal_point:
+            # 如果 width 或 height 为 None，则根据 K_init 的 cx 和 cy 推断
+            if width is None or height is None:
+                if K_init[0, 2] is None or K_init[1, 2] is None:
+                    raise ValueError("width, height 均未指定，且 K_init 缺少 cx/cy，无法初始化 width 和 height")
+                width = K_init[0, 2] * 2
+                height = K_init[1, 2] * 2
+            # 只优化 fx, fy，cx 和 cy 固定为图像中心
+            self.intrinsics = nn.Parameter(torch.tensor([
+                K_init[0, 0], K_init[1, 1]
+            ], dtype=torch.float32))
+            # 注册为 buffer，不参与优化
+            self.register_buffer('cx', torch.tensor(width / 2.0, dtype=torch.float32))
+            self.register_buffer('cy', torch.tensor(height / 2.0, dtype=torch.float32))
+        else:
+            # 内参优化变量: fx, fy, cx, cy
+            self.intrinsics = nn.Parameter(torch.tensor([
+                K_init[0, 0], K_init[1, 1], K_init[0, 2], K_init[1, 2]
+            ], dtype=torch.float32))
 
     def rodrigues_to_matrix(self, rvec):
         theta = torch.norm(rvec)
@@ -35,7 +52,12 @@ class CameraRefiner(nn.Module):
 
     def forward(self, points_3d):
         R = self.rodrigues_to_matrix(self.rvec)
-        fx, fy, cx, cy = self.intrinsics
+        
+        if self.fix_principal_point:
+            fx, fy = self.intrinsics
+            cx, cy = self.cx, self.cy
+        else:
+            fx, fy, cx, cy = self.intrinsics
         
         # 坐标变换: P_cam = R @ P_3d + t
         points_cam = (R @ points_3d.t()).t() + self.tvec
@@ -55,7 +77,7 @@ class CameraRefiner(nn.Module):
         return torch.stack([u, v], dim=1)
 
 # --- 2. 整合后的主逻辑 ---
-def solve_and_refine(points, pixels, width, height, fx_init, fy_init):
+def solve_and_refine(points, pixels, width, height, fx_init, fy_init, fix_principal_point=False):
     # --- STEP 1: 你的 OpenCV 初解逻辑 ---
     K = np.array([
         [fx_init, 0.0, width / 2.0],
@@ -79,7 +101,7 @@ def solve_and_refine(points, pixels, width, height, fx_init, fy_init):
 
     # --- STEP 2: Torch 联合优化 (内外参) ---
     print("开始 Torch 联合优化...")
-    model = CameraRefiner(r_fine, t_fine, K)
+    model = CameraRefiner(r_fine, t_fine, K, fix_principal_point=fix_principal_point, width=width, height=height)
 
     # 使用 LBFGS 或 Adam。对于精细调节，LBFGS 收敛更快更好
     optimizer = optim.LBFGS(model.parameters(), lr=0.1, max_iter=20)
@@ -111,7 +133,14 @@ def solve_and_refine(points, pixels, width, height, fx_init, fy_init):
     with torch.no_grad():
         final_r = model.rvec.numpy()
         final_t = model.tvec.numpy()
-        fx, fy, cx, cy = model.intrinsics.numpy()
+        
+        if fix_principal_point:
+            fx, fy = model.intrinsics.numpy()
+            cx = model.cx.item()
+            cy = model.cy.item()
+        else:
+            fx, fy, cx, cy = model.intrinsics.numpy()
+        
         final_K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]])
 
         # 构建 4x4 矩阵

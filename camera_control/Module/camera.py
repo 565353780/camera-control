@@ -1,4 +1,3 @@
-import cv2
 import torch
 import numpy as np
 from typing import Union, Optional
@@ -41,198 +40,7 @@ class Camera(CameraData):
         return
 
     @classmethod
-    def fromUVPointsKernel(
-        cls,
-        points: Union[torch.Tensor, np.ndarray, list],
-        uv: Union[torch.Tensor, np.ndarray, list],
-        width: int = 640,
-        height: int = 480,
-        dtype=torch.float32,
-        device: str = 'cpu',
-    ):
-        points = toTensor(points, dtype, device)
-        if points.shape[-1] == 3:
-            points_homo = torch.cat([points, torch.ones_like(points[..., :1])], dim=-1)
-        else:
-            points_homo = points
-
-        points_homo = points_homo.reshape(-1, 4)
-
-        points = points_homo[..., :3]
-        uv = toTensor(uv, dtype, device).reshape(-1, 2)
-
-        if points.shape[0] != uv.shape[0]:
-            print('[ERROR][Camera::fromUVPointsKernel]')
-            print('\t points and uv num not matched!')
-            return None
-
-        valid_mask = ~(torch.isnan(uv[:, 0]) | torch.isnan(uv[:, 1]))
-        if valid_mask.sum() < 6:
-            print('[ERROR][Camera::fromUVPoints]')
-            print('\t Not enough valid points (need at least 6)!')
-            return None
-
-        points = points[valid_mask]
-        uv = uv[valid_mask]
-        n_points = points.shape[0]
-
-        # Hartley归一化：提高数值稳定性
-        # 归一化3D点
-        points_mean = points.mean(dim=0)
-        points_centered = points - points_mean
-        points_scale = (points_centered ** 2).sum(dim=1).mean() / 3.0
-        points_scale = torch.clamp(torch.sqrt(points_scale), min=1e-8)
-        points_norm = points_centered / points_scale
-
-        # 归一化2D点（UV坐标转换为像素坐标）
-        scale_2d = torch.tensor([width, height], device=device, dtype=dtype)
-        image_points = uv * scale_2d
-        image_mean = image_points.mean(dim=0)
-        image_centered = image_points - image_mean
-        image_scale = (image_centered ** 2).sum(dim=1).mean() / 2.0
-        image_scale = torch.clamp(torch.sqrt(image_scale), min=1e-8)
-        image_points_norm = image_centered / image_scale
-
-        # 向量化构建DLT矩阵A
-        X, Y, Z = points_norm.T
-        u, v = image_points_norm.T
-        ones = torch.ones(n_points, device=device, dtype=dtype)
-
-        A = torch.zeros(2 * n_points, 12, device=device, dtype=dtype)
-        A[0::2, 0:4] = torch.stack([X, Y, Z, ones], dim=1)
-        A[0::2, 8:12] = torch.stack([-u * X, -u * Y, -u * Z, -u], dim=1)
-        A[1::2, 4:8] = torch.stack([X, Y, Z, ones], dim=1)
-        A[1::2, 8:12] = torch.stack([-v * X, -v * Y, -v * Z, -v], dim=1)
-
-        # SVD求解投影矩阵
-        _, _, Vt = torch.linalg.svd(A, full_matrices=False)
-        P_norm = Vt[-1].reshape(3, 4)
-
-        # 反归一化
-        inv_points_scale = 1.0 / points_scale
-        T_3d = torch.eye(4, device=device, dtype=dtype)
-        T_3d[:3, :3] *= inv_points_scale
-        T_3d[:3, 3] = -points_mean * inv_points_scale
-
-        T_2d_inv = torch.eye(3, device=device, dtype=dtype)
-        T_2d_inv[:2, :2] *= image_scale
-        T_2d_inv[:2, 2] = image_mean
-
-        P = T_2d_inv @ P_norm @ T_3d
-
-        # RQ分解：P = K[R|t]，提取K和[R|t]
-        M = P[:, :3]
-
-        # RQ分解：M = K @ R（使用翻转技巧）
-        J = torch.tensor([[0, 0, 1], [0, 1, 0], [1, 0, 0]], device=device, dtype=dtype)
-        M_flip = J @ M @ J
-        Q_flip, R_qr_flip = torch.linalg.qr(M_flip.T)
-        K = J @ R_qr_flip.T @ J
-        R = J @ Q_flip.T @ J
-
-        # 确保K对角元素为正
-        diag_signs = torch.sign(torch.diag(K))
-        K = K * diag_signs.unsqueeze(1)
-        R = R * diag_signs.unsqueeze(0)
-
-        # 提取t并归一化K
-        K_inv = torch.linalg.inv(K)
-        Rt = K_inv @ P
-        t = Rt[:, 3]
-        k_scale = K[2, 2]
-        if abs(k_scale.item()) > 1e-8:
-            K = K / k_scale
-
-        # 提取内参
-        fx_est = K[0, 0].item()
-        fy_est = K[1, 1].item()
-        cx_est = (K[0, 2] + width / 2.0).item()
-        cy_est = (K[1, 2] + height / 2.0).item()
-
-        # SVD正交化R
-        U, _, Vt_svd = torch.linalg.svd(Rt[:, :3], full_matrices=False)
-        R = U @ Vt_svd
-
-        pos_tensor = -(R.T @ t)
-
-        if torch.linalg.det(R) < 0:
-            R = -R
-        rot_tensor = R.T
-
-        camera = cls(
-            width=width,
-            height=height,
-            fx=fx_est,
-            fy=fy_est,
-            cx=cx_est,
-            cy=cy_est,
-            dtype=dtype,
-            device=device,
-        )
-
-        camera.setWorld2CameraByRt(rot_tensor, pos_tensor)
-        return camera
-
-    @classmethod
-    def fromUVPointsV1(
-        cls,
-        points: Union[torch.Tensor, np.ndarray, list],
-        uv: Union[torch.Tensor, np.ndarray, list],
-        width: int = 640,
-        height: int = 480,
-        dtype=torch.float32,
-        device: str = 'cpu',
-    ):
-        points = toTensor(points, dtype, device)
-
-        if points.shape[-1] == 3:
-            points_homo = torch.cat([points, torch.ones_like(points[..., :1])], dim=-1)
-        else:
-            points_homo = points
-
-        points_homo = points_homo.reshape(-1, 4)
-        uv = toTensor(uv, dtype, device).reshape(-1, 2)
-
-        if points_homo.shape[0] != uv.shape[0]:
-            print('[ERROR][Camera::fromUVPointsV1]')
-            print('\t points and uv num not matched!')
-            return None
-
-        valid_mask = ~(torch.isnan(uv[:, 0]) | torch.isnan(uv[:, 1]))
-        if valid_mask.sum() < 6:
-            print('[ERROR][Camera::fromUVPointsV1]')
-            print('\t Not enough valid points (need at least 6)!')
-            return None
-
-        points_homo = points_homo[valid_mask]
-        uv = uv[valid_mask]
-
-        C3 = torch.diag(torch.tensor([1, -1, -1], device=device, dtype=dtype))
-        C4 = torch.diag(torch.tensor([1, -1, -1, 1], device=device, dtype=dtype))
-
-        flip_points_homo = points_homo @ C4
-
-        center_uv = uv - 0.5
-        flip_uv = center_uv
-        flip_uv[:, 1] *= -1.0
-
-        camera = cls.fromUVPointsKernel(
-            flip_points_homo,
-            flip_uv,
-            width,
-            height,
-            dtype,
-            device,
-        )
-
-        R = C3 @ camera.R.T @ C3
-        t = -R @ C3 @ camera.t
-
-        camera.setWorld2CameraByRt(R, t)
-        return camera
-
-    @classmethod
-    def fromUVPointsV2(
+    def fromUVPoints(
         cls,
         points: Union[torch.Tensor, np.ndarray, list],
         uv: Union[torch.Tensor, np.ndarray, list],
@@ -253,13 +61,13 @@ class Camera(CameraData):
         uv = toNumpy(uv).reshape(-1, 2)
 
         if points.shape[0] != uv.shape[0]:
-            print('[ERROR][Camera::fromUVPointsV2]')
+            print('[ERROR][Camera::fromUVPoints]')
             print('\t points and uv num not matched!')
             return None
 
         valid_mask = ~(np.isnan(uv[:, 0]) | np.isnan(uv[:, 1]))
         if valid_mask.sum() < 6:
-            print('[ERROR][Camera::fromUVPointsV2]')
+            print('[ERROR][Camera::fromUVPoints]')
             print('\t Not enough valid points (need at least 6)!')
             return None
 
@@ -273,10 +81,11 @@ class Camera(CameraData):
         R, t, K = solve_and_refine(
             points,
             pixels,
-            width,
-            height,
-            fx,
-            fy,
+            width=width,
+            height=height,
+            fx_init=fx,
+            fy_init=fy,
+            fix_principal_point=True,
         )
 
         camera = cls(

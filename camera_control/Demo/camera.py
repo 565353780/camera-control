@@ -39,7 +39,7 @@ def demo():
     uv_noisy = uv + noise
 
     # 从带噪声的UV坐标估计相机
-    estimated_camera = Camera.fromUVPointsV2(
+    estimated_camera = Camera.fromUVPoints(
         points,
         uv_noisy,
         width=camera.width,
