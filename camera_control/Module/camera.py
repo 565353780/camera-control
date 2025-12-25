@@ -163,3 +163,105 @@ class Camera(CameraData):
         uv = torch.stack([u, v], dim=-1)
 
         return uv
+
+    def projectUV2Points(
+        self,
+        uv: Union[torch.Tensor, np.ndarray, list],
+        depth: Union[torch.Tensor, np.ndarray, list],
+    ) -> torch.Tensor:
+        """
+        将UV坐标和深度值反投影到世界坐标系中的3D点
+
+        坐标系定义：
+        - 相机坐标系：X右，Y上，Z朝向相机背后（相机看向-Z）
+        - UV坐标系：原点在左下角(0,0)，u向右，v向上
+        - depth：相机前方的距离（正值），即 depth = -Z
+
+        Args:
+            uv: UV坐标，shape (..., 2)，范围 [0, 1]
+            depth: 深度值，shape (...,) 或 (..., 1)，相机前方的距离（正值）
+
+        Returns:
+            points: 世界坐标系中的3D点，shape (..., 3)
+        """
+        uv = toTensor(uv, self.dtype, self.device)
+        depth = toTensor(depth, self.dtype, self.device)
+
+        # 处理输入形状
+        if uv.ndim == 1:
+            uv = uv.unsqueeze(0)
+        if depth.ndim == 0:
+            depth = depth.unsqueeze(0)
+        if depth.ndim > 0 and depth.shape[-1] == 1:
+            depth = depth.squeeze(-1)
+
+        # 确保uv至少有2维，最后一维是2
+        if uv.shape[-1] != 2:
+            print('[ERROR][Camera::projectUV2Points]')
+            print(f'\t uv last dimension must be 2, got {uv.shape}')
+            return torch.empty(0, 3, dtype=self.dtype, device=self.device)
+
+        # 获取uv的前N-1维形状
+        uv_shape = uv.shape[:-1]  # 去掉最后一维（2）
+        
+        # 处理depth的形状，使其与uv_shape兼容
+        # 如果depth是标量，直接广播
+        if depth.ndim == 0:
+            depth = depth.expand(uv_shape)
+        # 如果depth的维度少于uv_shape，在左侧添加维度
+        elif depth.ndim < len(uv_shape):
+            # 在depth前面添加维度
+            for _ in range(len(uv_shape) - depth.ndim):
+                depth = depth.unsqueeze(0)
+            # 尝试expand到uv_shape
+            try:
+                depth = depth.expand(uv_shape)
+            except RuntimeError:
+                print('[ERROR][Camera::projectUV2Points]')
+                print(f'\t uv shape: {uv.shape}, depth shape: {depth.shape}')
+                print('\t Cannot broadcast depth to match uv shape!')
+                return torch.empty(0, 3, dtype=self.dtype, device=self.device)
+        # 如果depth的维度等于uv_shape，检查是否可以广播
+        elif depth.ndim == len(uv_shape):
+            if depth.shape != uv_shape:
+                try:
+                    # 尝试广播
+                    depth = depth.expand(uv_shape)
+                except RuntimeError:
+                    print('[ERROR][Camera::projectUV2Points]')
+                    print(f'\t uv shape: {uv.shape}, depth shape: {depth.shape}')
+                    print('\t Cannot broadcast depth to match uv shape!')
+                    return torch.empty(0, 3, dtype=self.dtype, device=self.device)
+        # 如果depth的维度大于uv_shape，报错
+        else:
+            print('[ERROR][Camera::projectUV2Points]')
+            print(f'\t uv shape: {uv.shape}, depth shape: {depth.shape}')
+            print('\t depth has more dimensions than uv (excluding last dim)!')
+            return torch.empty(0, 3, dtype=self.dtype, device=self.device)
+
+        # 将UV坐标（范围[0,1]）转换为像素坐标
+        u_pixel = uv[..., 0] * self.width
+        v_pixel = uv[..., 1] * self.height
+
+        # 反投影到相机坐标系
+        # 投影公式：u_pixel = fx * X / (-Z) + cx
+        # 因此：X = (u_pixel - cx) * (-Z) / fx
+        # 由于 depth = -Z（depth是相机前方的距离），所以：
+        x_camera = (u_pixel - self.cx) * depth / self.fx
+        y_camera = (v_pixel - self.cy) * depth / self.fy
+        z_camera = -depth  # Z轴指向相机背后，所以是负值
+
+        # 组合成相机坐标系中的3D点
+        points_camera = torch.stack([x_camera, y_camera, z_camera], dim=-1)
+
+        # 转换为齐次坐标
+        points_camera_homo = torch.cat([
+            points_camera,
+            torch.ones_like(points_camera[..., :1])
+        ], dim=-1)
+
+        # 从相机坐标系转换到世界坐标系
+        points_world_homo = torch.matmul(points_camera_homo, self.camera2world.T)
+        points_world = points_world_homo[..., :3]
+
+        return points_world

@@ -50,8 +50,8 @@ def visualize_with_open3d_animated(mesh, points_xyz, camera_base, n_frames=360):
     vis.create_window(window_name="Camera Rotation Animation", width=1200, height=800)
 
     # 添加固定几何体
-    vis.add_geometry(mesh)
-    vis.add_geometry(pcd)
+    # vis.add_geometry(mesh)
+    # vis.add_geometry(pcd)
     vis.add_geometry(coord_frame)
 
     vis_camera = camera_base.clone()
@@ -115,6 +115,37 @@ def visualize_with_open3d_animated(mesh, points_xyz, camera_base, n_frames=360):
         vis.add_geometry(lines)
     else:
         lines = None
+
+    # 创建反投影点的蓝色点云
+    reprojected_pcd = o3d.geometry.PointCloud()
+    if len(valid_points_np) > 0:
+        # 计算初始反投影点
+        valid_indices = torch.where(valid_mask)[0]
+        valid_points_world = points_xyz_tensor[valid_indices]
+        valid_uv = uv[valid_indices]
+        
+        # 将可见点通过 world2camera 变换到相机坐标系
+        valid_points_world_homo = torch.cat([
+            valid_points_world,
+            torch.ones((len(valid_points_world), 1), dtype=vis_camera.dtype, device=vis_camera.device)
+        ], dim=1)
+        valid_points_camera_homo = torch.matmul(valid_points_world_homo, vis_camera.world2camera.T)
+        valid_points_camera = valid_points_camera_homo[:, :3]
+        
+        # 提取深度值：使用 -z 作为深度
+        depth = -valid_points_camera[:, 2]
+        
+        # 使用 projectUV2Points 反投影
+        reprojected_points_world = vis_camera.projectUV2Points(valid_uv, depth)
+        reprojected_points_np = reprojected_points_world.detach().cpu().numpy()
+        
+        reprojected_pcd.points = o3d.utility.Vector3dVector(reprojected_points_np)
+    else:
+        # 如果没有有效点，创建空点云
+        reprojected_pcd.points = o3d.utility.Vector3dVector([])
+    
+    reprojected_pcd.paint_uniform_color([0, 0, 1])  # 蓝色
+    vis.add_geometry(reprojected_pcd)
 
     # 设置相机视角
     ctr = vis.get_view_control()
@@ -234,6 +265,34 @@ def visualize_with_open3d_animated(mesh, points_xyz, camera_base, n_frames=360):
         valid_mask = ~torch.isnan(uv[:, 0])
         valid_points_np = points_xyz_np[valid_mask.cpu().numpy()]
         
+        # 更新反投影点云
+        if len(valid_points_np) > 0:
+            valid_indices = torch.where(valid_mask)[0]
+            valid_points_world = points_xyz_tensor[valid_indices]
+            valid_uv = uv[valid_indices]
+            
+            # 将可见点通过 world2camera 变换到相机坐标系
+            valid_points_world_homo = torch.cat([
+                valid_points_world,
+                torch.ones((len(valid_points_world), 1), dtype=vis_camera.dtype, device=vis_camera.device)
+            ], dim=1)
+            valid_points_camera_homo = torch.matmul(valid_points_world_homo, vis_camera.world2camera.T)
+            valid_points_camera = valid_points_camera_homo[:, :3]
+            
+            # 提取深度值：使用 -z 作为深度
+            depth = -valid_points_camera[:, 2]
+            
+            # 使用 projectUV2Points 反投影
+            reprojected_points_world = vis_camera.projectUV2Points(valid_uv, depth)
+            reprojected_points_np = reprojected_points_world.detach().cpu().numpy()
+            
+            reprojected_pcd.points = o3d.utility.Vector3dVector(reprojected_points_np)
+            vis.update_geometry(reprojected_pcd)
+        else:
+            # 如果没有有效点，清空点云
+            reprojected_pcd.points = o3d.utility.Vector3dVector([])
+            vis.update_geometry(reprojected_pcd)
+        
         # 每30帧打印一次可见点数量，用于验证背面不可见
         if frame % 30 == 0:
             valid_count = valid_mask.sum().item()
@@ -324,6 +383,7 @@ def test():
     print("- 相机会绕初始朝向方向旋转（方位角变化）")
     print("- 同时相机会上下摆动（仰角变化）")
     print("- 绿色连线表示可见点（相机前方，Z<0）")
+    print("- 蓝色点云表示反投影的点（通过 projectUV2Points 计算）")
     print("- 相机背后的点不会有连线（返回NaN）")
     print("- 终端会每30帧输出一次可见点统计信息")
     print("=" * 60)
@@ -356,6 +416,89 @@ def test():
 
     print(f"\n前5个点的UV坐标:")
     print(uv[:5])
+
+    # 测试 projectUV2Points 函数的正确性
+    print("\n" + "=" * 60)
+    print("测试 projectUV2Points 函数正确性")
+    print("=" * 60)
+    
+    # 获取可见点（非NaN的点）
+    valid_mask = ~torch.isnan(uv[:, 0])
+    valid_indices = torch.where(valid_mask)[0]
+    
+    if len(valid_indices) == 0:
+        print("[WARNING] 没有可见点，无法测试 projectUV2Points")
+    else:
+        # 获取可见点的世界坐标
+        valid_points_world = torch.from_numpy(points_xyz[valid_indices]).to(dtype=camera.dtype, device=camera.device)
+        valid_uv = uv[valid_indices]
+        
+        print(f"\n可见点数量: {len(valid_indices)}")
+        
+        # 将可见点通过 world2camera 变换到相机坐标系
+        valid_points_world_homo = torch.cat([
+            valid_points_world,
+            torch.ones((len(valid_points_world), 1), dtype=camera.dtype, device=camera.device)
+        ], dim=1)
+        valid_points_camera_homo = torch.matmul(valid_points_world_homo, camera.world2camera.T)
+        valid_points_camera = valid_points_camera_homo[:, :3]
+        
+        # 提取深度值：使用 -z 作为深度（因为相机看向 -Z 方向，Z 轴向后）
+        # 在相机坐标系中，可见点的 Z < 0，所以深度 = -Z > 0
+        depth = -valid_points_camera[:, 2]
+        
+        print(f"\n相机坐标系中的点统计:")
+        print(f"X范围: [{valid_points_camera[:, 0].min():.4f}, {valid_points_camera[:, 0].max():.4f}]")
+        print(f"Y范围: [{valid_points_camera[:, 1].min():.4f}, {valid_points_camera[:, 1].max():.4f}]")
+        print(f"Z范围: [{valid_points_camera[:, 2].min():.4f}, {valid_points_camera[:, 2].max():.4f}]")
+        print(f"深度范围: [{depth.min():.4f}, {depth.max():.4f}]")
+        
+        # 使用 projectUV2Points 将 UV 和深度反投影回世界坐标系
+        print("\n正在使用 projectUV2Points 反投影...")
+        reprojected_points_world = camera.projectUV2Points(valid_uv, depth)
+        
+        # 计算误差
+        point_errors = torch.linalg.norm(reprojected_points_world - valid_points_world, dim=1)
+        mean_error = point_errors.mean().item()
+        max_error = point_errors.max().item()
+        min_error = point_errors.min().item()
+        median_error = torch.median(point_errors).item()
+        
+        print(f"\n反投影误差统计:")
+        print(f"平均误差: {mean_error:.6f}")
+        print(f"中位数误差: {median_error:.6f}")
+        print(f"最大误差: {max_error:.6f}")
+        print(f"最小误差: {min_error:.6f}")
+        
+        # 计算相对误差（相对于点的距离）
+        point_distances = torch.linalg.norm(valid_points_world, dim=1)
+        relative_errors = point_errors / (point_distances + 1e-8)
+        mean_relative_error = relative_errors.mean().item() * 100
+        max_relative_error = relative_errors.max().item() * 100
+        
+        print(f"\n相对误差统计:")
+        print(f"平均相对误差: {mean_relative_error:.4f}%")
+        print(f"最大相对误差: {max_relative_error:.4f}%")
+        
+        # 检查误差是否在合理范围内（考虑到浮点精度）
+        tolerance = 1e-5
+        if mean_error < tolerance:
+            print(f"\n✓ 测试通过！平均误差 ({mean_error:.6f}) < 容差 ({tolerance})")
+        else:
+            print(f"\n✗ 测试警告！平均误差 ({mean_error:.6f}) >= 容差 ({tolerance})")
+        
+        # 显示前几个点的详细对比
+        print(f"\n前5个点的详细对比:")
+        print(f"{'索引':<6} {'原始点 (世界)':<40} {'反投影点 (世界)':<40} {'误差':<12}")
+        print("-" * 100)
+        for i in range(min(5, len(valid_indices))):
+            orig = valid_points_world[i].cpu().numpy()
+            reproj = reprojected_points_world[i].cpu().numpy()
+            err = point_errors[i].item()
+            print(f"{i:<6} [{orig[0]:7.4f}, {orig[1]:7.4f}, {orig[2]:7.4f}]  "
+                  f"[{reproj[0]:7.4f}, {reproj[1]:7.4f}, {reproj[2]:7.4f}]  {err:.6e}")
+        
+        print("=" * 60)
 
     # 使用open3d可视化动画
     print("\n正在打开可视化窗口...")
