@@ -198,7 +198,7 @@ class CameraData(object):
             f = self.fy
             target_px = self.height * view_ratio
 
-        dist = (2 * radius * f) / target_px
+        dist = (2.5 * radius * f) / target_px
 
         look_at = -self.R[2]
 
