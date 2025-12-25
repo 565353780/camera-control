@@ -178,6 +178,39 @@ class CameraData(object):
         self.setWorld2CameraByRt(R, t)
         return True
 
+    def focusOnPoints(
+        self,
+        points: Union[torch.Tensor, np.ndarray, list],
+        view_ratio: float = 0.95,
+    ) -> bool:
+        points = toTensor(points, self.dtype, self.device)
+
+        min_bound = torch.min(points, dim=0).values
+        max_bound = torch.max(points, dim=0).values
+        center = (min_bound + max_bound) / 2.0
+
+        radius = torch.max(torch.linalg.norm(points - center, dim=1)).item()
+
+        if self.width < self.height:
+            f = self.fx
+            target_px = self.width * view_ratio
+        else:
+            f = self.fy
+            target_px = self.height * view_ratio
+
+        dist = (2 * radius * f) / target_px
+
+        look_at = -self.R[2]
+
+        new_pos = center - dist * look_at
+
+        self.setWorld2Camera(
+            center,
+            self.R[1],
+            new_pos,
+        )
+        return True
+
     def toO3DMesh(
         self,
         far: float=1.0,
@@ -270,9 +303,9 @@ class CameraData(object):
 
         # 从旋转矩阵中提取坐标轴
         R = self.R
-        x_axis = R[0, :]  # 相机X轴（右）在世界坐标系中的方向
-        y_axis = R[1, :]  # 相机Y轴（上）在世界坐标系中的方向
-        z_axis = R[2, :]  # 相机Z轴（后）在世界坐标系中的方向
+        x_axis = R[0]  # 相机X轴（右）在世界坐标系中的方向
+        y_axis = R[1]  # 相机Y轴（上）在世界坐标系中的方向
+        z_axis = R[2]  # 相机Z轴（后）在世界坐标系中的方向
 
         print(line_start + '[INFO][CameraData]')
         print(line_start + '\t image_size: [', self.width, ',', self.height, ']')
