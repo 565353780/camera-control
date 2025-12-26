@@ -12,8 +12,8 @@ class NVDiffRastRenderer(object):
     def __init__(self) -> None:
         return
 
+    @staticmethod
     def renderImage(
-        self,
         mesh: trimesh.Trimesh,
         camera: Camera,
         light_direction: Union[torch.Tensor, np.ndarray, list] = [1, 1, 1],
