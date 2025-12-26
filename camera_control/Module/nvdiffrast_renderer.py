@@ -2,47 +2,19 @@ import torch
 import trimesh
 import numpy as np
 import nvdiffrast.torch as dr
-from typing import Optional, Union
+from typing import Union
 
-from camera_control.Method.io import loadMeshFile
 from camera_control.Method.data import toNumpy, toTensor
 from camera_control.Module.camera import Camera
 
 
 class NVDiffRastRenderer(object):
-    def __init__(
-        self,
-        mesh_file_path: Optional[str]=None,
-        color: list=[178, 178, 178],
-    ) -> None:
-        self.mesh: trimesh.Trimesh = None
-
-        if mesh_file_path is not None:
-            self.loadMeshFile(mesh_file_path, color)
+    def __init__(self) -> None:
         return
-
-    def isValid(self) -> bool:
-        if self.mesh is None:
-            return False
-
-        return True
-
-    def loadMeshFile(
-        self,
-        mesh_file_path: str,
-        color: list=[178, 178, 178],
-    ) -> bool:
-        self.mesh = loadMeshFile(mesh_file_path, color)
-
-        if self.mesh is None:
-            print('[ERROR][NVDiffRastRenderer::loadMeshFile]')
-            print('\t loadMeshFile failed!')
-            return False
-
-        return True
 
     def renderImage(
         self,
+        mesh: trimesh.Trimesh,
         camera: Camera,
         light_direction: Union[torch.Tensor, np.ndarray, list] = [1, 1, 1],
     ) -> dict:
@@ -61,11 +33,11 @@ class NVDiffRastRenderer(object):
                 - bary_derivs: [H, W, 4] 重心坐标的图像空间导数 (du/dX, du/dY, dv/dX, dv/dY)
         """
         # 获取三角网格信息
-        vertices = toTensor(self.mesh.vertices, torch.float32, camera.device)  # [V, 3]
-        faces = toTensor(self.mesh.faces, torch.int32, camera.device)  # [F, 3]
-        vertex_normals = toTensor(self.mesh.vertex_normals, torch.float32, camera.device)  # [V, 3]
-        if hasattr(self.mesh.visual, 'vertex_colors') and self.mesh.visual.vertex_colors is not None:
-            vertex_colors = toTensor(self.mesh.visual.vertex_colors[:, :3] / 255.0, torch.float32, camera.device)  # [V, 3]
+        vertices = toTensor(mesh.vertices, torch.float32, camera.device)  # [V, 3]
+        faces = toTensor(mesh.faces, torch.int32, camera.device)  # [F, 3]
+        vertex_normals = toTensor(mesh.vertex_normals, torch.float32, camera.device)  # [V, 3]
+        if hasattr(mesh.visual, 'vertex_colors') and mesh.visual.vertex_colors is not None:
+            vertex_colors = toTensor(mesh.visual.vertex_colors[:, :3] / 255.0, torch.float32, camera.device)  # [V, 3]
         else:
             vertex_colors = torch.ones((vertices.shape[0], 3), dtype=torch.float32, device=camera.device)
 

@@ -1,6 +1,7 @@
 import os
 import cv2
 
+from camera_control.Method.io import loadMeshFile
 from camera_control.Module.camera import Camera
 from camera_control.Module.nvdiffrast_renderer import NVDiffRastRenderer
 
@@ -9,15 +10,14 @@ def demo():
     home = os.environ['HOME']
     mesh_file_path = home + '/chLi/Dataset/MM/Match/1024result/c6c113443a8ebb331ed307f33b1385c31a7d0c2fa8ed97b511511048e9e1a4afv1_5_-1_stagetwo_1024.glb'
     #mesh_file_path = home + '/chLi/Dataset/MM/Match/GTstageone/c6c113443a8ebb331ed307f33b1385c31a7d0c2fa8ed97b511511048e9e1a4af_decoded.ply'
-    color = [178, 178, 178]
+    vertex_color = [178, 178, 178]
+    view_ratio = 0.95 
     device = "cuda:0"
 
-    nvdiffrast_renderer = NVDiffRastRenderer(
-        mesh_file_path,
-        color,
-    )
+    nvdiffrast_renderer = NVDiffRastRenderer()
 
-    view_ratio = 0.95 
+    mesh = loadMeshFile(mesh_file_path, vertex_color)
+    assert mesh
 
     camera = Camera(
         width=2560,
@@ -27,11 +27,12 @@ def demo():
         up=[0, 1, 0],
         device=device,
     )
-    camera.focusOnPoints(nvdiffrast_renderer.mesh.vertices, view_ratio)
+    camera.focusOnPoints(mesh.vertices, view_ratio)
 
     light_direction = [1, 1, 1]
 
     render_dict = nvdiffrast_renderer.renderImage(
+        mesh,
         camera,
         light_direction,
     )
