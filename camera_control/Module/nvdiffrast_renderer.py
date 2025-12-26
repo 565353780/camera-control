@@ -1,10 +1,10 @@
-import os
 import torch
 import trimesh
 import numpy as np
 import nvdiffrast.torch as dr
 from typing import Optional, Union
 
+from camera_control.Method.io import loadMeshFile
 from camera_control.Method.data import toNumpy, toTensor
 from camera_control.Module.camera import Camera
 
@@ -32,32 +32,12 @@ class NVDiffRastRenderer(object):
         mesh_file_path: str,
         color: list=[178, 178, 178],
     ) -> bool:
-        if not os.path.exists(mesh_file_path):
+        self.mesh = loadMeshFile(mesh_file_path, color)
+
+        if self.mesh is None:
             print('[ERROR][NVDiffRastRenderer::loadMeshFile]')
-            print('\t mesh file not exist!')
-            print('\t mesh_file_path:', mesh_file_path)
+            print('\t loadMeshFile failed!')
             return False
-
-        self.mesh = trimesh.load(mesh_file_path)
-
-        if isinstance(self.mesh, trimesh.Scene):
-            self.mesh = trimesh.util.concatenate(
-                [g for g in self.mesh.geometry.values() if isinstance(g, trimesh.Trimesh)]
-            )
-
-        if not isinstance(self.mesh, trimesh.Trimesh):
-            print('[ERROR][NVDiffRastRenderer::loadMeshFile]')
-            print('\t load mesh failed!')
-            print('\t mesh_file_path:', mesh_file_path)
-            return False
-
-        if not hasattr(self.mesh.visual, 'vertex_colors') or self.mesh.visual.vertex_colors is None:
-            num_verts = len(self.mesh.vertices)
-            vertex_colors = np.tile(np.array(color), (num_verts, 1))
-            self.mesh.visual.vertex_colors = vertex_colors
-
-        if not hasattr(self.mesh, 'vertex_normals') or self.mesh.vertex_normals is None:
-            self.mesh.compute_vertex_normals()
 
         return True
 
