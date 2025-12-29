@@ -10,13 +10,14 @@ def demo():
     home = os.environ['HOME']
     mesh_file_path = home + '/chLi/Dataset/MM/Match/1024result/c6c113443a8ebb331ed307f33b1385c31a7d0c2fa8ed97b511511048e9e1a4afv1_5_-1_stagetwo_1024.glb'
     #mesh_file_path = home + '/chLi/Dataset/MM/Match/GTstageone/c6c113443a8ebb331ed307f33b1385c31a7d0c2fa8ed97b511511048e9e1a4af_decoded.ply'
-    vertex_color = [178, 178, 178]
+    mesh_file_path = home + '/chLi/Dataset/MM/Match/nezha/nezha.glb'
+    paint_color = [178, 178, 178]
     view_ratio = 0.95 
     device = "cuda:0"
 
     nvdiffrast_renderer = NVDiffRastRenderer()
 
-    mesh = loadMeshFile(mesh_file_path, vertex_color)
+    mesh = loadMeshFile(mesh_file_path)
     assert mesh
 
     camera = Camera(
@@ -32,9 +33,12 @@ def demo():
     light_direction = [1, 1, 1]
 
     render_dict = nvdiffrast_renderer.renderImage(
-        mesh,
-        camera,
-        light_direction,
+        mesh=mesh,
+        camera=camera,
+        light_direction=light_direction,
+        is_gray=False,
+        # paint_color=paint_color,
+        paint_color=None,
     )
 
     if render_dict is None:
