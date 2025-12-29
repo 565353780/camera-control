@@ -107,8 +107,7 @@ class NVDiffRastRenderer(object):
         if use_texture:
             # 使用纹理渲染（直接渲染纹理颜色，不需要光照）
             uv_interp, _ = dr.interpolate(uvs.unsqueeze(0), rast_out, faces)  # [1, H, W, 2]
-            texture_color = dr.texture(texture, uv_interp, filter_mode='linear')  # [1, H, W, 3]
-            image = texture_color[0]  # [H, W, 3]
+            image = dr.texture(texture, uv_interp, filter_mode='linear')  # [1, H, W, 3]
         else:
             # 使用normals和顶点颜色渲染（需要光照）
             # 插值法线
@@ -116,7 +115,7 @@ class NVDiffRastRenderer(object):
             normals_interp = normals_interp / (torch.norm(normals_interp, dim=-1, keepdim=True) + 1e-8)
 
             # 插值顶点颜色
-            colors_interp, _ = dr.interpolate(vertex_colors.unsqueeze(0), rast_out, faces)  # [1, H, W, 3]
+            colors_interp, _ = dr.interpolate(vertex_colors.unsqueeze(0).contiguous(), rast_out, faces)  # [1, H, W, 3]
             colors_interp = torch.clamp(colors_interp, 0.0, 1.0)
 
             # 计算光照
@@ -142,10 +141,10 @@ class NVDiffRastRenderer(object):
  
         # 8. 转换为numpy uint8并转换颜色通道（RGB -> BGR，适配OpenCV）
         render_image_np = np.clip(np.rint(toNumpy(image) * 255), 0, 255).astype(np.uint8)
-        render_image_np = render_image_np[:, :, ::-1]  # RGB -> BGR
+        render_image_np = render_image_np[..., ::-1]  # RGB -> BGR
 
         return {
-            'image': render_image_np,  # [H, W, 3] BGR格式
+            'image': render_image_np[0],  # [H, W, 3] BGR格式
             'rasterize_output': rast_out[0],  # [H, W, 4]
             'bary_derivs': rast_out_db[0] if rast_out_db is not None else torch.zeros_like(rast_out[0]),
         }

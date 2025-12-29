@@ -37,12 +37,23 @@ def demo():
         camera=camera,
         light_direction=light_direction,
         is_gray=False,
-        # paint_color=paint_color,
         paint_color=None,
     )
 
     if render_dict is None:
         print('render failed!')
+        return False
+
+    gray_render_dict = nvdiffrast_renderer.renderImage(
+        mesh=mesh,
+        camera=camera,
+        light_direction=light_direction,
+        is_gray=True,
+        paint_color=paint_color,
+    )
+
+    if gray_render_dict is None:
+        print('render gray failed!')
         return False
 
     for key, value in render_dict.items():
@@ -52,4 +63,5 @@ def demo():
             pass
 
     cv2.imwrite('./output/test_render.png', render_dict['image'])
+    cv2.imwrite('./output/test_render_gray.png', gray_render_dict['image'])
     return True
