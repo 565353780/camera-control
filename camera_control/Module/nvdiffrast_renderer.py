@@ -32,7 +32,7 @@ class NVDiffRastRenderer(object):
 
         Returns:
             dict包含:
-                - image: [H, W, 3] 渲染的图像 (RGB, uint8)
+                - image: [H, W, 3] 渲染的图像 (BGR格式, uint8, 适配OpenCV)
                 - rasterize_output: [H, W, 4] rasterize输出
                 - bary_derivs: [H, W, 4] 重心坐标导数
         """
@@ -140,11 +140,12 @@ class NVDiffRastRenderer(object):
         background = torch.ones_like(image)
         image = torch.where(mask.unsqueeze(-1), image, background)
  
-        # 8. 转换为numpy uint8
+        # 8. 转换为numpy uint8并转换颜色通道（RGB -> BGR，适配OpenCV）
         render_image_np = np.clip(np.rint(toNumpy(image) * 255), 0, 255).astype(np.uint8)
+        render_image_np = render_image_np[:, :, ::-1]  # RGB -> BGR
 
         return {
-            'image': render_image_np,  # [H, W, 3]
+            'image': render_image_np,  # [H, W, 3] BGR格式
             'rasterize_output': rast_out[0],  # [H, W, 4]
             'bary_derivs': rast_out_db[0] if rast_out_db is not None else torch.zeros_like(rast_out[0]),
         }
