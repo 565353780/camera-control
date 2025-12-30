@@ -284,7 +284,7 @@ class NVDiffRastRenderer(object):
         depth_vis_np = depth_vis_np[..., ::-1]  # RGB -> BGR
 
         return {
-            'depth': toNumpy(depth),  # [H, W] float32
+            'depth': depth,  # [H, W] float32
             'image': depth_vis_np,  # [H, W, 3] BGR格式
             'rasterize_output': rast_out[0],  # [H, W, 4]
             'bary_derivs': rast_out_db[0] if rast_out_db is not None else torch.zeros_like(rast_out[0]),
