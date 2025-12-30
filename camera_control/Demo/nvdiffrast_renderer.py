@@ -15,8 +15,6 @@ def demo():
     view_ratio = 0.95 
     device = "cuda:0"
 
-    nvdiffrast_renderer = NVDiffRastRenderer()
-
     mesh = loadMeshFile(mesh_file_path)
     assert mesh
 
@@ -32,36 +30,33 @@ def demo():
 
     light_direction = [1, 1, 1]
 
-    render_dict = nvdiffrast_renderer.renderImage(
+    render_texture_dict = NVDiffRastRenderer.renderTexture(
         mesh=mesh,
         camera=camera,
-        light_direction=light_direction,
-        is_gray=False,
-        paint_color=None,
     )
 
-    if render_dict is None:
-        print('render failed!')
-        return False
-
-    gray_render_dict = nvdiffrast_renderer.renderImage(
+    render_vertex_color_dict = NVDiffRastRenderer.renderVertexColor(
         mesh=mesh,
         camera=camera,
         light_direction=light_direction,
-        is_gray=True,
         paint_color=paint_color,
     )
 
-    if gray_render_dict is None:
-        print('render gray failed!')
-        return False
+    render_depth_dict = NVDiffRastRenderer.renderDepth(
+        mesh=mesh,
+        camera=camera,
+    )
 
-    for key, value in render_dict.items():
-        try:
-            print(key, value.shape)
-        except:
-            pass
+    render_normal_dict = NVDiffRastRenderer.renderNormal(
+        mesh=mesh,
+        camera=camera,
+    )
 
-    cv2.imwrite('./output/test_render.png', render_dict['image'])
-    cv2.imwrite('./output/test_render_gray.png', gray_render_dict['image'])
+    os.makedirs('./output/', exist_ok=True)
+
+    cv2.imwrite('./output/test_render_texture.png', render_texture_dict['image'])
+    cv2.imwrite('./output/test_render_vertex_color.png', render_vertex_color_dict['image'])
+    cv2.imwrite('./output/test_render_depth.png', render_depth_dict['image'])
+    cv2.imwrite('./output/test_render_normal_camera.png', render_normal_dict['normal_camera'])
+    cv2.imwrite('./output/test_render_normal_world.png', render_normal_dict['normal_world'])
     return True
