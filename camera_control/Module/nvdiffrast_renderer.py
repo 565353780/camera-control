@@ -258,7 +258,7 @@ class NVDiffRastRenderer(object):
 
         # 计算世界坐标系下的深度（Z坐标）
         vertices_interp, _ = dr.interpolate(vertices.unsqueeze(0), rast_out, faces)  # [1, H, W, 3]
-        
+
         # 将顶点转换到相机坐标系
         vertices_cam = torch.matmul(vertices_interp[0] - camera.t, camera.R.T)  # [H, W, 3]
         depth = vertices_cam[:, :, 2]  # [H, W] - 相机坐标系下的Z值
