@@ -260,8 +260,10 @@ class NVDiffRastRenderer(object):
         vertices_interp, _ = dr.interpolate(vertices.unsqueeze(0), rast_out, faces)  # [1, H, W, 3]
 
         # 将顶点转换到相机坐标系
-        vertices_cam = torch.matmul(vertices_interp[0] - camera.t, camera.R.T)  # [H, W, 3]
-        depth = vertices_cam[:, :, 2]  # [H, W] - 相机坐标系下的Z值
+        # 正确的变换: p_camera = R @ p_world + t
+        vertices_cam = torch.matmul(vertices_interp[0], camera.R.T) + camera.t  # [H, W, 3]
+        # 由于相机坐标系Z向后（看向-Z方向），物体在前方时Z为负值，所以深度取-Z
+        depth = -vertices_cam[:, :, 2]  # [H, W] - 深度（距离相机的正值）
 
         # 处理背景
         mask = rast_out[0, :, :, 3] > 0  # [H, W]
