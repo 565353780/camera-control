@@ -35,18 +35,18 @@ class CameraData(object):
         - u 方向：沿 X 轴（向右）
         - v 方向：沿 Y 轴（向上）
         """
-        self.width = width
-        self.height = height
-        self.fx = fx
-        self.fy = fy
+        self.width = int(width)
+        self.height = int(height)
+        self.fx = float(fx)
+        self.fy = float(fy)
         if cx is None:
             self.cx = 0.5 * self.width
         else:
-            self.cx = cx
+            self.cx = float(cx)
         if cy is None:
             self.cy = 0.5 * self.height
         else:
-            self.cy = cy
+            self.cy = float(cy)
         self.dtype = dtype
         self.device = device
 
@@ -186,6 +186,53 @@ class CameraData(object):
         t = -R @ pos
 
         self.setWorld2CameraByRt(R, t)
+        return True
+
+    def setWorld2CameraByCamera2WorldCV(
+        self,
+        camera2world_cv: Union[torch.Tensor, np.ndarray, list],
+    ) -> bool:
+        """
+        通过 OpenCV 坐标系下的 camera2world 矩阵设置 world2camera
+
+        转换关系：
+        camera2worldCV = C @ camera2world @ C
+        其中 C = diag([1, -1, -1, 1])
+
+        反推步骤：
+        1. camera2world = C @ camera2worldCV @ C  (因为 C @ C = I)
+        2. 从 camera2world 提取 R^T 和 -R^T @ t
+        3. 计算 R = (R^T)^T 和 t = -R @ (camera2world[:3, 3])
+        4. 构建 world2camera = [R | t; 0 | 1]
+
+        Args:
+            camera2world_cv: OpenCV 坐标系下的 camera2world 矩阵 (4x4)
+        """
+        camera2world_cv = toTensor(camera2world_cv, self.dtype, self.device).reshape(4, 4)
+
+        # 定义坐标系转换矩阵
+        C = torch.diag(torch.tensor([1, -1, -1, 1], dtype=self.dtype, device=self.device))
+
+        # 从 OpenCV 坐标系转换到原始坐标系
+        # camera2world = C @ camera2worldCV @ C
+        camera2world = C @ camera2world_cv @ C
+
+        # 从 camera2world 解析出 world2camera
+        # camera2world = [R^T | -R^T @ t]
+        #                [0   | 1       ]
+        # 
+        # world2camera = [R | t]
+        #                [0 | 1]
+        R_T = camera2world[:3, :3]  # 提取 R^T
+        neg_RT_t = camera2world[:3, 3]  # 提取 -R^T @ t
+
+        # 计算 R 和 t
+        R = R_T.T  # R = (R^T)^T
+        t = -R @ neg_RT_t  # t = -R @ (-R^T @ t) = R @ R^T @ t
+
+        # 使用解析方法设置 world2camera
+        self.setWorld2CameraByRt(R, t)
+
         return True
 
     def focusOnPoints(
