@@ -84,6 +84,11 @@ class CameraData(object):
         return -self.R.T @ self.t
 
     @property
+    def world2cameraCV(self) -> torch.Tensor:
+        C = torch.diag(torch.tensor([1, -1, -1, 1], dtype=self.dtype, device=self.device))
+        return C @ self.world2camera
+
+    @property
     def camera2world(self) -> torch.Tensor:
         """
         计算相机坐标系到世界坐标系的变换矩阵
@@ -102,6 +107,11 @@ class CameraData(object):
         camera2world[:3, 3] = -R_T @ self.t  # -R^T @ t
 
         return camera2world
+
+    @property
+    def camera2worldCV(self) -> torch.Tensor:
+        C = torch.diag(torch.tensor([1, -1, -1, 1], dtype=self.dtype, device=self.device))
+        return C @ self.camera2world @ C
 
     def setWorld2CameraByRt(
         self,
