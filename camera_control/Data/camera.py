@@ -1,3 +1,4 @@
+import os
 import torch
 import numpy as np
 import open3d as o3d
@@ -86,7 +87,7 @@ class CameraData(object):
     @property
     def world2cameraCV(self) -> torch.Tensor:
         C = torch.diag(torch.tensor([1, -1, -1, 1], dtype=self.dtype, device=self.device))
-        return C @ self.world2camera
+        return C @ self.world2camera @ C
 
     @property
     def camera2world(self) -> torch.Tensor:
@@ -233,6 +234,29 @@ class CameraData(object):
         # 使用解析方法设置 world2camera
         self.setWorld2CameraByRt(R, t)
 
+        return True
+
+    def loadVGGTCameraFile(
+        self,
+        vggt_camera_txt_file_path: str,
+    ) -> bool:
+        if not os.path.exists(vggt_camera_txt_file_path):
+            print('[ERROR][Camera::loadVGGTCameraFile]')
+            print('\t vggt camera txt file not exist!')
+            print('\t vggt_camera_txt_file_path:', vggt_camera_txt_file_path)
+            return False
+
+        camera2world_cv = np.eye(4)
+        with open(vggt_camera_txt_file_path, 'r') as f:
+            lines = f.readlines()
+
+        for i in range(3):
+            camera2world_cv[i] = [float(d) for d in lines[i].split()]
+
+        self.setWorld2CameraByCamera2WorldCV(camera2world_cv)
+
+        self.fx, _, _ = [float(d) for d in lines[3].split()]
+        _, self.fy, _ = [float(d) for d in lines[4].split()]
         return True
 
     def focusOnPoints(
