@@ -6,6 +6,7 @@ from copy import deepcopy
 from typing import Union, Optional
 
 from camera_control.Method.data import toNumpy, toTensor
+from camera_control.Method.path import removeFile, createFileFolder
 
 
 class CameraData(object):
@@ -57,6 +58,43 @@ class CameraData(object):
             pos = toTensor(pos)
             self.setWorld2Camera(look_at, up, pos)
         return
+
+    @classmethod
+    def fromDict(
+        cls,
+        data_dict: dict,
+        dtype=torch.float32,
+        device: str='cpu',
+    ) -> "CameraData":
+        camera = cls(
+            width=data_dict['width'],
+            height=data_dict['height'],
+            fx=data_dict['fx'],
+            fy=data_dict['fy'],
+            cx=data_dict['cx'],
+            cy=data_dict['cy'],
+            world2camera=data_dict['world2camera'],
+            dtype=dtype,
+            device=device,
+        )
+        return camera
+
+    @classmethod
+    def fromDictFile(
+        cls,
+        npy_file_path: str,
+        dtype=torch.float32,
+        device: str='cpu',
+    ) -> "CameraData":
+        if not os.path.exists(npy_file_path):
+            print('[ERROR][CameraData::fromDictFile]')
+            print('\t npy file not exist!')
+            print("\t npy_file_path:", npy_file_path)
+            return cls()
+
+        data_dict = np.load(npy_file_path, allow_pickle=True)
+
+        return cls.fromDict(data_dict, dtype, device)
 
     def clone(self):
         return deepcopy(self)
@@ -375,6 +413,37 @@ class CameraData(object):
         mvp = ndc_y_flip @ proj @ self.world2camera
 
         return mvp
+
+    def toDict(self) -> dict:
+        data_dict = {
+            'width': self.width,
+            'height': self.height,
+            'fx': self.fx,
+            'fy': self.fy,
+            'cx': self.cx,
+            'cy': self.cy,
+            'world2camera': toNumpy(self.world2camera, np.float64),
+        }
+
+        return data_dict
+
+    def save(
+        self,
+        save_npy_file_path: str,
+        overwrite: bool=False,
+    ) -> bool:
+        if os.path.exists(save_npy_file_path):
+            if not overwrite:
+                return True
+
+            removeFile(save_npy_file_path)
+
+        data_dict = self.toDict()
+
+        createFileFolder(save_npy_file_path)
+
+        np.save(save_npy_file_path, data_dict, allow_pickle=True)
+        return True
 
     def outputInfo(
         self,
