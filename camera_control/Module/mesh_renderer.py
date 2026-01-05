@@ -184,7 +184,7 @@ class MeshRenderer(object):
         print('\t start create da3 data file...')
         for key, single_render_data_dict in render_data_dict.items():
             camera_data_dict = single_render_data_dict['camera']
-            rgb = single_render_data_dict['rgb']
+            rgb = single_render_data_dict['rgb'][..., ::-1]
             # depth = single_render_data_dict['depth']
             # depth_vis = single_render_data_dict['depth_vis']
 
