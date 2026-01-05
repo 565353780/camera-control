@@ -20,6 +20,8 @@ def demo() -> bool:
         save_data_folder_path + 'omnivggt/',
         camera_num=camera_num,
         camera_dist=camera_dist,
+        width=518,
+        height=518,
         device=device,
     )
 
@@ -28,6 +30,8 @@ def demo() -> bool:
         save_data_folder_path + 'da3/render_data.npy',
         camera_num=camera_num,
         camera_dist=camera_dist,
+        width=504,
+        height=504,
         device=device,
     )
     return True

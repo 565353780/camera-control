@@ -203,7 +203,7 @@ class Camera(CameraData):
 
         # 获取uv的前N-1维形状
         uv_shape = uv.shape[:-1]  # 去掉最后一维（2）
-        
+
         # 处理depth的形状，使其与uv_shape兼容
         # 如果depth是标量，直接广播
         if depth.ndim == 0:
