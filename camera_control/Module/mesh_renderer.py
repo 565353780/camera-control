@@ -190,11 +190,11 @@ class MeshRenderer(object):
 
             camera = Camera.fromDict(camera_data_dict)
 
-            camera2world = toNumpy(camera.camera2world, np.float32)
+            extrinsic = toNumpy(camera.world2cameraCV, np.float32)
             intrinsic = toNumpy(camera.intrinsic, np.float32)
 
             images.append(rgb)
-            extrinsics.append(camera2world)
+            extrinsics.append(extrinsic)
             intrinsics.append(intrinsic)
 
         images_np = np.stack(images, axis=0)

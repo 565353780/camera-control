@@ -227,6 +227,34 @@ class CameraData(object):
         self.setWorld2CameraByRt(R, t)
         return True
 
+    def setWorld2CameraByWorld2CameraCV(
+        self,
+        world2camera_cv: Union[torch.Tensor, np.ndarray, list],
+    ) -> bool:
+        """
+        通过 OpenCV 坐标系下的 world2camera 矩阵设置 world2camera
+
+        转换关系：
+        world2cameraCV = C @ world2camera @ C
+        其中 C = diag([1, -1, -1, 1])
+
+        反推步骤：
+        world2camera = C @ world2cameraCV @ C  (因为 C @ C = I)
+
+        Args:
+            world2camera_cv: OpenCV 坐标系下的 world2camera 矩阵 (4x4)
+        """
+        world2camera_cv = toTensor(world2camera_cv, self.dtype, self.device).reshape(4, 4)
+
+        # 定义坐标系转换矩阵
+        C = torch.diag(torch.tensor([1, -1, -1, 1], dtype=self.dtype, device=self.device))
+
+        # 从 OpenCV 坐标系转换到原始坐标系
+        # world2camera = C @ world2cameraCV @ C
+        self.world2camera = C @ world2camera_cv @ C
+
+        return True
+
     def setWorld2CameraByCamera2WorldCV(
         self,
         camera2world_cv: Union[torch.Tensor, np.ndarray, list],
