@@ -72,6 +72,200 @@ class MeshRenderer(object):
         return render_data_dict
 
     @staticmethod
+    def rotationMatrixToQuaternion(R: np.ndarray) -> np.ndarray:
+        """
+        将3x3旋转矩阵转换为四元数 (w, x, y, z)
+
+        Args:
+            R: 3x3旋转矩阵
+
+        Returns:
+            四元数 [w, x, y, z]
+        """
+        trace = R[0, 0] + R[1, 1] + R[2, 2]
+
+        if trace > 0:
+            s = 0.5 / np.sqrt(trace + 1.0)
+            w = 0.25 / s
+            x = (R[2, 1] - R[1, 2]) * s
+            y = (R[0, 2] - R[2, 0]) * s
+            z = (R[1, 0] - R[0, 1]) * s
+        elif R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
+            s = 2.0 * np.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2])
+            w = (R[2, 1] - R[1, 2]) / s
+            x = 0.25 * s
+            y = (R[0, 1] + R[1, 0]) / s
+            z = (R[0, 2] + R[2, 0]) / s
+        elif R[1, 1] > R[2, 2]:
+            s = 2.0 * np.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2])
+            w = (R[0, 2] - R[2, 0]) / s
+            x = (R[0, 1] + R[1, 0]) / s
+            y = 0.25 * s
+            z = (R[1, 2] + R[2, 1]) / s
+        else:
+            s = 2.0 * np.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1])
+            w = (R[1, 0] - R[0, 1]) / s
+            x = (R[0, 2] + R[2, 0]) / s
+            y = (R[1, 2] + R[2, 1]) / s
+            z = 0.25 * s
+
+        return np.array([w, x, y, z], dtype=np.float64)
+
+    @staticmethod
+    def createColmapDataFolder(
+        mesh: trimesh.Trimesh,
+        save_data_folder_path: str,
+        camera_num: int = 20,
+        camera_dist: float = 2.5,
+        width: int = 518,
+        height: int = 518,
+        fx: float = 500.0,
+        fy: float = 500.0,
+        dtype = torch.float32,
+        device: str = 'cuda:0',
+    ) -> bool:
+        """
+        创建用于训练3DGS的COLMAP格式数据文件夹
+
+        生成的数据结构：
+        save_data_folder_path/
+        ├── images/           # 渲染的图像
+        │   ├── 00000.png
+        │   ├── 00001.png
+        │   └── ...
+        └── sparse/
+            └── 0/
+                ├── cameras.txt   # 相机内参 (PINHOLE模型)
+                ├── images.txt    # 图像外参 (四元数 + 平移)
+                └── points3D.txt  # 3D点云 (空文件)
+
+        COLMAP坐标系（OpenCV坐标系）：
+        - X轴：向右
+        - Y轴：向下
+        - Z轴：向前（相机看向 +Z 方向）
+
+        Args:
+            mesh: 要渲染的网格
+            save_data_folder_path: 保存数据的文件夹路径
+            camera_num: 采样的相机数量
+            camera_dist: 相机到物体中心的距离
+            width: 图像宽度
+            height: 图像高度
+            fx: 焦距x
+            fy: 焦距y
+            cx: 主点x（默认为width/2）
+            cy: 主点y（默认为height/2）
+            dtype: 数据类型
+            device: 计算设备
+
+        Returns:
+            是否成功
+        """
+        cx = width / 2.0
+        cy = height / 2.0
+
+        if os.path.exists(save_data_folder_path):
+            rmtree(save_data_folder_path)
+
+        # 创建文件夹结构
+        if not save_data_folder_path.endswith('/'):
+            save_data_folder_path += '/'
+
+        images_folder_path = save_data_folder_path + 'images/'
+        sparse_folder_path = save_data_folder_path + 'sparse/0/'
+        os.makedirs(images_folder_path, exist_ok=True)
+        os.makedirs(sparse_folder_path, exist_ok=True)
+
+        # 渲染数据
+        render_data_dict = MeshRenderer.sampleRenderData(
+            mesh=mesh,
+            camera_num=camera_num,
+            camera_dist=camera_dist,
+            width=width,
+            height=height,
+            fx=fx,
+            fy=fy,
+            dtype=dtype,
+            device=device,
+        )
+
+        # 准备cameras.txt内容
+        # COLMAP格式: CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]
+        # PINHOLE模型参数: fx, fy, cx, cy
+        cameras_txt_lines = [
+            "# Camera list with one line of data per camera:\n",
+            "#   CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]\n",
+            f"# Number of cameras: 1\n",
+            f"1 PINHOLE {width} {height} {fx} {fy} {cx} {cy}\n"
+        ]
+
+        # 准备images.txt内容
+        # COLMAP格式: IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME
+        # 然后是一行2D点（可以为空）
+        images_txt_lines = [
+            "# Image list with two lines of data per image:\n",
+            "#   IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME\n",
+            "#   POINTS2D[] as (X, Y, POINT3D_ID)\n",
+            f"# Number of images: {len(render_data_dict)}\n",
+        ]
+
+        print('[INFO][MeshRenderer::createColmapDataFolder]')
+        print('\t start create colmap data folder...')
+        for key, single_render_data_dict in render_data_dict.items():
+            camera_data_dict = single_render_data_dict['camera']
+            rgb = single_render_data_dict['rgb']
+
+            camera = Camera.fromDict(camera_data_dict)
+
+            # 获取OpenCV坐标系下的world2camera矩阵
+            world2camera_cv = toNumpy(camera.world2cameraCV, np.float64)
+
+            # 提取旋转矩阵和平移向量
+            R = world2camera_cv[:3, :3]
+            t = world2camera_cv[:3, 3]
+
+            # 将旋转矩阵转换为四元数 (w, x, y, z)
+            quat = MeshRenderer.rotationMatrixToQuaternion(R)
+            qw, qx, qy, qz = quat
+
+            # 图像文件名
+            image_name = f"{key:05d}.png"
+            image_id = key + 1  # COLMAP的ID从1开始
+
+            # 保存图像
+            cv2.imwrite(images_folder_path + image_name, rgb)
+
+            # 添加到images.txt
+            # 格式: IMAGE_ID QW QX QY QZ TX TY TZ CAMERA_ID NAME
+            images_txt_lines.append(
+                f"{image_id} {qw:.10f} {qx:.10f} {qy:.10f} {qz:.10f} "
+                f"{t[0]:.10f} {t[1]:.10f} {t[2]:.10f} 1 {image_name}\n"
+            )
+            # 空行表示没有2D特征点
+            images_txt_lines.append("\n")
+
+        # 写入cameras.txt
+        with open(sparse_folder_path + 'cameras.txt', 'w') as f:
+            f.writelines(cameras_txt_lines)
+
+        # 写入images.txt
+        with open(sparse_folder_path + 'images.txt', 'w') as f:
+            f.writelines(images_txt_lines)
+
+        # 写入空的points3D.txt
+        points3d_txt_lines = [
+            "# 3D point list with one line of data per point:\n",
+            "#   POINT3D_ID, X, Y, Z, R, G, B, ERROR, TRACK[] as (IMAGE_ID, POINT2D_IDX)\n",
+            "# Number of points: 0\n",
+        ]
+        with open(sparse_folder_path + 'points3D.txt', 'w') as f:
+            f.writelines(points3d_txt_lines)
+
+        print(f'\t saved to: {save_data_folder_path}')
+        print(f'\t total images: {len(render_data_dict)}')
+        return True
+
+    @staticmethod
     def createOmniVGGTDataFolder(
         mesh: trimesh.Trimesh,
         save_data_folder_path: str,
