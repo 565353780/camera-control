@@ -137,7 +137,7 @@ class MeshRenderer(object):
             └── 0/
                 ├── cameras.txt   # 相机内参 (PINHOLE模型)
                 ├── images.txt    # 图像外参 (四元数 + 平移)
-                └── points3D.txt  # 3D点云 (空文件)
+                └── points3D.ply  # 3D点云 (从mesh的vertices生成)
 
         COLMAP坐标系（OpenCV坐标系）：
         - X轴：向右
@@ -252,17 +252,53 @@ class MeshRenderer(object):
         with open(sparse_folder_path + 'images.txt', 'w') as f:
             f.writelines(images_txt_lines)
 
-        # 写入空的points3D.txt
-        points3d_txt_lines = [
-            "# 3D point list with one line of data per point:\n",
-            "#   POINT3D_ID, X, Y, Z, R, G, B, ERROR, TRACK[] as (IMAGE_ID, POINT2D_IDX)\n",
-            "# Number of points: 0\n",
-        ]
-        with open(sparse_folder_path + 'points3D.txt', 'w') as f:
-            f.writelines(points3d_txt_lines)
+        # 生成points3D.ply点云文件
+        print('\t generating points3D.ply from mesh vertices...')
+        vertices = toNumpy(mesh.vertices, np.float32)
+
+        # 获取顶点颜色（如果存在）
+        if hasattr(mesh, 'visual') and hasattr(mesh.visual, 'vertex_colors') and mesh.visual.vertex_colors is not None:
+            vertex_colors = mesh.visual.vertex_colors
+            # 确保颜色是uint8格式
+            if vertex_colors.dtype != np.uint8:
+                if vertex_colors.max() <= 1.0:
+                    vertex_colors = (vertex_colors * 255.0).astype(np.uint8)
+                else:
+                    vertex_colors = vertex_colors.astype(np.uint8)
+            # 确保是RGB格式（3通道）
+            if vertex_colors.shape[1] > 3:
+                vertex_colors = vertex_colors[:, :3]
+        else:
+            # 默认使用白色
+            vertex_colors = np.ones((vertices.shape[0], 3), dtype=np.uint8) * 255
+
+        # 获取顶点法线（如果存在）
+        if hasattr(mesh, 'vertex_normals') and mesh.vertex_normals is not None:
+            vertex_normals = toNumpy(mesh.vertex_normals, np.float32)
+        else:
+            # 如果没有法线，计算法线或使用零向量
+            try:
+                mesh.vertex_normals = mesh.vertex_normals  # 触发自动计算
+                vertex_normals = toNumpy(mesh.vertex_normals, np.float32)
+            except:
+                # 如果计算失败，使用零向量
+                vertex_normals = np.zeros((vertices.shape[0], 3), dtype=np.float32)
+
+        # 创建点云mesh（只包含顶点，不包含面）
+        point_cloud_mesh = trimesh.Trimesh(
+            vertices=vertices,
+            vertex_colors=vertex_colors,
+            vertex_normals=vertex_normals,
+            process=False
+        )
+
+        # 导出为PLY格式
+        ply_path = sparse_folder_path + 'points3D.ply'
+        point_cloud_mesh.export(ply_path, file_type='ply')
 
         print(f'\t saved to: {save_data_folder_path}')
         print(f'\t total images: {len(render_data_dict)}')
+        print(f'\t total points: {vertices.shape[0]}')
         return True
 
     @staticmethod
