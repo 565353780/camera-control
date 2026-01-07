@@ -82,6 +82,7 @@ class NVDiffRastRenderer(object):
         camera: Camera,
         light_direction: Union[torch.Tensor, np.ndarray, list] = [1, 1, 1],
         paint_color: Optional[list] = None,
+        bg_color: list = [255, 255, 255],
     ) -> dict:
         """
         渲染基于法向计算的shading图
@@ -91,6 +92,7 @@ class NVDiffRastRenderer(object):
             camera: Camera对象
             light_direction: 光照方向（世界坐标系），默认为[1, 1, 1]
             paint_color: 可选的颜色列表（长度为3，0-1或0-255范围）
+            bg_color: 背景颜色列表（长度为3，0-255范围），默认为[255, 255, 255]（白色）
 
         Returns:
             dict包含:
@@ -137,9 +139,10 @@ class NVDiffRastRenderer(object):
         # 应用光照
         image = colors_interp[0] * shading.unsqueeze(-1)  # [H, W, 3]
 
-        # 处理背景为白色
+        # 处理背景色
         mask = rast_out[0, :, :, 3] > 0  # [H, W]
-        background = torch.ones_like(image)
+        bg_color_tensor = toTensor(bg_color, torch.float32, camera.device)[:3] / 255.0
+        background = bg_color_tensor.unsqueeze(0).unsqueeze(0).expand(image.shape[0], image.shape[1], -1)  # [H, W, 3]
         image = torch.where(mask.unsqueeze(-1), image, background)
 
         # 转换为numpy uint8并转换颜色通道（RGB -> BGR，适配OpenCV）
@@ -147,7 +150,7 @@ class NVDiffRastRenderer(object):
         render_image_np = render_image_np[..., ::-1]  # RGB -> BGR
 
         return {
-            'image': render_image_np[0],  # [H, W, 3] BGR格式
+            'image': render_image_np,  # [H, W, 3] BGR格式
             'rasterize_output': rast_out[0],  # [H, W, 4]
             'bary_derivs': rast_out_db[0] if rast_out_db is not None else torch.zeros_like(rast_out[0]),
         }
@@ -157,6 +160,7 @@ class NVDiffRastRenderer(object):
         mesh: Union[trimesh.Trimesh, trimesh.Scene],
         camera: Camera,
         paint_color: Optional[list] = None,
+        bg_color: list = [255, 255, 255],
     ) -> dict:
         """
         渲染网格本身颜色（包括纹理或顶点颜色，不带光照）
@@ -165,6 +169,7 @@ class NVDiffRastRenderer(object):
             mesh: trimesh.Trimesh或trimesh.Scene对象
             camera: Camera对象
             paint_color: 可选的颜色列表（长度为3，0-1或0-255范围）
+            bg_color: 背景颜色列表（长度为3，0-255范围），默认为[255, 255, 255]（白色）
 
         Returns:
             dict包含:
@@ -220,9 +225,10 @@ class NVDiffRastRenderer(object):
             colors_interp, _ = dr.interpolate(vertex_colors.unsqueeze(0).contiguous(), rast_out, faces)  # [1, H, W, 3]
             image = torch.clamp(colors_interp[0], 0.0, 1.0)  # [H, W, 3]
 
-        # 处理背景为白色
+        # 处理背景色
         mask = rast_out[0, :, :, 3] > 0  # [H, W]
-        background = torch.ones_like(image)
+        bg_color_tensor = toTensor(bg_color, torch.float32, camera.device)[:3] / 255.0
+        background = bg_color_tensor.unsqueeze(0).unsqueeze(0).expand(image.shape[0], image.shape[1], -1)  # [H, W, 3]
         image = torch.where(mask.unsqueeze(-1), image, background)
 
         # 转换为numpy uint8并转换颜色通道（RGB -> BGR，适配OpenCV）
@@ -239,6 +245,7 @@ class NVDiffRastRenderer(object):
     def renderDepth(
         mesh: Union[trimesh.Trimesh, trimesh.Scene],
         camera: Camera,
+        bg_color: list = [255, 255, 255],
     ) -> dict:
         """
         渲染深度图
@@ -246,6 +253,7 @@ class NVDiffRastRenderer(object):
         Args:
             mesh: trimesh.Trimesh或trimesh.Scene对象
             camera: Camera对象
+            bg_color: 背景颜色列表（长度为3，0-255范围），默认为[255, 255, 255]（白色）
 
         Returns:
             dict包含:
@@ -280,9 +288,16 @@ class NVDiffRastRenderer(object):
 
         depth_normalized = torch.where(mask, depth_normalized, torch.ones_like(depth_normalized))
 
-        # 转换为BGR格式的uint8图像（灰度图）
+        # 转换为RGB格式的uint8图像（灰度图）
         depth_vis = torch.stack([depth_normalized] * 3, dim=-1)  # [H, W, 3]
         depth_vis_np = np.clip(np.rint(toNumpy(depth_vis) * 255), 0, 255).astype(np.uint8)
+        
+        # 应用背景色（在RGB格式下）
+        bg_color_np = np.array(bg_color[:3], dtype=np.uint8)
+        mask_np = toNumpy(mask).astype(bool)
+        depth_vis_np[~mask_np] = bg_color_np
+        
+        # 转换为BGR格式
         depth_vis_np = depth_vis_np[..., ::-1]  # RGB -> BGR
 
         return {
@@ -296,6 +311,7 @@ class NVDiffRastRenderer(object):
     def renderNormal(
         mesh: Union[trimesh.Trimesh, trimesh.Scene],
         camera: Camera,
+        bg_color: list = [255, 255, 255],
     ) -> dict:
         """
         渲染法向图
@@ -303,6 +319,7 @@ class NVDiffRastRenderer(object):
         Args:
             mesh: trimesh.Trimesh或trimesh.Scene对象
             camera: Camera对象
+            bg_color: 背景颜色列表（长度为3，0-255范围），默认为[255, 255, 255]（白色）
 
         Returns:
             dict包含:
@@ -320,15 +337,16 @@ class NVDiffRastRenderer(object):
         # 转换到相机坐标系
         normals_camera = torch.matmul(normals_world, camera.R.T)  # [H, W, 3]
 
+        # 将法向从[-1, 1]映射到[0, 1]用于可视化
+        normals_world_mapped = (normals_world + 1.0) * 0.5
+        normals_camera_mapped = (normals_camera + 1.0) * 0.5
+
         # 处理背景
         mask = rast_out[0, :, :, 3] > 0  # [H, W]
-        background = torch.ones_like(normals_world)
-        normals_world_vis = torch.where(mask.unsqueeze(-1), normals_world, background)
-        normals_camera_vis = torch.where(mask.unsqueeze(-1), normals_camera, background)
-
-        # 将法向从[-1, 1]映射到[0, 1]用于可视化
-        normals_world_vis = (normals_world_vis + 1.0) * 0.5
-        normals_camera_vis = (normals_camera_vis + 1.0) * 0.5
+        bg_color_tensor = toTensor(bg_color, torch.float32, camera.device)[:3] / 255.0
+        background = bg_color_tensor.unsqueeze(0).unsqueeze(0).expand(normals_world.shape[0], normals_world.shape[1], -1)  # [H, W, 3]
+        normals_world_vis = torch.where(mask.unsqueeze(-1), normals_world_mapped, background)
+        normals_camera_vis = torch.where(mask.unsqueeze(-1), normals_camera_mapped, background)
 
         # 转换为numpy uint8并转换颜色通道（RGB -> BGR，适配OpenCV）
         normal_world_np = np.clip(np.rint(toNumpy(normals_world_vis) * 255), 0, 255).astype(np.uint8)

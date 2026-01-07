@@ -25,6 +25,7 @@ class MeshRenderer(object):
         height: int = 518,
         fx: float = 500.0,
         fy: float = 500.0,
+        bg_color: list=[255, 255, 255],
         dtype = torch.float32,
         device: str = 'cuda:0',
     ) -> dict:
@@ -52,11 +53,13 @@ class MeshRenderer(object):
             render_image_dict = NVDiffRastRenderer.renderTexture(
                 mesh=mesh,
                 camera=camera,
+                bg_color=bg_color,
             )
 
             render_depth_dict = NVDiffRastRenderer.renderDepth(
                 mesh=mesh,
                 camera=camera,
+                bg_color=bg_color,
             )
 
             image = render_image_dict['image']
@@ -105,6 +108,7 @@ class MeshRenderer(object):
         height: int = 518,
         fx: float = 500.0,
         fy: float = 500.0,
+        bg_color: list=[255, 255, 255],
         dtype = torch.float32,
         device: str = 'cuda:0',
     ) -> bool:
@@ -169,6 +173,7 @@ class MeshRenderer(object):
             height=height,
             fx=fx,
             fy=fy,
+            bg_color=bg_color,
             dtype=dtype,
             device=device,
         )
@@ -305,6 +310,7 @@ class MeshRenderer(object):
         height: int = 518,
         fx: float = 500.0,
         fy: float = 500.0,
+        bg_color: list=[255, 255, 255],
         dtype = torch.float32,
         device: str = 'cuda:0',
     ) -> bool:
@@ -329,6 +335,7 @@ class MeshRenderer(object):
             height=height,
             fx=fx,
             fy=fy,
+            bg_color=bg_color,
             dtype=dtype,
             device=device,
         )
@@ -385,6 +392,7 @@ class MeshRenderer(object):
         height: int = 518,
         fx: float = 500.0,
         fy: float = 500.0,
+        bg_color: list=[255, 255, 255],
         dtype = torch.float32,
         device: str = 'cuda:0',
     ) -> bool:
@@ -396,6 +404,7 @@ class MeshRenderer(object):
             height=height,
             fx=fx,
             fy=fy,
+            bg_color=bg_color,
             dtype=dtype,
             device=device,
         )

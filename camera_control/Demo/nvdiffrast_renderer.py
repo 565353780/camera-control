@@ -12,6 +12,7 @@ def demo():
     #mesh_file_path = home + '/chLi/Dataset/MM/Match/GTstageone/c6c113443a8ebb331ed307f33b1385c31a7d0c2fa8ed97b511511048e9e1a4af_decoded.ply'
     mesh_file_path = home + '/chLi/Dataset/MM/Match/nezha/nezha.glb'
     paint_color = [178, 178, 178]
+    bg_color = [255, 255, 255]
     view_ratio = 0.95 
     device = "cuda:0"
 
@@ -33,6 +34,7 @@ def demo():
     render_texture_dict = NVDiffRastRenderer.renderTexture(
         mesh=mesh,
         camera=camera,
+        bg_color=bg_color,
     )
 
     render_vertex_color_dict = NVDiffRastRenderer.renderVertexColor(
@@ -40,16 +42,19 @@ def demo():
         camera=camera,
         light_direction=light_direction,
         paint_color=paint_color,
+        bg_color=bg_color,
     )
 
     render_depth_dict = NVDiffRastRenderer.renderDepth(
         mesh=mesh,
         camera=camera,
+        bg_color=bg_color,
     )
 
     render_normal_dict = NVDiffRastRenderer.renderNormal(
         mesh=mesh,
         camera=camera,
+        bg_color=bg_color,
     )
 
     os.makedirs('./output/', exist_ok=True)

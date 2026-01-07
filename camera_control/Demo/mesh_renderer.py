@@ -13,6 +13,7 @@ def demo() -> bool:
     save_data_folder_path = home + "/chLi/Dataset/MM/Match/" + shape_id + "/"
     camera_num = 20
     camera_dist = 2.5
+    bg_color = [255, 255, 255]
     device = 'cuda:0'
 
     mesh = loadMeshFile(mesh_file_path)
@@ -25,6 +26,7 @@ def demo() -> bool:
             camera_dist=0.5,
             width=518,
             height=518,
+            bg_color=[0, 0, 0],
             device=device,
         )
  
@@ -36,6 +38,7 @@ def demo() -> bool:
             camera_dist=camera_dist,
             width=518,
             height=518,
+            bg_color=bg_color,
             device=device,
         )
 
@@ -47,6 +50,7 @@ def demo() -> bool:
             camera_dist=camera_dist,
             width=504,
             height=504,
+            bg_color=bg_color,
             device=device,
         )
     return True
