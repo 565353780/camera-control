@@ -75,6 +75,7 @@ class MeshRenderer(object):
     def rotationMatrixToQuaternion(R: np.ndarray) -> np.ndarray:
         """
         将3x3旋转矩阵转换为四元数 (w, x, y, z)
+        使用与 COLMAP 一致的 rotmat2qvec 算法
 
         Args:
             R: 3x3旋转矩阵
@@ -82,34 +83,17 @@ class MeshRenderer(object):
         Returns:
             四元数 [w, x, y, z]
         """
-        trace = R[0, 0] + R[1, 1] + R[2, 2]
-
-        if trace > 0:
-            s = 0.5 / np.sqrt(trace + 1.0)
-            w = 0.25 / s
-            x = (R[2, 1] - R[1, 2]) * s
-            y = (R[0, 2] - R[2, 0]) * s
-            z = (R[1, 0] - R[0, 1]) * s
-        elif R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
-            s = 2.0 * np.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2])
-            w = (R[2, 1] - R[1, 2]) / s
-            x = 0.25 * s
-            y = (R[0, 1] + R[1, 0]) / s
-            z = (R[0, 2] + R[2, 0]) / s
-        elif R[1, 1] > R[2, 2]:
-            s = 2.0 * np.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2])
-            w = (R[0, 2] - R[2, 0]) / s
-            x = (R[0, 1] + R[1, 0]) / s
-            y = 0.25 * s
-            z = (R[1, 2] + R[2, 1]) / s
-        else:
-            s = 2.0 * np.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1])
-            w = (R[1, 0] - R[0, 1]) / s
-            x = (R[0, 2] + R[2, 0]) / s
-            y = (R[1, 2] + R[2, 1]) / s
-            z = 0.25 * s
-
-        return np.array([w, x, y, z], dtype=np.float64)
+        Rxx, Ryx, Rzx, Rxy, Ryy, Rzy, Rxz, Ryz, Rzz = R.flatten()
+        K = np.array([
+            [Rxx - Ryy - Rzz, 0, 0, 0],
+            [Ryx + Rxy, Ryy - Rxx - Rzz, 0, 0],
+            [Rzx + Rxz, Rzy + Ryz, Rzz - Rxx - Ryy, 0],
+            [Ryz - Rzy, Rzx - Rxz, Rxy - Ryx, Rxx + Ryy + Rzz]]) / 3.0
+        eigvals, eigvecs = np.linalg.eigh(K)
+        qvec = eigvecs[[3, 0, 1, 2], np.argmax(eigvals)]
+        if qvec[0] < 0:
+            qvec *= -1
+        return qvec.astype(np.float64)
 
     @staticmethod
     def createColmapDataFolder(
@@ -139,10 +123,11 @@ class MeshRenderer(object):
                 ├── images.txt    # 图像外参 (四元数 + 平移)
                 └── points3D.ply  # 3D点云 (从mesh的vertices生成)
 
-        COLMAP坐标系（OpenCV坐标系）：
-        - X轴：向右
-        - Y轴：向下
-        - Z轴：向前（相机看向 +Z 方向）
+        坐标系转换说明：
+        - 原始相机坐标系 (camera.py): X右，Y上，Z后（相机看向 -Z 方向）
+        - COLMAP相机坐标系: X右，Y下，Z前（相机看向 +Z 方向）
+        - 世界坐标系保持不变（与mesh坐标系一致）
+        - 只转换相机坐标系，不转换世界坐标系
 
         Args:
             mesh: 要渲染的网格
@@ -153,14 +138,13 @@ class MeshRenderer(object):
             height: 图像高度
             fx: 焦距x
             fy: 焦距y
-            cx: 主点x（默认为width/2）
-            cy: 主点y（默认为height/2）
             dtype: 数据类型
             device: 计算设备
 
         Returns:
             是否成功
         """
+        # 内参主点（COLMAP坐标系，原点在左上角）
         cx = width / 2.0
         cy = height / 2.0
 
@@ -209,6 +193,11 @@ class MeshRenderer(object):
             f"# Number of images: {len(render_data_dict)}\n",
         ]
 
+        # 坐标系转换矩阵：只转换相机坐标系（Y和Z轴翻转），保持世界坐标系不变
+        # 原始坐标系: X右，Y上，Z后
+        # COLMAP坐标系: X右，Y下，Z前
+        C = np.diag([1.0, -1.0, -1.0, 1.0])
+
         print('[INFO][MeshRenderer::createColmapDataFolder]')
         print('\t start create colmap data folder...')
         for key, single_render_data_dict in render_data_dict.items():
@@ -217,14 +206,19 @@ class MeshRenderer(object):
 
             camera = Camera.fromDict(camera_data_dict)
 
-            # 获取OpenCV坐标系下的world2camera矩阵
-            world2camera_cv = toNumpy(camera.world2cameraCV, np.float64)
+            # 获取原始坐标系下的world2camera矩阵
+            world2camera = toNumpy(camera.world2camera, np.float64)
+
+            # 只转换相机坐标系，不转换世界坐标系
+            # world2camera_colmap = C @ world2camera
+            # 这样点云（世界坐标系）保持不变，只有相机坐标系从原始坐标系转换到COLMAP坐标系
+            world2camera_colmap = C @ world2camera
 
             # 提取旋转矩阵和平移向量
-            R = world2camera_cv[:3, :3]
-            t = world2camera_cv[:3, 3]
+            R = world2camera_colmap[:3, :3]
+            t = world2camera_colmap[:3, 3]
 
-            # 将旋转矩阵转换为四元数 (w, x, y, z)
+            # 将旋转矩阵转换为四元数 (w, x, y, z)，使用COLMAP的rotmat2qvec算法
             quat = MeshRenderer.rotationMatrixToQuaternion(R)
             qw, qx, qy, qz = quat
 

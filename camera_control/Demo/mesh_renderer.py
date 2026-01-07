@@ -22,7 +22,7 @@ def demo() -> bool:
             mesh,
             save_data_folder_path + 'colmap/',
             camera_num=camera_num,
-            camera_dist=camera_dist,
+            camera_dist=0.5,
             width=518,
             height=518,
             device=device,
