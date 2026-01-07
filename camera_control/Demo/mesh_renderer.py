@@ -6,32 +6,47 @@ from camera_control.Module.mesh_renderer import MeshRenderer
 
 
 def demo() -> bool:
+    shape_id = "gold_dragon"
+
     home = os.environ['HOME']
-    mesh_file_path = home + "/chLi/Dataset/MM/Match/nezha/nezha.glb"
-    save_data_folder_path = home + "/chLi/Dataset/MM/Match/nezha/"
+    mesh_file_path = home + "/chLi/Dataset/MM/Match/" + shape_id + "/" + shape_id + ".glb"
+    save_data_folder_path = home + "/chLi/Dataset/MM/Match/" + shape_id + "/"
     camera_num = 20
     camera_dist = 2.5
     device = 'cuda:0'
 
     mesh = loadMeshFile(mesh_file_path)
 
-    MeshRenderer.createOmniVGGTDataFolder(
-        mesh,
-        save_data_folder_path + 'omnivggt/',
-        camera_num=camera_num,
-        camera_dist=camera_dist,
-        width=518,
-        height=518,
-        device=device,
-    )
+    if True:
+        MeshRenderer.createColmapDataFolder(
+            mesh,
+            save_data_folder_path + 'colmap/',
+            camera_num=camera_num,
+            camera_dist=camera_dist,
+            width=518,
+            height=518,
+            device=device,
+        )
+ 
+    if False:
+        MeshRenderer.createOmniVGGTDataFolder(
+            mesh,
+            save_data_folder_path + 'omnivggt/',
+            camera_num=camera_num,
+            camera_dist=camera_dist,
+            width=518,
+            height=518,
+            device=device,
+        )
 
-    MeshRenderer.createDA3DataFile(
-        mesh,
-        save_data_folder_path + 'da3/render_data.npy',
-        camera_num=camera_num,
-        camera_dist=camera_dist,
-        width=504,
-        height=504,
-        device=device,
-    )
+    if False:
+        MeshRenderer.createDA3DataFile(
+            mesh,
+            save_data_folder_path + 'da3/render_data.npy',
+            camera_num=camera_num,
+            camera_dist=camera_dist,
+            width=504,
+            height=504,
+            device=device,
+        )
     return True
