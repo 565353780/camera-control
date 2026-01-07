@@ -4,13 +4,31 @@ import numpy as np
 import nvdiffrast.torch as dr
 from typing import Union, Optional
 
-from camera_control.Method.data import toNumpy, toTensor
+from camera_control.Method.data import toTensor
 from camera_control.Module.camera import Camera
 
 
 class NVDiffRastRenderer(object):
+    # 类级别的 glctx 缓存，按 device 存储
+    _glctx_cache: dict = {}
+
     def __init__(self) -> None:
         return
+
+    @staticmethod
+    def getGlctx(device: str) -> dr.RasterizeCudaContext:
+        """
+        获取或创建指定设备上的 RasterizeCudaContext
+
+        Args:
+            device: CUDA 设备字符串
+
+        Returns:
+            dr.RasterizeCudaContext: 光栅化上下文
+        """
+        if device not in NVDiffRastRenderer._glctx_cache:
+            NVDiffRastRenderer._glctx_cache[device] = dr.RasterizeCudaContext(device=device)
+        return NVDiffRastRenderer._glctx_cache[device]
 
     @staticmethod
     def isTextureExist(mesh: Union[trimesh.Trimesh, trimesh.Scene]) -> bool:
@@ -37,6 +55,42 @@ class NVDiffRastRenderer(object):
         return False
 
     @staticmethod
+    def _computeVertexNormals(
+        vertices: torch.Tensor,
+        faces: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        从顶点和面片计算可微的顶点法线
+
+        Args:
+            vertices: [V, 3] 顶点坐标
+            faces: [F, 3] 面片索引
+
+        Returns:
+            vertex_normals: [V, 3] 顶点法线（已归一化）
+        """
+        # 获取三角形的三个顶点
+        v0 = vertices[faces[:, 0]]  # [F, 3]
+        v1 = vertices[faces[:, 1]]  # [F, 3]
+        v2 = vertices[faces[:, 2]]  # [F, 3]
+
+        # 计算面法线（未归一化，长度与面积成正比）
+        e1 = v1 - v0
+        e2 = v2 - v0
+        face_normals = torch.cross(e1, e2, dim=1)  # [F, 3]
+
+        # 累加到顶点法线
+        vertex_normals = torch.zeros_like(vertices)
+        vertex_normals = vertex_normals.index_add(0, faces[:, 0], face_normals)
+        vertex_normals = vertex_normals.index_add(0, faces[:, 1], face_normals)
+        vertex_normals = vertex_normals.index_add(0, faces[:, 2], face_normals)
+
+        # 归一化
+        vertex_normals = vertex_normals / (torch.norm(vertex_normals, dim=1, keepdim=True) + 1e-8)
+
+        return vertex_normals
+
+    @staticmethod
     def _rasterize(
         mesh: Union[trimesh.Trimesh, trimesh.Scene],
         camera: Camera,
@@ -51,7 +105,7 @@ class NVDiffRastRenderer(object):
             vertices_tensor: 若提供，则使用该tensor替换mesh.vertices以支持可微渲染
 
         Returns:
-            tuple: (vertices, faces, vertex_normals, rast_out, rast_out_db, glctx)
+            tuple: (vertices, faces, vertex_normals, rast_out, rast_out_db, glctx, vertices_clip)
         """
         # 提取基础几何信息
         if vertices_tensor is not None:
@@ -60,7 +114,12 @@ class NVDiffRastRenderer(object):
             vertices = toTensor(mesh.vertices, torch.float32, camera.device)  # [V, 3]
 
         faces = toTensor(mesh.faces, torch.int32, camera.device)  # [F, 3]
-        vertex_normals = toTensor(mesh.vertex_normals, torch.float32, camera.device)  # [V, 3]
+
+        # 如果使用自定义顶点，重新计算法线以保持梯度流
+        if vertices_tensor is not None:
+            vertex_normals = NVDiffRastRenderer._computeVertexNormals(vertices, faces)
+        else:
+            vertex_normals = toTensor(mesh.vertex_normals, torch.float32, camera.device)  # [V, 3]
 
         # MVP变换和光栅化
         vertices_homo = torch.cat([
@@ -72,7 +131,7 @@ class NVDiffRastRenderer(object):
         mvp = camera.getWorld2NVDiffRast(bbox_length)
         vertices_clip = torch.matmul(vertices_homo, mvp.T).unsqueeze(0).contiguous()  # [1, V, 4]
 
-        glctx = dr.RasterizeCudaContext(device=camera.device)
+        glctx = NVDiffRastRenderer.getGlctx(camera.device)
         rast_out, rast_out_db = dr.rasterize(
             glctx,
             vertices_clip,
@@ -80,7 +139,7 @@ class NVDiffRastRenderer(object):
             resolution=[camera.height, camera.width]
         )  # [1, H, W, 4]
 
-        return vertices, faces, vertex_normals, rast_out, rast_out_db, glctx
+        return vertices, faces, vertex_normals, rast_out, rast_out_db, glctx, vertices_clip
 
     @staticmethod
     def renderVertexColor(
@@ -90,6 +149,7 @@ class NVDiffRastRenderer(object):
         paint_color: Optional[list] = None,
         bg_color: list = [255, 255, 255],
         vertices_tensor: Optional[torch.Tensor] = None,
+        enable_antialias: bool = True,
     ) -> dict:
         """
         渲染基于法向计算的shading图
@@ -101,14 +161,15 @@ class NVDiffRastRenderer(object):
             paint_color: 可选的颜色列表（长度为3，0-1或0-255范围）
             bg_color: 背景颜色列表（长度为3，0-255范围），默认为[255, 255, 255]（白色）
             vertices_tensor: 可选的顶点tensor；若提供则作为渲染用顶点参与梯度传播
+            enable_antialias: 是否启用抗锯齿（对梯度流至关重要），默认True
 
         Returns:
             dict包含:
-                - image: [H, W, 3] 渲染的shading图像 (BGR格式, uint8, 适配OpenCV)
+                - image: [H, W, 3] 渲染的shading图像 (RGB格式, float32 tensor)
                 - rasterize_output: [H, W, 4] rasterize输出
                 - bary_derivs: [H, W, 4] 重心坐标导数
         """
-        vertices, faces, vertex_normals, rast_out, rast_out_db, glctx = NVDiffRastRenderer._rasterize(
+        vertices, faces, vertex_normals, rast_out, rast_out_db, glctx, vertices_clip = NVDiffRastRenderer._rasterize(
             mesh, camera, vertices_tensor
         )
 
@@ -147,20 +208,20 @@ class NVDiffRastRenderer(object):
         shading = 0.3 + 0.7 * diffuse  # 环境光 + 漫反射
 
         # 应用光照
-        image = colors_interp[0] * shading.unsqueeze(-1)  # [H, W, 3]
+        image = colors_interp * shading.unsqueeze(-1)  # [1, H, W, 3]
 
         # 处理背景色
         mask = rast_out[0, :, :, 3] > 0  # [H, W]
         bg_color_tensor = toTensor(bg_color, torch.float32, camera.device)[:3] / 255.0
-        background = bg_color_tensor.unsqueeze(0).unsqueeze(0).expand(image.shape[0], image.shape[1], -1)  # [H, W, 3]
-        image = torch.where(mask.unsqueeze(-1), image, background)
+        background = bg_color_tensor.view(1, 1, 1, 3).expand_as(image)  # [1, H, W, 3]
+        image = torch.where(mask.unsqueeze(0).unsqueeze(-1), image, background)
 
-        # 转换为numpy uint8并转换颜色通道（RGB -> BGR，适配OpenCV）
-        render_image_np = np.clip(np.rint(toNumpy(image) * 255), 0, 255).astype(np.uint8)
-        render_image_np = render_image_np[..., ::-1]  # RGB -> BGR
+        # 应用抗锯齿以确保边缘处的正确梯度流
+        if enable_antialias:
+            image = dr.antialias(image.contiguous(), rast_out, vertices_clip, faces)
 
         return {
-            'image': render_image_np,  # [H, W, 3] BGR格式
+            'image': image[0],  # [H, W, 3] RGB tensor
             'rasterize_output': rast_out[0],  # [H, W, 4]
             'bary_derivs': rast_out_db[0] if rast_out_db is not None else torch.zeros_like(rast_out[0]),
         }
@@ -172,6 +233,7 @@ class NVDiffRastRenderer(object):
         paint_color: Optional[list] = None,
         bg_color: list = [255, 255, 255],
         vertices_tensor: Optional[torch.Tensor] = None,
+        enable_antialias: bool = True,
     ) -> dict:
         """
         渲染网格本身颜色（包括纹理或顶点颜色，不带光照）
@@ -182,14 +244,15 @@ class NVDiffRastRenderer(object):
             paint_color: 可选的颜色列表（长度为3，0-1或0-255范围）
             bg_color: 背景颜色列表（长度为3，0-255范围），默认为[255, 255, 255]（白色）
             vertices_tensor: 可选的顶点tensor；若提供则作为渲染用顶点参与梯度传播
+            enable_antialias: 是否启用抗锯齿（对梯度流至关重要），默认True
 
         Returns:
             dict包含:
-                - image: [H, W, 3] 渲染的图像 (BGR格式, uint8, 适配OpenCV)
+                - image: [H, W, 3] 渲染的图像 (RGB格式, float32 tensor)
                 - rasterize_output: [H, W, 4] rasterize输出
                 - bary_derivs: [H, W, 4] 重心坐标导数
         """
-        vertices, faces, vertex_normals, rast_out, rast_out_db, glctx = NVDiffRastRenderer._rasterize(
+        vertices, faces, vertex_normals, rast_out, rast_out_db, glctx, vertices_clip = NVDiffRastRenderer._rasterize(
             mesh, camera, vertices_tensor
         )
 
@@ -199,28 +262,32 @@ class NVDiffRastRenderer(object):
             # 提取UV和texture
             uvs = toTensor(mesh.visual.uv, torch.float32, camera.device)
 
-            tex_img = None
-            if hasattr(mesh.visual.material, 'baseColorTexture') and mesh.visual.material.baseColorTexture is not None:
-                tex_img = np.array(mesh.visual.material.baseColorTexture)
-            elif hasattr(mesh.visual.material, 'image') and mesh.visual.material.image is not None:
-                tex_img = np.array(mesh.visual.material.image)
+            # 验证 UV 数量与顶点数量是否匹配
+            if uvs.shape[0] != vertices.shape[0]:
+                print(f'[WARN][NVDiffRastRenderer::renderTexture] UV count ({uvs.shape[0]}) != vertex count ({vertices.shape[0]}), falling back to vertex colors')
+            else:
+                tex_img = None
+                if hasattr(mesh.visual.material, 'baseColorTexture') and mesh.visual.material.baseColorTexture is not None:
+                    tex_img = np.array(mesh.visual.material.baseColorTexture)
+                elif hasattr(mesh.visual.material, 'image') and mesh.visual.material.image is not None:
+                    tex_img = np.array(mesh.visual.material.image)
 
-            if tex_img is not None:
-                # 转换为RGB格式
-                if len(tex_img.shape) == 2:  # 灰度图
-                    tex_img = np.stack([tex_img] * 3, axis=-1)
-                elif tex_img.shape[-1] == 4:  # RGBA
-                    tex_img = tex_img[:, :, :3]
+                if tex_img is not None:
+                    # 转换为RGB格式
+                    if len(tex_img.shape) == 2:  # 灰度图
+                        tex_img = np.stack([tex_img] * 3, axis=-1)
+                    elif tex_img.shape[-1] == 4:  # RGBA
+                        tex_img = tex_img[:, :, :3]
 
-                # 转换为tensor并翻转Y轴（nvdiffrast纹理坐标习惯）
-                texture = toTensor(tex_img, torch.float32, camera.device) / 255.0
-                texture = texture.flip(0).unsqueeze(0)  # [1, H, W, 3]
-                use_texture = True
+                    # 转换为tensor并翻转Y轴（nvdiffrast纹理坐标习惯）
+                    texture = toTensor(tex_img, torch.float32, camera.device) / 255.0
+                    texture = texture.flip(0).unsqueeze(0)  # [1, H, W, 3]
+                    use_texture = True
 
         if use_texture:
             # 使用纹理渲染
             uv_interp, _ = dr.interpolate(uvs.unsqueeze(0), rast_out, faces)  # [1, H, W, 2]
-            image = dr.texture(texture, uv_interp, filter_mode='linear')[0]  # [H, W, 3]
+            image = dr.texture(texture, uv_interp, filter_mode='linear')  # [1, H, W, 3]
         else:
             # 使用顶点颜色渲染
             if hasattr(mesh.visual, 'vertex_colors') and mesh.visual.vertex_colors is not None:
@@ -237,20 +304,20 @@ class NVDiffRastRenderer(object):
 
             # 插值顶点颜色
             colors_interp, _ = dr.interpolate(vertex_colors.unsqueeze(0).contiguous(), rast_out, faces)  # [1, H, W, 3]
-            image = torch.clamp(colors_interp[0], 0.0, 1.0)  # [H, W, 3]
+            image = torch.clamp(colors_interp, 0.0, 1.0)  # [1, H, W, 3]
 
         # 处理背景色
         mask = rast_out[0, :, :, 3] > 0  # [H, W]
         bg_color_tensor = toTensor(bg_color, torch.float32, camera.device)[:3] / 255.0
-        background = bg_color_tensor.unsqueeze(0).unsqueeze(0).expand(image.shape[0], image.shape[1], -1)  # [H, W, 3]
-        image = torch.where(mask.unsqueeze(-1), image, background)
+        background = bg_color_tensor.view(1, 1, 1, 3).expand_as(image)  # [1, H, W, 3]
+        image = torch.where(mask.unsqueeze(0).unsqueeze(-1), image, background)
 
-        # 转换为numpy uint8并转换颜色通道（RGB -> BGR，适配OpenCV）
-        render_image_np = np.clip(np.rint(toNumpy(image) * 255), 0, 255).astype(np.uint8)
-        render_image_np = render_image_np[..., ::-1]  # RGB -> BGR
+        # 应用抗锯齿以确保边缘处的正确梯度流
+        if enable_antialias:
+            image = dr.antialias(image.contiguous(), rast_out, vertices_clip, faces)
 
         return {
-            'image': render_image_np,  # [H, W, 3] BGR格式
+            'image': image[0],  # [H, W, 3] RGB tensor
             'rasterize_output': rast_out[0],  # [H, W, 4]
             'bary_derivs': rast_out_db[0] if rast_out_db is not None else torch.zeros_like(rast_out[0]),
         }
@@ -261,6 +328,7 @@ class NVDiffRastRenderer(object):
         camera: Camera,
         bg_color: list = [255, 255, 255],
         vertices_tensor: Optional[torch.Tensor] = None,
+        enable_antialias: bool = True,
     ) -> dict:
         """
         渲染深度图
@@ -270,15 +338,16 @@ class NVDiffRastRenderer(object):
             camera: Camera对象
             bg_color: 背景颜色列表（长度为3，0-255范围），默认为[255, 255, 255]（白色）
             vertices_tensor: 可选的顶点tensor；若提供则作为渲染用顶点参与梯度传播
+            enable_antialias: 是否启用抗锯齿（对梯度流至关重要），默认True
 
         Returns:
             dict包含:
                 - depth: [H, W] 深度图 (float32, 单位：米)
-                - depth_normalized: [H, W, 3] 归一化深度图用于可视化 (BGR格式, uint8)
+                - image: [H, W, 3] 归一化深度图用于可视化 (RGB格式, float32 tensor)
                 - rasterize_output: [H, W, 4] rasterize输出
                 - bary_derivs: [H, W, 4] 重心坐标导数
         """
-        vertices, faces, vertex_normals, rast_out, rast_out_db, glctx = NVDiffRastRenderer._rasterize(
+        vertices, faces, vertex_normals, rast_out, rast_out_db, glctx, vertices_clip = NVDiffRastRenderer._rasterize(
             mesh, camera, vertices_tensor
         )
 
@@ -306,21 +375,21 @@ class NVDiffRastRenderer(object):
 
         depth_normalized = torch.where(mask, depth_normalized, torch.ones_like(depth_normalized))
 
-        # 转换为RGB格式的uint8图像（灰度图）
-        depth_vis = torch.stack([depth_normalized] * 3, dim=-1)  # [H, W, 3]
-        depth_vis_np = np.clip(np.rint(toNumpy(depth_vis) * 255), 0, 255).astype(np.uint8)
+        # 转换为RGB格式（灰度图）
+        depth_vis = torch.stack([depth_normalized] * 3, dim=-1).unsqueeze(0)  # [1, H, W, 3]
 
         # 应用背景色（在RGB格式下）
-        bg_color_np = np.array(bg_color[:3], dtype=np.uint8)
-        mask_np = toNumpy(mask).astype(bool)
-        depth_vis_np[~mask_np] = bg_color_np
+        bg_color_tensor = toTensor(bg_color, torch.float32, camera.device)[:3] / 255.0
+        background = bg_color_tensor.view(1, 1, 1, 3).expand_as(depth_vis)  # [1, H, W, 3]
+        image = torch.where(mask.unsqueeze(0).unsqueeze(-1), depth_vis, background)
 
-        # 转换为BGR格式
-        depth_vis_np = depth_vis_np[..., ::-1]  # RGB -> BGR
+        # 应用抗锯齿以确保边缘处的正确梯度流
+        if enable_antialias:
+            image = dr.antialias(image.contiguous(), rast_out, vertices_clip, faces)
 
         return {
             'depth': depth,  # [H, W] float32
-            'image': depth_vis_np,  # [H, W, 3] BGR格式
+            'image': image[0],  # [H, W, 3] RGB tensor
             'rasterize_output': rast_out[0],  # [H, W, 4]
             'bary_derivs': rast_out_db[0] if rast_out_db is not None else torch.zeros_like(rast_out[0]),
         }
@@ -331,6 +400,7 @@ class NVDiffRastRenderer(object):
         camera: Camera,
         bg_color: list = [255, 255, 255],
         vertices_tensor: Optional[torch.Tensor] = None,
+        enable_antialias: bool = True,
     ) -> dict:
         """
         渲染法向图
@@ -340,24 +410,25 @@ class NVDiffRastRenderer(object):
             camera: Camera对象
             bg_color: 背景颜色列表（长度为3，0-255范围），默认为[255, 255, 255]（白色）
             vertices_tensor: 可选的顶点tensor；若提供则作为渲染用顶点参与梯度传播
+            enable_antialias: 是否启用抗锯齿（对梯度流至关重要），默认True
 
         Returns:
             dict包含:
-                - normal_world: [H, W, 3] 世界坐标系下的法向图 (BGR格式, uint8)
-                - normal_camera: [H, W, 3] 相机坐标系下的法向图 (BGR格式, uint8)
+                - normal_world: [H, W, 3] 世界坐标系下的法向图 (RGB格式, float32 tensor)
+                - normal_camera: [H, W, 3] 相机坐标系下的法向图 (RGB格式, float32 tensor)
                 - rasterize_output: [H, W, 4] rasterize输出
                 - bary_derivs: [H, W, 4] 重心坐标导数
         """
-        vertices, faces, vertex_normals, rast_out, rast_out_db, glctx = NVDiffRastRenderer._rasterize(
+        vertices, faces, vertex_normals, rast_out, rast_out_db, glctx, vertices_clip = NVDiffRastRenderer._rasterize(
             mesh, camera, vertices_tensor
         )
 
         # 插值法线（世界坐标系）
         normals_interp, _ = dr.interpolate(vertex_normals.unsqueeze(0), rast_out, faces)  # [1, H, W, 3]
-        normals_world = normals_interp[0] / (torch.norm(normals_interp[0], dim=-1, keepdim=True) + 1e-8)
+        normals_world = normals_interp / (torch.norm(normals_interp, dim=-1, keepdim=True) + 1e-8)  # [1, H, W, 3]
 
         # 转换到相机坐标系
-        normals_camera = torch.matmul(normals_world, camera.R.T)  # [H, W, 3]
+        normals_camera = torch.matmul(normals_world, camera.R.T)  # [1, H, W, 3]
 
         # 将法向从[-1, 1]映射到[0, 1]用于可视化
         normals_world_mapped = (normals_world + 1.0) * 0.5
@@ -366,20 +437,18 @@ class NVDiffRastRenderer(object):
         # 处理背景
         mask = rast_out[0, :, :, 3] > 0  # [H, W]
         bg_color_tensor = toTensor(bg_color, torch.float32, camera.device)[:3] / 255.0
-        background = bg_color_tensor.unsqueeze(0).unsqueeze(0).expand(normals_world.shape[0], normals_world.shape[1], -1)  # [H, W, 3]
-        normals_world_vis = torch.where(mask.unsqueeze(-1), normals_world_mapped, background)
-        normals_camera_vis = torch.where(mask.unsqueeze(-1), normals_camera_mapped, background)
+        background = bg_color_tensor.view(1, 1, 1, 3).expand_as(normals_world_mapped)  # [1, H, W, 3]
+        normals_world_vis = torch.where(mask.unsqueeze(0).unsqueeze(-1), normals_world_mapped, background)
+        normals_camera_vis = torch.where(mask.unsqueeze(0).unsqueeze(-1), normals_camera_mapped, background)
 
-        # 转换为numpy uint8并转换颜色通道（RGB -> BGR，适配OpenCV）
-        normal_world_np = np.clip(np.rint(toNumpy(normals_world_vis) * 255), 0, 255).astype(np.uint8)
-        normal_world_np = normal_world_np[..., ::-1]  # RGB -> BGR
-
-        normal_camera_np = np.clip(np.rint(toNumpy(normals_camera_vis) * 255), 0, 255).astype(np.uint8)
-        normal_camera_np = normal_camera_np[..., ::-1]  # RGB -> BGR
+        # 应用抗锯齿以确保边缘处的正确梯度流
+        if enable_antialias:
+            normals_world_vis = dr.antialias(normals_world_vis.contiguous(), rast_out, vertices_clip, faces)
+            normals_camera_vis = dr.antialias(normals_camera_vis.contiguous(), rast_out, vertices_clip, faces)
 
         return {
-            'normal_world': normal_world_np,  # [H, W, 3] BGR格式
-            'normal_camera': normal_camera_np,  # [H, W, 3] BGR格式
+            'normal_world': normals_world_vis[0],  # [H, W, 3] RGB tensor
+            'normal_camera': normals_camera_vis[0],  # [H, W, 3] RGB tensor
             'rasterize_output': rast_out[0],  # [H, W, 4]
             'bary_derivs': rast_out_db[0] if rast_out_db is not None else torch.zeros_like(rast_out[0]),
         }
