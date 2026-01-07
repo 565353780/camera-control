@@ -39,7 +39,8 @@ class NVDiffRastRenderer(object):
     @staticmethod
     def _rasterize(
         mesh: Union[trimesh.Trimesh, trimesh.Scene],
-        camera: Camera
+        camera: Camera,
+        vertices_tensor: Optional[torch.Tensor] = None
     ) -> tuple:
         """
         执行基础的光栅化操作（内部辅助方法）
@@ -47,12 +48,17 @@ class NVDiffRastRenderer(object):
         Args:
             mesh: trimesh.Trimesh或trimesh.Scene对象
             camera: Camera对象
+            vertices_tensor: 若提供，则使用该tensor替换mesh.vertices以支持可微渲染
 
         Returns:
             tuple: (vertices, faces, vertex_normals, rast_out, rast_out_db, glctx)
         """
         # 提取基础几何信息
-        vertices = toTensor(mesh.vertices, torch.float32, camera.device)  # [V, 3]
+        if vertices_tensor is not None:
+            vertices = vertices_tensor
+        else:
+            vertices = toTensor(mesh.vertices, torch.float32, camera.device)  # [V, 3]
+
         faces = toTensor(mesh.faces, torch.int32, camera.device)  # [F, 3]
         vertex_normals = toTensor(mesh.vertex_normals, torch.float32, camera.device)  # [V, 3]
 
@@ -83,6 +89,7 @@ class NVDiffRastRenderer(object):
         light_direction: Union[torch.Tensor, np.ndarray, list] = [1, 1, 1],
         paint_color: Optional[list] = None,
         bg_color: list = [255, 255, 255],
+        vertices_tensor: Optional[torch.Tensor] = None,
     ) -> dict:
         """
         渲染基于法向计算的shading图
@@ -93,6 +100,7 @@ class NVDiffRastRenderer(object):
             light_direction: 光照方向（世界坐标系），默认为[1, 1, 1]
             paint_color: 可选的颜色列表（长度为3，0-1或0-255范围）
             bg_color: 背景颜色列表（长度为3，0-255范围），默认为[255, 255, 255]（白色）
+            vertices_tensor: 可选的顶点tensor；若提供则作为渲染用顶点参与梯度传播
 
         Returns:
             dict包含:
@@ -100,7 +108,9 @@ class NVDiffRastRenderer(object):
                 - rasterize_output: [H, W, 4] rasterize输出
                 - bary_derivs: [H, W, 4] 重心坐标导数
         """
-        vertices, faces, vertex_normals, rast_out, rast_out_db, glctx = NVDiffRastRenderer._rasterize(mesh, camera)
+        vertices, faces, vertex_normals, rast_out, rast_out_db, glctx = NVDiffRastRenderer._rasterize(
+            mesh, camera, vertices_tensor
+        )
 
         # 提取或设置顶点颜色
         if hasattr(mesh.visual, 'vertex_colors') and mesh.visual.vertex_colors is not None:
@@ -161,6 +171,7 @@ class NVDiffRastRenderer(object):
         camera: Camera,
         paint_color: Optional[list] = None,
         bg_color: list = [255, 255, 255],
+        vertices_tensor: Optional[torch.Tensor] = None,
     ) -> dict:
         """
         渲染网格本身颜色（包括纹理或顶点颜色，不带光照）
@@ -170,6 +181,7 @@ class NVDiffRastRenderer(object):
             camera: Camera对象
             paint_color: 可选的颜色列表（长度为3，0-1或0-255范围）
             bg_color: 背景颜色列表（长度为3，0-255范围），默认为[255, 255, 255]（白色）
+            vertices_tensor: 可选的顶点tensor；若提供则作为渲染用顶点参与梯度传播
 
         Returns:
             dict包含:
@@ -177,7 +189,9 @@ class NVDiffRastRenderer(object):
                 - rasterize_output: [H, W, 4] rasterize输出
                 - bary_derivs: [H, W, 4] 重心坐标导数
         """
-        vertices, faces, vertex_normals, rast_out, rast_out_db, glctx = NVDiffRastRenderer._rasterize(mesh, camera)
+        vertices, faces, vertex_normals, rast_out, rast_out_db, glctx = NVDiffRastRenderer._rasterize(
+            mesh, camera, vertices_tensor
+        )
 
         # 检查是否使用纹理
         use_texture = False
@@ -246,6 +260,7 @@ class NVDiffRastRenderer(object):
         mesh: Union[trimesh.Trimesh, trimesh.Scene],
         camera: Camera,
         bg_color: list = [255, 255, 255],
+        vertices_tensor: Optional[torch.Tensor] = None,
     ) -> dict:
         """
         渲染深度图
@@ -254,6 +269,7 @@ class NVDiffRastRenderer(object):
             mesh: trimesh.Trimesh或trimesh.Scene对象
             camera: Camera对象
             bg_color: 背景颜色列表（长度为3，0-255范围），默认为[255, 255, 255]（白色）
+            vertices_tensor: 可选的顶点tensor；若提供则作为渲染用顶点参与梯度传播
 
         Returns:
             dict包含:
@@ -262,7 +278,9 @@ class NVDiffRastRenderer(object):
                 - rasterize_output: [H, W, 4] rasterize输出
                 - bary_derivs: [H, W, 4] 重心坐标导数
         """
-        vertices, faces, vertex_normals, rast_out, rast_out_db, glctx = NVDiffRastRenderer._rasterize(mesh, camera)
+        vertices, faces, vertex_normals, rast_out, rast_out_db, glctx = NVDiffRastRenderer._rasterize(
+            mesh, camera, vertices_tensor
+        )
 
         # 计算世界坐标系下的深度（Z坐标）
         vertices_interp, _ = dr.interpolate(vertices.unsqueeze(0), rast_out, faces)  # [1, H, W, 3]
@@ -291,12 +309,12 @@ class NVDiffRastRenderer(object):
         # 转换为RGB格式的uint8图像（灰度图）
         depth_vis = torch.stack([depth_normalized] * 3, dim=-1)  # [H, W, 3]
         depth_vis_np = np.clip(np.rint(toNumpy(depth_vis) * 255), 0, 255).astype(np.uint8)
-        
+
         # 应用背景色（在RGB格式下）
         bg_color_np = np.array(bg_color[:3], dtype=np.uint8)
         mask_np = toNumpy(mask).astype(bool)
         depth_vis_np[~mask_np] = bg_color_np
-        
+
         # 转换为BGR格式
         depth_vis_np = depth_vis_np[..., ::-1]  # RGB -> BGR
 
@@ -312,6 +330,7 @@ class NVDiffRastRenderer(object):
         mesh: Union[trimesh.Trimesh, trimesh.Scene],
         camera: Camera,
         bg_color: list = [255, 255, 255],
+        vertices_tensor: Optional[torch.Tensor] = None,
     ) -> dict:
         """
         渲染法向图
@@ -320,6 +339,7 @@ class NVDiffRastRenderer(object):
             mesh: trimesh.Trimesh或trimesh.Scene对象
             camera: Camera对象
             bg_color: 背景颜色列表（长度为3，0-255范围），默认为[255, 255, 255]（白色）
+            vertices_tensor: 可选的顶点tensor；若提供则作为渲染用顶点参与梯度传播
 
         Returns:
             dict包含:
@@ -328,7 +348,9 @@ class NVDiffRastRenderer(object):
                 - rasterize_output: [H, W, 4] rasterize输出
                 - bary_derivs: [H, W, 4] 重心坐标导数
         """
-        vertices, faces, vertex_normals, rast_out, rast_out_db, glctx = NVDiffRastRenderer._rasterize(mesh, camera)
+        vertices, faces, vertex_normals, rast_out, rast_out_db, glctx = NVDiffRastRenderer._rasterize(
+            mesh, camera, vertices_tensor
+        )
 
         # 插值法线（世界坐标系）
         normals_interp, _ = dr.interpolate(vertex_normals.unsqueeze(0), rast_out, faces)  # [1, H, W, 3]

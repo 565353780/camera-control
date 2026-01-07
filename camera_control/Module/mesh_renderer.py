@@ -5,6 +5,7 @@ import trimesh
 import numpy as np
 from tqdm import trange
 from shutil import rmtree
+from typing import Optional
 
 from camera_control.Method.data import toNumpy
 from camera_control.Method.sample import sampleCamera
@@ -28,6 +29,7 @@ class MeshRenderer(object):
         bg_color: list=[255, 255, 255],
         dtype = torch.float32,
         device: str = 'cuda:0',
+        vertices_tensor: Optional[torch.Tensor] = None,
     ) -> dict:
         camera_list = sampleCamera(
             mesh=mesh,
@@ -54,12 +56,14 @@ class MeshRenderer(object):
                 mesh=mesh,
                 camera=camera,
                 bg_color=bg_color,
+                vertices_tensor=vertices_tensor,
             )
 
             render_depth_dict = NVDiffRastRenderer.renderDepth(
                 mesh=mesh,
                 camera=camera,
                 bg_color=bg_color,
+                vertices_tensor=vertices_tensor,
             )
 
             image = render_image_dict['image']
