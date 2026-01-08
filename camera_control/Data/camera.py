@@ -53,10 +53,9 @@ class CameraData(object):
         self.device = device
 
         if world2camera is not None:
-            self.world2camera = toTensor(world2camera, self.dtype, self.device)
+            self.setWorld2Camera(world2camera)
         else:
-            pos = toTensor(pos)
-            self.setWorld2Camera(look_at, up, pos)
+            self.setWorldPose(look_at, up, pos)
         return
 
     @classmethod
@@ -95,6 +94,18 @@ class CameraData(object):
         data_dict = np.load(npy_file_path, allow_pickle=True)
 
         return cls.fromDict(data_dict, dtype, device)
+
+    @classmethod
+    def fromVGGTPose(
+        cls,
+        extrinsic: Union[torch.Tensor, np.ndarray, list],
+        intrinsic: Union[torch.Tensor, np.ndarray, list],
+        dtype=torch.float32,
+        device: str='cpu',
+    ) -> "CameraData":
+        camera = cls(dtype=dtype, device=device)
+        camera.setVGGTPose(extrinsic, intrinsic)
+        return camera
 
     def clone(self):
         return deepcopy(self)
@@ -152,20 +163,34 @@ class CameraData(object):
         C = torch.diag(torch.tensor([1, -1, -1, 1], dtype=self.dtype, device=self.device))
         return C @ self.camera2world @ C
 
-    def setWorld2CameraByRt(
+    def setR(
         self,
         R: Union[torch.Tensor, np.ndarray, list],
-        t: Union[torch.Tensor, np.ndarray, list],
     ) -> bool:
         R = toTensor(R, self.dtype, self.device).reshape(3, 3)
+
+        self.world2camera[:3, :3] = R
+        return True
+
+    def setT(
+        self,
+        t: Union[torch.Tensor, np.ndarray, list],
+    ) -> bool:
         t = toTensor(t, self.dtype, self.device).reshape(3)
 
-        self.world2camera = torch.eye(4, dtype=self.dtype, device=self.device)
-        self.world2camera[:3, :3] = R
         self.world2camera[:3, 3] = t
         return True
 
     def setWorld2Camera(
+        self,
+        world2camera: Union[torch.Tensor, np.ndarray, list],
+    ) -> bool:
+        world2camera = toTensor(world2camera, self.dtype, self.device).reshape(4, 4)
+
+        self.world2camera = world2camera
+        return True
+
+    def setWorldPose(
         self,
         look_at: Union[torch.Tensor, np.ndarray, list],
         up: Union[torch.Tensor, np.ndarray, list] = [0, 0, 1],
@@ -224,10 +249,57 @@ class CameraData(object):
         # 构建平移向量 t
         t = -R @ pos
 
-        self.setWorld2CameraByRt(R, t)
+        self.world2camera = torch.eye(4, dtype=self.dtype, device=self.device)
+
+        self.setR(R)
+        self.setT(t)
+
         return True
 
-    def setWorld2CameraByWorld2CameraCV(
+    def setCamera2World(
+        self,
+        camera2world: Union[torch.Tensor, np.ndarray, list],
+    ) -> bool:
+        """
+        通过 camera2world 矩阵设置 world2camera
+
+        转换关系：
+        camera2world = [R^T | -R^T @ t]
+                      [0   | 1       ]
+        
+        world2camera = [R | t]
+                      [0 | 1]
+
+        反推步骤：
+        1. 从 camera2world 提取 R^T 和 -R^T @ t
+        2. 计算 R = (R^T)^T 和 t = -R @ (camera2world[:3, 3])
+        3. 构建 world2camera = [R | t; 0 | 1]
+
+        Args:
+            camera2world: 原始坐标系下的 camera2world 矩阵 (4x4)
+        """
+        camera2world = toTensor(camera2world, self.dtype, self.device).reshape(4, 4)
+
+        # 从 camera2world 解析出 world2camera
+        # camera2world = [R^T | -R^T @ t]
+        #                [0   | 1       ]
+        # 
+        # world2camera = [R | t]
+        #                [0 | 1]
+        R_T = camera2world[:3, :3]  # 提取 R^T
+        neg_RT_t = camera2world[:3, 3]  # 提取 -R^T @ t
+
+        # 计算 R 和 t
+        R = R_T.T  # R = (R^T)^T
+        t = -R @ neg_RT_t  # t = -R @ (-R^T @ t) = R @ R^T @ t
+
+        # 使用解析方法设置 world2camera
+        self.setR(R)
+        self.setT(t)
+
+        return True
+
+    def setWorld2CameraCV(
         self,
         world2camera_cv: Union[torch.Tensor, np.ndarray, list],
     ) -> bool:
@@ -255,7 +327,7 @@ class CameraData(object):
 
         return True
 
-    def setWorld2CameraByCamera2WorldCV(
+    def setCamera2WorldCV(
         self,
         camera2world_cv: Union[torch.Tensor, np.ndarray, list],
     ) -> bool:
@@ -298,11 +370,33 @@ class CameraData(object):
         t = -R @ neg_RT_t  # t = -R @ (-R^T @ t) = R @ R^T @ t
 
         # 使用解析方法设置 world2camera
-        self.setWorld2CameraByRt(R, t)
+        self.setR(R)
+        self.setT(t)
 
         return True
 
-    def loadVGGTCameraFile(
+    def setVGGTPose(
+        self,
+        extrinsic: Union[torch.Tensor, np.ndarray, list],
+        intrinsic: Union[torch.Tensor, np.ndarray, list],
+    ) -> bool:
+        extrinsic = toTensor(extrinsic, self.dtype, self.device).reshape(4, 4)
+        intrinsic = toNumpy(intrinsic, np.float64).reshape(3, 3)
+
+        self.cx = float(intrinsic[0][2])
+        self.cy = float(intrinsic[1][2])
+        self.width = int(2.0 * self.cx)
+        self.height = int(2.0 * self.cy)
+        self.fx = float(intrinsic[0][0])
+        self.fy = float(intrinsic[1][1])
+
+        # 定义坐标系转换矩阵
+        C = torch.diag(torch.tensor([1, -1, -1, 1], dtype=self.dtype, device=self.device))
+
+        self.world2camera = C @ extrinsic
+        return True
+
+    def loadOmniVGGTCameraFile(
         self,
         vggt_camera_txt_file_path: str,
     ) -> bool:
@@ -319,7 +413,7 @@ class CameraData(object):
         for i in range(3):
             camera2world_cv[i] = [float(d) for d in lines[i].split()]
 
-        self.setWorld2CameraByCamera2WorldCV(camera2world_cv)
+        self.setCamera2WorldCV(camera2world_cv)
 
         self.fx, _, _ = [float(d) for d in lines[3].split()]
         _, self.fy, _ = [float(d) for d in lines[4].split()]
@@ -351,11 +445,7 @@ class CameraData(object):
 
         new_pos = center - dist * look_at
 
-        self.setWorld2Camera(
-            center,
-            self.R[1],
-            new_pos,
-        )
+        self.setWorldPose(center, self.R[1], new_pos)
         return True
 
     def toO3DMesh(
