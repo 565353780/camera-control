@@ -1,5 +1,5 @@
 cd ..
-git clone https://github.com/NVlabs/nvdiffrast.git
+git clone --depth 1 https://github.com/NVlabs/nvdiffrast.git
 
 pip install ninja trimesh open3d
 
