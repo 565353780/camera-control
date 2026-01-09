@@ -164,6 +164,23 @@ class Camera(CameraData):
 
         return uv
 
+    def toImageUV(self) -> np.ndarray:
+        u = np.arange(self.width).astype(np.float32) / (self.width - 1.0)
+        v = np.arange(self.height).astype(np.float32) / (self.height - 1.0)
+
+        # 构造网格
+        uu, vv = np.meshgrid(u, v, indexing='xy')  # uu/vv shape: [height, width]
+
+        # 按照"图片左下角为0,0，u向右，v向上"来构造v
+        # 原始opencv: (0,0)在左上，v向下递增
+        vv_new = 1.0 - vv  # [height, width]
+
+        uv = np.zeros((self.height, self.width, 2), dtype=np.float32)
+
+        uv[:, :, 0] = uu          # u
+        uv[:, :, 1] = vv_new      # v (左下角)
+        return uv
+
     def projectUV2Points(
         self,
         uv: Union[torch.Tensor, np.ndarray, list],
