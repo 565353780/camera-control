@@ -1,5 +1,4 @@
 import os
-from camera_control.Method.rotate import rotmat2qvec
 import cv2
 import torch
 import trimesh
@@ -13,6 +12,7 @@ from camera_control.Method.sample import sampleCamera
 from camera_control.Method.path import createFileFolder
 from camera_control.Module.camera import Camera
 from camera_control.Module.nvdiffrast_renderer import NVDiffRastRenderer
+from camera_control.Module.camera_convertor import CameraConvertor
 
 class MeshRenderer(object):
     def __init__(self) -> None:
@@ -93,59 +93,6 @@ class MeshRenderer(object):
         dtype = torch.float32,
         device: str = 'cuda:0',
     ) -> bool:
-        """
-        创建用于训练3DGS的COLMAP格式数据文件夹
-
-        生成的数据结构：
-        save_data_folder_path/
-        ├── images/           # 渲染的图像
-        │   ├── 00000.png
-        │   ├── 00001.png
-        │   └── ...
-        └── sparse/
-            └── 0/
-                ├── cameras.txt   # 相机内参 (PINHOLE模型)
-                ├── images.txt    # 图像外参 (四元数 + 平移)
-                └── points3D.ply  # 3D点云 (从mesh的vertices生成)
-
-        坐标系转换说明：
-        - 原始相机坐标系 (camera.py): X右，Y上，Z后（相机看向 -Z 方向）
-        - COLMAP相机坐标系: X右，Y下，Z前（相机看向 +Z 方向）
-        - 世界坐标系保持不变（与mesh坐标系一致）
-        - 只转换相机坐标系，不转换世界坐标系
-
-        Args:
-            mesh: 要渲染的网格
-            save_data_folder_path: 保存数据的文件夹路径
-            camera_num: 采样的相机数量
-            camera_dist: 相机到物体中心的距离
-            width: 图像宽度
-            height: 图像高度
-            fx: 焦距x
-            fy: 焦距y
-            dtype: 数据类型
-            device: 计算设备
-
-        Returns:
-            是否成功
-        """
-        # 内参主点（COLMAP坐标系，原点在左上角）
-        cx = width / 2.0
-        cy = height / 2.0
-
-        if os.path.exists(save_data_folder_path):
-            rmtree(save_data_folder_path)
-
-        # 创建文件夹结构
-        if not save_data_folder_path.endswith('/'):
-            save_data_folder_path += '/'
-
-        images_folder_path = save_data_folder_path + 'images/'
-        sparse_folder_path = save_data_folder_path + 'sparse/0/'
-        os.makedirs(images_folder_path, exist_ok=True)
-        os.makedirs(sparse_folder_path, exist_ok=True)
-
-        # 渲染数据
         render_data_dict = MeshRenderer.sampleRenderData(
             mesh=mesh,
             camera_num=camera_num,
@@ -159,106 +106,25 @@ class MeshRenderer(object):
             device=device,
         )
 
-        # 准备cameras.txt内容
-        # COLMAP格式: CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]
-        # PINHOLE模型参数: fx, fy, cx, cy
-        cameras_txt_lines = [
-            "# Camera list with one line of data per camera:\n",
-            "#   CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]\n",
-            f"# Number of cameras: 1\n",
-            f"1 PINHOLE {width} {height} {fx} {fy} {cx} {cy}\n"
-        ]
+        cameras = []
+        images = []
 
-        # 准备images.txt内容
-        # COLMAP格式: IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME
-        # 然后是一行2D点（可以为空）
-        images_txt_lines = [
-            "# Image list with two lines of data per image:\n",
-            "#   IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME\n",
-            "#   POINTS2D[] as (X, Y, POINT3D_ID)\n",
-            f"# Number of images: {len(render_data_dict)}\n",
-        ]
-
-        print('[INFO][MeshRenderer::createColmapDataFolder]')
-        print('\t start create colmap data folder...')
-        for key, single_render_data_dict in render_data_dict.items():
+        for single_render_data_dict in render_data_dict.values():
             camera_data_dict = single_render_data_dict['camera']
-            rgb = single_render_data_dict['rgb']
+            rgb = single_render_data_dict['rgb'][..., ::-1] * 255.0
 
-            colmap_pose = Camera.fromDict(camera_data_dict).toColmapPose()
+            camera = Camera.fromDict(camera_data_dict)
 
-            # 图像文件名
-            image_name = f"{key:05d}.png"
-            image_id = key + 1  # COLMAP的ID从1开始
+            cameras.append(camera)
+            images.append(rgb)
 
-            # 保存图像
-            cv2.imwrite(images_folder_path + image_name, rgb)
 
-            # 添加到images.txt
-            # 格式: IMAGE_ID QW QX QY QZ TX TY TZ CAMERA_ID NAME
-            images_txt_lines.append(
-                f"{image_id} {colmap_pose[0]:.10f} {colmap_pose[1]:.10f} {colmap_pose[2]:.10f} {colmap_pose[3]:.10f} "
-                f"{colmap_pose[4]:.10f} {colmap_pose[5]:.10f} {colmap_pose[6]:.10f} 1 {image_name}\n"
-            )
-            # 空行表示没有2D特征点
-            images_txt_lines.append("\n")
-
-        # 写入cameras.txt
-        with open(sparse_folder_path + 'cameras.txt', 'w') as f:
-            f.writelines(cameras_txt_lines)
-
-        # 写入images.txt
-        with open(sparse_folder_path + 'images.txt', 'w') as f:
-            f.writelines(images_txt_lines)
-
-        # 生成points3D.ply点云文件
-        print('\t generating points3D.ply from mesh vertices...')
-        vertices = toNumpy(mesh.vertices, np.float32)
-
-        # 获取顶点颜色（如果存在）
-        if hasattr(mesh, 'visual') and hasattr(mesh.visual, 'vertex_colors') and mesh.visual.vertex_colors is not None:
-            vertex_colors = mesh.visual.vertex_colors
-            # 确保颜色是uint8格式
-            if vertex_colors.dtype != np.uint8:
-                if vertex_colors.max() <= 1.0:
-                    vertex_colors = (vertex_colors * 255.0).astype(np.uint8)
-                else:
-                    vertex_colors = vertex_colors.astype(np.uint8)
-            # 确保是RGB格式（3通道）
-            if vertex_colors.shape[1] > 3:
-                vertex_colors = vertex_colors[:, :3]
-        else:
-            # 默认使用白色
-            vertex_colors = np.ones((vertices.shape[0], 3), dtype=np.uint8) * 255
-
-        # 获取顶点法线（如果存在）
-        if hasattr(mesh, 'vertex_normals') and mesh.vertex_normals is not None:
-            vertex_normals = toNumpy(mesh.vertex_normals, np.float32)
-        else:
-            # 如果没有法线，计算法线或使用零向量
-            try:
-                mesh.vertex_normals = mesh.vertex_normals  # 触发自动计算
-                vertex_normals = toNumpy(mesh.vertex_normals, np.float32)
-            except:
-                # 如果计算失败，使用零向量
-                vertex_normals = np.zeros((vertices.shape[0], 3), dtype=np.float32)
-
-        # 创建点云mesh（只包含顶点，不包含面）
-        point_cloud_mesh = trimesh.Trimesh(
-            vertices=vertices,
-            vertex_colors=vertex_colors,
-            vertex_normals=vertex_normals,
-            process=False
+        return CameraConvertor.createColmapDataFolder(
+            cameras=cameras,
+            images=images,
+            points=mesh.vertices,
+            save_data_folder_path=save_data_folder_path,
         )
-
-        # 导出为PLY格式
-        ply_path = sparse_folder_path + 'points3D.ply'
-        point_cloud_mesh.export(ply_path, file_type='ply')
-
-        print(f'\t saved to: {save_data_folder_path}')
-        print(f'\t total images: {len(render_data_dict)}')
-        print(f'\t total points: {vertices.shape[0]}')
-        return True
 
     @staticmethod
     def createOmniVGGTDataFolder(
@@ -321,6 +187,8 @@ class MeshRenderer(object):
             depth_vis = single_render_data_dict['depth_vis']
 
             camera = Camera.fromDict(camera_data_dict)
+            rgb = toNumpy(rgb[..., ::-1] * 255.0, np.uint8)
+            depth_vis = toNumpy(depth_vis[..., ::-1] * 255.0, np.uint8)
 
             camera2world = toNumpy(camera.camera2worldCV, np.float32) @ world2cameraCV_global
             intrinsic = toNumpy(camera.intrinsic, np.float32)
@@ -375,13 +243,12 @@ class MeshRenderer(object):
 
         print('[INFO][ImageMeshMapper::createDA3DataFile]')
         print('\t start create da3 data file...')
-        for key, single_render_data_dict in render_data_dict.items():
+        for single_render_data_dict in render_data_dict.values():
             camera_data_dict = single_render_data_dict['camera']
             rgb = single_render_data_dict['rgb'][..., ::-1]
-            # depth = single_render_data_dict['depth']
-            # depth_vis = single_render_data_dict['depth_vis']
 
             camera = Camera.fromDict(camera_data_dict)
+            rgb = toNumpy(rgb[..., ::-1] * 255.0, np.uint8)
 
             extrinsic = toNumpy(camera.world2cameraCV, np.float32)
             intrinsic = toNumpy(camera.intrinsic, np.float32)
