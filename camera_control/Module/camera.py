@@ -164,21 +164,18 @@ class Camera(CameraData):
 
         return uv
 
-    def toImageUV(self) -> np.ndarray:
-        u = np.arange(self.width).astype(np.float32) / (self.width - 1.0)
-        v = np.arange(self.height).astype(np.float32) / (self.height - 1.0)
+    def toImageUV(self) -> torch.Tensor:
+        """
+        生成每个像素的归一化UV坐标，原点在左下角，u向右，v向上。
+        返回: torch.Tensor, shape (height, width, 2), dtype为self.dtype, device为self.device
+        """
+        u = torch.arange(self.width, dtype=self.dtype, device=self.device) / (self.width - 1.0)
+        v = torch.arange(self.height, dtype=self.dtype, device=self.device) / (self.height - 1.0)
 
-        # 构造网格
-        uu, vv = np.meshgrid(u, v, indexing='xy')  # uu/vv shape: [height, width]
+        uu, vv = torch.meshgrid(u, v, indexing='xy')  # uu/vv shape: [height, width]
+        vv_new = 1.0 - vv  # [height, width], 左下角为0,0，v向上增大
 
-        # 按照"图片左下角为0,0，u向右，v向上"来构造v
-        # 原始opencv: (0,0)在左上，v向下递增
-        vv_new = 1.0 - vv  # [height, width]
-
-        uv = np.zeros((self.height, self.width, 2), dtype=np.float32)
-
-        uv[:, :, 0] = uu          # u
-        uv[:, :, 1] = vv_new      # v (左下角)
+        uv = torch.stack([uu, vv_new], dim=-1)  # shape: (height, width, 2)
         return uv
 
     def projectUV2Points(
