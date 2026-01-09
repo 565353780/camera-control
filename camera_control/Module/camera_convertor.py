@@ -1,8 +1,8 @@
 import os
 import cv2
 import torch
-import trimesh
 import numpy as np
+import open3d as o3d
 from shutil import rmtree
 from typing import Union, List
 
@@ -18,9 +18,8 @@ class CameraConvertor(object):
     def createColmapDataFolder(
         cameras: List[Camera],
         images: Union[torch.Tensor, np.ndarray, list],
-        points: Union[torch.Tensor, np.ndarray, list],
+        pcd: o3d.geometry.PointCloud,
         save_data_folder_path: str,
-        colors: Union[torch.Tensor, np.ndarray, list, None]=None,
     ) -> bool:
         """
         创建用于训练3DGS的COLMAP格式数据文件夹
@@ -44,12 +43,6 @@ class CameraConvertor(object):
         - 只转换相机坐标系，不转换世界坐标系
         """
         images = toNumpy(images, np.uint8)
-        points = toNumpy(points, np.float32).reshape(-1, 3)
-
-        if colors is None:
-            colors = np.ones([points.shape[0], 3], dtype=np.uint8) * 128
-        else:
-            colors = toNumpy(colors, np.uint8).reshape(-1, 3)
 
         image_num, height, width = images.shape[:3]
 
@@ -124,17 +117,10 @@ class CameraConvertor(object):
 
         # 生成points3D.ply点云文件
         print('\t generating points3D.ply from points...')
-        point_cloud_mesh = trimesh.Trimesh(
-            vertices=points,
-            visual=trimesh.visual.color.ColorVisuals(vertex_colors=colors),
-            process=False
-        )
-
-        # 导出为PLY格式
         ply_path = sparse_folder_path + 'points3D.ply'
-        point_cloud_mesh.export(ply_path, file_type='ply')
+        o3d.io.write_point_cloud(ply_path, pcd, write_ascii=True)
 
         print(f'\t saved to: {save_data_folder_path}')
         print(f'\t total images: {image_num}')
-        print(f'\t total points: {points.shape[0]}')
+        print(f'\t total points: {len(pcd.points)}')
         return True
