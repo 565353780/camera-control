@@ -20,6 +20,7 @@ class CameraConvertor(object):
         images: Union[torch.Tensor, np.ndarray, list],
         points: Union[torch.Tensor, np.ndarray, list],
         save_data_folder_path: str,
+        colors: Union[torch.Tensor, np.ndarray, list, None]=None,
     ) -> bool:
         """
         创建用于训练3DGS的COLMAP格式数据文件夹
@@ -44,6 +45,11 @@ class CameraConvertor(object):
         """
         images = toNumpy(images, np.uint8)
         points = toNumpy(points, np.float32).reshape(-1, 3)
+
+        if colors is None:
+            colors = np.ones([points.shape[0], 3], dtype=np.uint8) * 128
+        else:
+            colors = toNumpy(colors, np.uint8).reshape(-1, 3)
 
         image_num, height, width = images.shape[:3]
 
@@ -120,6 +126,7 @@ class CameraConvertor(object):
         print('\t generating points3D.ply from points...')
         point_cloud_mesh = trimesh.Trimesh(
             vertices=points,
+            visual=trimesh.visual.color.ColorVisuals(vertex_colors=colors),
             process=False
         )
 
@@ -131,5 +138,3 @@ class CameraConvertor(object):
         print(f'\t total images: {image_num}')
         print(f'\t total points: {points.shape[0]}')
         return True
-
-
