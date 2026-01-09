@@ -565,22 +565,19 @@ class CameraData(object):
 
         return data_dict
 
-    def toColmapPose(self) -> np.ndarray:
+    def toColmapPose(self) -> torch.Tensor:
         '''
         return: qw, qx, qy, qz, tx, ty, tz
         '''
-        # 获取原始坐标系下的world2camera矩阵
-        world2camera = toNumpy(self.world2camera, np.float64)
-
         # 坐标系转换矩阵：只转换相机坐标系（Y和Z轴翻转），保持世界坐标系不变
         # 原始坐标系: X右，Y上，Z后
         # COLMAP坐标系: X右，Y下，Z前
-        C = np.diag([1.0, -1.0, -1.0, 1.0])
+        C = torch.diag(torch.tensor([1, -1, -1, 1], dtype=self.dtype, device=self.device))
 
         # 只转换相机坐标系，不转换世界坐标系
         # world2camera_colmap = C @ world2camera
         # 这样点云（世界坐标系）保持不变，只有相机坐标系从原始坐标系转换到COLMAP坐标系
-        world2camera_colmap = C @ world2camera
+        world2camera_colmap = C @ self.world2camera
 
         # 提取旋转矩阵和平移向量
         R = world2camera_colmap[:3, :3]
