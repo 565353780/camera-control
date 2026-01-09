@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from typing import Optional, Union, Tuple
 
-from camera_control.Method.data import toTensor
+from camera_control.Method.data import toTensor, toNumpy
 from camera_control.Module.camera import Camera
 
 
@@ -42,7 +42,7 @@ class RGBDCamera(Camera):
         self,
         image: Union[torch.Tensor, np.ndarray, list],
     ) -> bool:
-        self.image = toTensor(image, torch.uint8, self.device)
+        self.image = toNumpy(image, np.uint8)
         return True
 
     def loadDepth(
