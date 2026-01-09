@@ -44,6 +44,14 @@ class CameraConvertor(object):
         """
         images = toNumpy(images, np.uint8)
 
+        # 检查pcd，如果没有颜色则全部赋值为[128,128,128]
+        if not pcd.has_colors():
+            colors = np.tile(np.array([[128, 128, 128]], dtype=np.float64) / 255.0, (np.asarray(pcd.points).shape[0], 1))
+            pcd.colors = o3d.utility.Vector3dVector(colors)
+        # 如果没有法向，估计法向
+        if not pcd.has_normals():
+            pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=30))
+
         image_num, height, width = images.shape[:3]
 
         fx = cameras[0].fx
