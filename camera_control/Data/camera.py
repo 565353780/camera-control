@@ -1,4 +1,5 @@
 import os
+from camera_control.Method.rotate import rotmat2qvec
 import torch
 import numpy as np
 import open3d as o3d
@@ -162,6 +163,25 @@ class CameraData(object):
     def camera2worldCV(self) -> torch.Tensor:
         C = torch.diag(torch.tensor([1, -1, -1, 1], dtype=self.dtype, device=self.device))
         return C @ self.camera2world @ C
+
+    def to(self, dtype=None, device: Optional[str]=None) -> bool:
+        need_update = False
+
+        if dtype is not None:
+            if dtype != self.dtype:
+                self.dtype = dtype
+                need_update = True
+
+        if device is not None:
+            if device != self.device:
+                self.device = device
+                need_update = True
+
+        if not need_update:
+            return True
+
+        self.world2camera = self.world2camera.to(dtype=self.dtype, device=self.device)
+        return True
 
     def setR(
         self,
@@ -544,6 +564,34 @@ class CameraData(object):
         }
 
         return data_dict
+
+    def toColmapPose(self) -> np.ndarray:
+        '''
+        return: qw, qx, qy, qz, tx, ty, tz
+        '''
+        # 获取原始坐标系下的world2camera矩阵
+        world2camera = toNumpy(self.world2camera, np.float64)
+
+        # 坐标系转换矩阵：只转换相机坐标系（Y和Z轴翻转），保持世界坐标系不变
+        # 原始坐标系: X右，Y上，Z后
+        # COLMAP坐标系: X右，Y下，Z前
+        C = np.diag([1.0, -1.0, -1.0, 1.0])
+
+        # 只转换相机坐标系，不转换世界坐标系
+        # world2camera_colmap = C @ world2camera
+        # 这样点云（世界坐标系）保持不变，只有相机坐标系从原始坐标系转换到COLMAP坐标系
+        world2camera_colmap = C @ world2camera
+
+        # 提取旋转矩阵和平移向量
+        R = world2camera_colmap[:3, :3]
+        t = world2camera_colmap[:3, 3]
+
+        # 将旋转矩阵转换为四元数 (w, x, y, z)，使用COLMAP的rotmat2qvec算法
+        quat = rotmat2qvec(R)
+
+        quat_t = np.concatenate([quat, t], axis=0)
+
+        return quat_t
 
     def save(
         self,

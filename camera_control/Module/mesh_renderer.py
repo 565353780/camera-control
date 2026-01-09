@@ -1,4 +1,5 @@
 import os
+from camera_control.Method.rotate import rotmat2qvec
 import cv2
 import torch
 import trimesh
@@ -77,30 +78,6 @@ class MeshRenderer(object):
                 'depth_vis': depth_image,
             }
         return render_data_dict
-
-    @staticmethod
-    def rotationMatrixToQuaternion(R: np.ndarray) -> np.ndarray:
-        """
-        将3x3旋转矩阵转换为四元数 (w, x, y, z)
-        使用与 COLMAP 一致的 rotmat2qvec 算法
-
-        Args:
-            R: 3x3旋转矩阵
-
-        Returns:
-            四元数 [w, x, y, z]
-        """
-        Rxx, Ryx, Rzx, Rxy, Ryy, Rzy, Rxz, Ryz, Rzz = R.flatten()
-        K = np.array([
-            [Rxx - Ryy - Rzz, 0, 0, 0],
-            [Ryx + Rxy, Ryy - Rxx - Rzz, 0, 0],
-            [Rzx + Rxz, Rzy + Ryz, Rzz - Rxx - Ryy, 0],
-            [Ryz - Rzy, Rzx - Rxz, Rxy - Ryx, Rxx + Ryy + Rzz]]) / 3.0
-        eigvals, eigvecs = np.linalg.eigh(K)
-        qvec = eigvecs[[3, 0, 1, 2], np.argmax(eigvals)]
-        if qvec[0] < 0:
-            qvec *= -1
-        return qvec.astype(np.float64)
 
     @staticmethod
     def createColmapDataFolder(
@@ -202,34 +179,13 @@ class MeshRenderer(object):
             f"# Number of images: {len(render_data_dict)}\n",
         ]
 
-        # 坐标系转换矩阵：只转换相机坐标系（Y和Z轴翻转），保持世界坐标系不变
-        # 原始坐标系: X右，Y上，Z后
-        # COLMAP坐标系: X右，Y下，Z前
-        C = np.diag([1.0, -1.0, -1.0, 1.0])
-
         print('[INFO][MeshRenderer::createColmapDataFolder]')
         print('\t start create colmap data folder...')
         for key, single_render_data_dict in render_data_dict.items():
             camera_data_dict = single_render_data_dict['camera']
             rgb = single_render_data_dict['rgb']
 
-            camera = Camera.fromDict(camera_data_dict)
-
-            # 获取原始坐标系下的world2camera矩阵
-            world2camera = toNumpy(camera.world2camera, np.float64)
-
-            # 只转换相机坐标系，不转换世界坐标系
-            # world2camera_colmap = C @ world2camera
-            # 这样点云（世界坐标系）保持不变，只有相机坐标系从原始坐标系转换到COLMAP坐标系
-            world2camera_colmap = C @ world2camera
-
-            # 提取旋转矩阵和平移向量
-            R = world2camera_colmap[:3, :3]
-            t = world2camera_colmap[:3, 3]
-
-            # 将旋转矩阵转换为四元数 (w, x, y, z)，使用COLMAP的rotmat2qvec算法
-            quat = MeshRenderer.rotationMatrixToQuaternion(R)
-            qw, qx, qy, qz = quat
+            colmap_pose = Camera.fromDict(camera_data_dict).toColmapPose()
 
             # 图像文件名
             image_name = f"{key:05d}.png"
@@ -241,8 +197,8 @@ class MeshRenderer(object):
             # 添加到images.txt
             # 格式: IMAGE_ID QW QX QY QZ TX TY TZ CAMERA_ID NAME
             images_txt_lines.append(
-                f"{image_id} {qw:.10f} {qx:.10f} {qy:.10f} {qz:.10f} "
-                f"{t[0]:.10f} {t[1]:.10f} {t[2]:.10f} 1 {image_name}\n"
+                f"{image_id} {colmap_pose[0]:.10f} {colmap_pose[1]:.10f} {colmap_pose[2]:.10f} {colmap_pose[3]:.10f} "
+                f"{colmap_pose[4]:.10f} {colmap_pose[5]:.10f} {colmap_pose[6]:.10f} 1 {image_name}\n"
             )
             # 空行表示没有2D特征点
             images_txt_lines.append("\n")
