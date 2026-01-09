@@ -93,7 +93,7 @@ class CameraConvertor(object):
             colmap_pose = camera.toColmapPose()
 
             # 图像文件名
-            image_name = f"{i:05d}.png"
+            image_name = f"{i:06d}.png"
             image_id = i + 1  # COLMAP的ID从1开始
 
             # 保存图像
