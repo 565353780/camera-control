@@ -45,6 +45,9 @@ class DepthCamera(Camera):
         uv = self.toImageUV()
         depth = toTensor(depth, self.dtype, self.device).reshape(self.height, self.width)
 
+        # 存储depth map
+        self.depth_map = depth
+
         # 记录有效像素位置
         self.valid_depth_mask = (depth > 1e-5) & (depth < 1e5)
 
@@ -73,6 +76,43 @@ class DepthCamera(Camera):
         # 取对应点
         points = self.ccm[v, u]  # (N, 3)
         valid_mask = self.valid_depth_mask[v, u]  # (N,)
+
+        # 恢复原 shape
+        points = points.reshape(*orig_shape, 3)
+        valid_mask = valid_mask.reshape(orig_shape)
+
+        return points, valid_mask
+
+    def queryUVPoints(
+        self,
+        query_uv: Union[torch.Tensor, np.ndarray, list],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        给定归一化UV坐标，找到最近的像素，使用该像素的depth和准确的query_uv值反投影得到3D点。
+        query_uv: [..., 2] (最后一维是归一化的[u, v]，范围[0, 1])
+        返回: (points: [..., 3], valid_mask: [...])
+        """
+        # 转换为张量，保持原 shape
+        query_uv_tensor = toTensor(query_uv, self.dtype, self.device)
+        orig_shape = query_uv_tensor.shape[:-1]
+        query_uv_flat = query_uv_tensor.reshape(-1, 2)  # (N, 2)
+
+        # 将归一化UV坐标转换为像素坐标（浮点数）
+        u_pixel = query_uv_flat[:, 0] * self.width
+        v_pixel = query_uv_flat[:, 1] * self.height
+
+        # 找到最近的整数像素坐标
+        u_nearest = u_pixel.round().long().clamp(0, self.width - 1)
+        v_nearest = v_pixel.round().long().clamp(0, self.height - 1)
+
+        # 从depth map获取最近像素的depth值
+        depth_values = self.depth_map[v_nearest, u_nearest]  # (N,)
+        valid_mask = self.valid_depth_mask[v_nearest, u_nearest]  # (N,)
+
+        # 使用准确的query_uv值和获取的depth值反投影得到3D点
+        # query_uv_flat 是归一化的UV坐标，shape (N, 2)
+        # depth_values 是对应的depth值，shape (N,)
+        points = self.projectUV2Points(query_uv_flat, depth_values)  # (N, 3)
 
         # 恢复原 shape
         points = points.reshape(*orig_shape, 3)
