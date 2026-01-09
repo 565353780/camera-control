@@ -6,7 +6,7 @@ from camera_control.Method.data import toTensor
 from camera_control.Module.camera import Camera
 
 
-class DepthCamera(Camera):
+class RGBDCamera(Camera):
     def __init__(
         self,
         width: int = 640,
@@ -38,15 +38,29 @@ class DepthCamera(Camera):
         )
         return
 
+    def loadImage(
+        self,
+        image: Union[torch.Tensor, np.ndarray, list],
+    ) -> bool:
+        self.image = toTensor(image, torch.uint8, self.device)
+        return True
+
     def loadDepth(
         self,
         depth: Union[torch.Tensor, np.ndarray, list],
+        conf: Union[torch.Tensor, np.ndarray, list, None]=None,
     ) -> bool:
         uv = self.toImageUV()
         depth = toTensor(depth, self.dtype, self.device).reshape(self.height, self.width)
 
+        if conf is None:
+            conf = torch.zeros_like(depth)
+        else:
+            conf = toTensor(conf, self.dtype, self.device).reshape(self.height, self.width)
+
         # 存储depth map
-        self.depth_map = depth
+        self.depth = depth
+        self.conf = conf
 
         # 记录有效像素位置
         self.valid_depth_mask = (depth > 1e-5) & (depth < 1e5)
@@ -106,7 +120,7 @@ class DepthCamera(Camera):
         v_nearest = v_pixel.round().long().clamp(0, self.height - 1)
 
         # 从depth map获取最近像素的depth值
-        depth_values = self.depth_map[v_nearest, u_nearest]  # (N,)
+        depth_values = self.depth[v_nearest, u_nearest]  # (N,)
         valid_mask = self.valid_depth_mask[v_nearest, u_nearest]  # (N,)
 
         # 使用准确的query_uv值和获取的depth值反投影得到3D点
