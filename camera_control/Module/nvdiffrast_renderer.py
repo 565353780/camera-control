@@ -195,13 +195,12 @@ class NVDiffRastRenderer(object):
         colors_interp = torch.clamp(colors_interp, 0.0, 1.0)
 
         # 计算光照
-        light_dir = toTensor(light_direction, torch.float32, camera.device)
-        light_dir = light_dir / (torch.norm(light_dir) + 1e-8)
-
-        R_view = camera.R  # [3, 3]
-        normals_cam = torch.matmul(normals_interp, R_view.T)  # [1, H, W, 3]
-        light_dir_cam = torch.matmul(light_dir, R_view.T)
+        light_dir_cam = toTensor(light_direction, torch.float32, camera.device)
+        # make light start from camera local coord
+        # light_dir_cam = torch.matmul(light_dir, camera.R.T)
         light_dir_cam = light_dir_cam / (torch.norm(light_dir_cam) + 1e-8)
+
+        normals_cam = torch.matmul(normals_interp, camera.R.T)  # [1, H, W, 3]
 
         diffuse = torch.sum(normals_cam * light_dir_cam[None, None, None, :], dim=-1)  # [1, H, W]
         diffuse = torch.clamp(diffuse, min=0.0, max=1.0)
