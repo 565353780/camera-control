@@ -284,27 +284,20 @@ class NVDiffRastRenderer(object):
                     texture = texture.flip(0).unsqueeze(0)  # [1, H, W, 3]
                     use_texture = True
 
-        if use_texture:
-            # 使用纹理渲染
-            uv_interp, _ = dr.interpolate(uvs.unsqueeze(0), rast_out, faces)  # [1, H, W, 2]
-            image = dr.texture(texture, uv_interp, filter_mode='linear')  # [1, H, W, 3]
-        else:
-            # 使用顶点颜色渲染
-            if hasattr(mesh.visual, 'vertex_colors') and mesh.visual.vertex_colors is not None:
-                vertex_colors = toTensor(mesh.visual.vertex_colors[:, :3], torch.float32, camera.device) / 255.0
-            else:
-                vertex_colors = torch.ones((vertices.shape[0], 3), dtype=torch.float32, device=camera.device)
+        if not use_texture:
+            return NVDiffRastRenderer.renderVertexColor(
+                mesh=mesh,
+                camera=camera,
+                light_direction=[1, 1, 1],
+                paint_color=paint_color,
+                bg_color=bg_color,
+                vertices_tensor=vertices_tensor,
+                enable_antialias=enable_antialias,
+            )
 
-            # 处理paint_color（如果指定）
-            if paint_color is not None:
-                paint_color_tensor = toTensor(paint_color, torch.float32, camera.device)[:3]
-                if torch.max(paint_color_tensor) > 1.0:
-                    paint_color_tensor = paint_color_tensor / 255.0
-                vertex_colors = paint_color_tensor.unsqueeze(0).expand(vertices.shape[0], -1)
-
-            # 插值顶点颜色
-            colors_interp, _ = dr.interpolate(vertex_colors.unsqueeze(0).contiguous(), rast_out, faces)  # [1, H, W, 3]
-            image = torch.clamp(colors_interp, 0.0, 1.0)  # [1, H, W, 3]
+        # 使用纹理渲染
+        uv_interp, _ = dr.interpolate(uvs.unsqueeze(0), rast_out, faces)  # [1, H, W, 2]
+        image = dr.texture(texture, uv_interp, filter_mode='linear')  # [1, H, W, 3]
 
         # 处理背景色
         mask = rast_out[0, :, :, 3] > 0  # [H, W]
