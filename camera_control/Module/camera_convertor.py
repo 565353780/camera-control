@@ -90,7 +90,6 @@ class CameraConvertor(object):
         print('\t start create colmap data folder...')
         for i in range(camera_num):
             camera = cameras[i]
-            rgb = camera.image_cv
 
             colmap_pose = camera.toColmapPose().cpu().numpy()
 
@@ -99,7 +98,7 @@ class CameraConvertor(object):
             image_id = i + 1  # COLMAP的ID从1开始
 
             # 保存图像
-            cv2.imwrite(images_folder_path + image_name, rgb)
+            cv2.imwrite(images_folder_path + image_name, camera.image_cv)
 
             # 添加到images.txt
             # 格式: IMAGE_ID QW QX QY QZ TX TY TZ CAMERA_ID NAME
