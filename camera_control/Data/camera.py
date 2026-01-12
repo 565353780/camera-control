@@ -586,7 +586,7 @@ class CameraData(object):
         # 将旋转矩阵转换为四元数 (w, x, y, z)，使用COLMAP的rotmat2qvec算法
         quat = rotmat2qvec(R)
 
-        quat_t = np.concatenate([quat, t], axis=0)
+        quat_t = torch.cat([quat, t], dim=0)
 
         return quat_t
 

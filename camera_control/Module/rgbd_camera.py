@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from typing import Optional, Union, Tuple
 
-from camera_control.Method.data import toTensor, toNumpy
+from camera_control.Method.data import toTensor
 from camera_control.Module.camera import Camera
 
 
@@ -15,9 +15,9 @@ class RGBDCamera(Camera):
         fy: float = 500,
         cx: Optional[float] = None,
         cy: Optional[float] = None,
-        pos: Union[torch.Tensor, np.ndarray, list] = ...,
-        look_at: Union[torch.Tensor, np.ndarray, list] = ...,
-        up: Union[torch.Tensor, np.ndarray, list] = ...,
+        pos: Union[torch.Tensor, np.ndarray, list] = [0, 0, 0],
+        look_at: Union[torch.Tensor, np.ndarray, list] = [1, 0, 0],
+        up: Union[torch.Tensor, np.ndarray, list] = [0, 0, 1],
         world2camera: Union[torch.Tensor, np.ndarray, list, None] = None,
         dtype=torch.float32,
         device: str = 'cpu',
@@ -42,7 +42,7 @@ class RGBDCamera(Camera):
         self,
         image: Union[torch.Tensor, np.ndarray, list],
     ) -> bool:
-        self.image = toNumpy(image, np.uint8)
+        self.image = toTensor(image, torch.uint8)
         return True
 
     def loadDepth(

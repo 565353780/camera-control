@@ -1,13 +1,11 @@
 import os
 import cv2
-import torch
 import numpy as np
 import open3d as o3d
 from shutil import rmtree
-from typing import Union, List
+from typing import List
 
-from camera_control.Method.data import toNumpy
-from camera_control.Module.camera import Camera
+from camera_control.Module.rgbd_camera import RGBDCamera
 
 
 class CameraConvertor(object):
@@ -16,8 +14,7 @@ class CameraConvertor(object):
 
     @staticmethod
     def createColmapDataFolder(
-        cameras: List[Camera],
-        images: Union[torch.Tensor, np.ndarray, list],
+        cameras: List[RGBDCamera],
         pcd: o3d.geometry.PointCloud,
         save_data_folder_path: str,
     ) -> bool:
@@ -42,8 +39,6 @@ class CameraConvertor(object):
         - 世界坐标系保持不变（与mesh坐标系一致）
         - 只转换相机坐标系，不转换世界坐标系
         """
-        images = toNumpy(images, np.uint8)
-
         # 检查pcd，如果没有颜色则全部赋值为[128,128,128]
         if not pcd.has_colors():
             colors = np.tile(np.array([[128, 128, 128]], dtype=np.float64) / 255.0, (np.asarray(pcd.points).shape[0], 1))
@@ -52,8 +47,8 @@ class CameraConvertor(object):
         if not pcd.has_normals():
             pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=30))
 
-        image_num, height, width = images.shape[:3]
-
+        camera_num = len(cameras)
+        height, width = cameras[0].image.shape[:2]
         fx = cameras[0].fx
         fy = cameras[0].fy
         cx = cameras[0].cx
@@ -88,16 +83,16 @@ class CameraConvertor(object):
             "# Image list with two lines of data per image:\n",
             "#   IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME\n",
             "#   POINTS2D[] as (X, Y, POINT3D_ID)\n",
-            f"# Number of images: {image_num}\n",
+            f"# Number of images: {camera_num}\n",
         ]
 
         print('[INFO][MeshRenderer::createColmapDataFolder]')
         print('\t start create colmap data folder...')
-        for i in range(image_num):
+        for i in range(camera_num):
             camera = cameras[i]
-            rgb = images[i]
+            rgb = cameras[i].image.cpu().numpy()
 
-            colmap_pose = camera.toColmapPose()
+            colmap_pose = camera.toColmapPose().cpu().numpy()
 
             # 图像文件名
             image_name = f"{i:06d}.png"
@@ -129,6 +124,6 @@ class CameraConvertor(object):
         o3d.io.write_point_cloud(ply_path, pcd, write_ascii=True)
 
         print(f'\t saved to: {save_data_folder_path}')
-        print(f'\t total images: {image_num}')
+        print(f'\t total images: {camera_num}')
         print(f'\t total points: {len(pcd.points)}')
         return True
