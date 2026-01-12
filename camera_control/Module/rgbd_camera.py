@@ -39,21 +39,33 @@ class RGBDCamera(Camera):
         return
 
     @property
-    def depth_vis(self) -> torch.Tensor:
+    def image_cv(self) -> np.ndarray:
+        return toNumpy(self.image * 255.0, np.uint8)[..., ::-1]
+
+    def toDepthVis(
+        self,
+        depth_min: Optional[float]=None,
+        depth_max: Optional[float]=None,
+    ) -> torch.Tensor:
         """
         将self.depth转换为可视化的RGB格式tensor图像
 
         Returns:
             depth_vis: [H, W, 3] RGB格式的深度可视化图像，值在0-1范围内
         """
+        assert self.depth is not None
+
         # 获取有效深度值
         mask = self.valid_depth_mask
         valid_depth = self.depth[mask]
 
         # 归一化深度值
         if valid_depth.numel() > 0:
-            depth_min = valid_depth.min()
-            depth_max = valid_depth.max()
+            if depth_min is None:
+                depth_min = valid_depth.min()
+            if depth_max is None:
+                depth_max = valid_depth.max()
+
             depth_normalized = (self.depth - depth_min) / (depth_max - depth_min + 1e-8)
         else:
             depth_normalized = torch.zeros_like(self.depth)
@@ -66,19 +78,18 @@ class RGBDCamera(Camera):
 
         return depth_vis
 
-    @property
-    def image_cv(self) -> np.ndarray:
-        return toNumpy(self.image * 255.0, np.uint8)[..., ::-1]
-
-    @property
-    def depth_vis_cv(self) -> np.ndarray:
-        return toNumpy(self.depth_vis * 255.0, np.uint8)[..., ::-1]
+    def toDepthVisCV(
+        self,
+        depth_min: Optional[float]=None,
+        depth_max: Optional[float]=None,
+    ) -> np.ndarray:
+        return toNumpy(self.toDepthVis(depth_min, depth_max) * 255.0, np.uint8)[..., ::-1]
 
     def loadImage(
         self,
         image: Union[torch.Tensor, np.ndarray, list],
     ) -> bool:
-        self.image = toTensor(image, torch.uint8)
+        self.image = toTensor(image, self.dtype, self.device).reshape(self.height, self.width, 3)
         return True
 
     def loadDepth(

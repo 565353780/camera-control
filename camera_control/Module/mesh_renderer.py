@@ -65,8 +65,7 @@ class MeshRenderer(object):
                 vertices_tensor=vertices_tensor,
             )
 
-            image = (render_image_dict['image'] * 255.0)[..., ::-1]
-            camera.loadImage(image)
+            camera.loadImage(render_image_dict['image'])
 
             camera.loadDepth(render_depth_dict['depth'])
 
@@ -99,7 +98,7 @@ class MeshRenderer(object):
             device=device,
         )
 
-        pcd = toPcd(mesh.vertiecs, mesh.visual.vertex_colors)
+        pcd = toPcd(mesh.vertices, mesh.visual.vertex_colors)
 
         return CameraConvertor.createColmapDataFolder(
             cameras=camera_list,
