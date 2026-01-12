@@ -98,7 +98,7 @@ class MeshRenderer(object):
             device=device,
         )
 
-        pcd = toPcd(mesh.vertices, mesh.visual.vertex_colors)
+        pcd = toPcd(mesh.vertices, mesh.visual.vertex_colors[:, :3])
 
         return CameraConvertor.createColmapDataFolder(
             cameras=camera_list,
