@@ -3,7 +3,7 @@ import trimesh
 import numpy as np
 from typing import List
 
-from camera_control.Module.camera import Camera
+from camera_control.Module.rgbd_camera import RGBDCamera
 
 
 def sampleFibonacciSpherePoints(
@@ -53,7 +53,7 @@ def sampleCamera(
     fy: float = 500.0,
     dtype = torch.float32,
     device: str = 'cuda:0',
-) -> List[Camera]:
+) -> List[RGBDCamera]:
     """
     创建围绕mesh均匀分布的相机和深度数据
 
@@ -81,7 +81,7 @@ def sampleCamera(
     # 创建相机列表
     camera_list = []
     for i in range(camera_num):
-        camera = Camera(
+        camera = RGBDCamera(
             width=width,
             height=height,
             fx=fx,

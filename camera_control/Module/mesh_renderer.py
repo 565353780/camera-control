@@ -5,14 +5,16 @@ import trimesh
 import numpy as np
 from tqdm import trange
 from shutil import rmtree
-from typing import Optional
+from typing import Optional, List
 
+from camera_control.Method.pcd import toPcd
 from camera_control.Method.data import toNumpy
 from camera_control.Method.sample import sampleCamera
 from camera_control.Method.path import createFileFolder
-from camera_control.Module.camera import Camera
+from camera_control.Module.rgbd_camera import RGBDCamera
 from camera_control.Module.nvdiffrast_renderer import NVDiffRastRenderer
 from camera_control.Module.camera_convertor import CameraConvertor
+
 
 class MeshRenderer(object):
     def __init__(self) -> None:
@@ -31,7 +33,7 @@ class MeshRenderer(object):
         dtype = torch.float32,
         device: str = 'cuda:0',
         vertices_tensor: Optional[torch.Tensor] = None,
-    ) -> dict:
+    ) -> List[RGBDCamera]:
         camera_list = sampleCamera(
             mesh=mesh,
             camera_num=camera_num,
@@ -44,14 +46,10 @@ class MeshRenderer(object):
             device=device,
         )
 
-        render_data_dict = {}
-
         print('[INFO][MeshRenderer::sampleRenderData]')
         print('\t start sample render data...')
         for i in trange(len(camera_list)):
             camera = camera_list[i]
-
-            camera_data_dict = camera.toDict()
 
             render_image_dict = NVDiffRastRenderer.renderTexture(
                 mesh=mesh,
@@ -67,17 +65,12 @@ class MeshRenderer(object):
                 vertices_tensor=vertices_tensor,
             )
 
-            image = render_image_dict['image']
-            depth = toNumpy(render_depth_dict['depth'], np.float32)
-            depth_image = render_depth_dict['image']
+            image = (render_image_dict['image'] * 255.0)[..., ::-1]
+            camera.loadImage(image)
 
-            render_data_dict[i] = {
-                'camera': camera_data_dict,
-                'rgb': image,
-                'depth': depth,
-                'depth_vis': depth_image,
-            }
-        return render_data_dict
+            camera.loadDepth(render_depth_dict['depth'])
+
+        return camera_list
 
     @staticmethod
     def createColmapDataFolder(
@@ -93,7 +86,7 @@ class MeshRenderer(object):
         dtype = torch.float32,
         device: str = 'cuda:0',
     ) -> bool:
-        render_data_dict = MeshRenderer.sampleRenderData(
+        camera_list = MeshRenderer.sampleRenderData(
             mesh=mesh,
             camera_num=camera_num,
             camera_dist=camera_dist,
@@ -106,23 +99,11 @@ class MeshRenderer(object):
             device=device,
         )
 
-        cameras = []
-        images = []
-
-        for single_render_data_dict in render_data_dict.values():
-            camera_data_dict = single_render_data_dict['camera']
-            rgb = single_render_data_dict['rgb'][..., ::-1] * 255.0
-
-            camera = Camera.fromDict(camera_data_dict)
-
-            cameras.append(camera)
-            images.append(rgb)
-
+        pcd = toPcd(mesh.vertiecs, mesh.visual.vertex_colors)
 
         return CameraConvertor.createColmapDataFolder(
-            cameras=cameras,
-            images=images,
-            points=mesh.vertices,
+            cameras=camera_list,
+            pcd=pcd,
             save_data_folder_path=save_data_folder_path,
         )
 
@@ -153,7 +134,7 @@ class MeshRenderer(object):
         depth_vis_folder_path = save_data_folder_path + 'depths_vis/'
         os.makedirs(depth_vis_folder_path, exist_ok=True)
 
-        render_data_dict = MeshRenderer.sampleRenderData(
+        camera_list = MeshRenderer.sampleRenderData(
             mesh=mesh,
             camera_num=camera_num,
             camera_dist=camera_dist,
@@ -166,7 +147,7 @@ class MeshRenderer(object):
             device=device,
         )
 
-        first_camera = Camera.fromDict(render_data_dict[0]['camera'])
+        first_camera = camera_list[0]
 
         world2cameraCV_global = toNumpy(first_camera.world2cameraCV, np.float32)
         camera2worldCV_global = toNumpy(first_camera.camera2worldCV, np.float32)
@@ -180,19 +161,15 @@ class MeshRenderer(object):
 
         print('[INFO][MeshRenderer::createOmniVGGTDataFolder]')
         print('\t start create omnivggt data folder...')
-        for key, single_render_data_dict in render_data_dict.items():
-            camera_data_dict = single_render_data_dict['camera']
-            rgb = single_render_data_dict['rgb']
-            depth = single_render_data_dict['depth']
-            depth_vis = single_render_data_dict['depth_vis']
-
-            camera = Camera.fromDict(camera_data_dict)
-            rgb = toNumpy(rgb[..., ::-1] * 255.0, np.uint8)
-            depth_vis = toNumpy(depth_vis[..., ::-1] * 255.0, np.uint8)
+        for i in range(len(camera_list)):
+            camera = camera_list[i]
+            rgb = camera.image_cv
+            depth = camera.depth
+            depth_vis = camera.depth_vis_cv
 
             camera2world = toNumpy(camera.camera2worldCV, np.float32) @ world2cameraCV_global
             intrinsic = toNumpy(camera.intrinsic, np.float32)
-            with open(camera_folder_path + str(key) + '.txt', 'w') as f:
+            with open(camera_folder_path + str(i) + '.txt', 'w') as f:
                 for j in range(3):
                     f.write(str(camera2world[j][0]) + '\t')
                     f.write(str(camera2world[j][1]) + '\t')
@@ -205,9 +182,9 @@ class MeshRenderer(object):
 
             depth = np.where(depth == 0, 1e11, depth)
 
-            cv2.imwrite(image_folder_path + str(key) + '.png', rgb)
-            np.save(depth_folder_path + str(key) + '.npy', depth)
-            cv2.imwrite(depth_vis_folder_path + str(key) + '.png', depth_vis)
+            cv2.imwrite(image_folder_path + str(i) + '.png', rgb)
+            np.save(depth_folder_path + str(i) + '.npy', depth)
+            cv2.imwrite(depth_vis_folder_path + str(i) + '.png', depth_vis)
         return True
 
     @staticmethod
@@ -224,7 +201,7 @@ class MeshRenderer(object):
         dtype = torch.float32,
         device: str = 'cuda:0',
     ) -> bool:
-        render_data_dict = MeshRenderer.sampleRenderData(
+        camera_list = MeshRenderer.sampleRenderData(
             mesh=mesh,
             camera_num=camera_num,
             camera_dist=camera_dist,
@@ -243,12 +220,9 @@ class MeshRenderer(object):
 
         print('[INFO][ImageMeshMapper::createDA3DataFile]')
         print('\t start create da3 data file...')
-        for single_render_data_dict in render_data_dict.values():
-            camera_data_dict = single_render_data_dict['camera']
-            rgb = single_render_data_dict['rgb'][..., ::-1]
-
-            camera = Camera.fromDict(camera_data_dict)
-            rgb = toNumpy(rgb[..., ::-1] * 255.0, np.uint8)
+        for i in range(len(camera_list)):
+            camera = camera_list[i]
+            rgb = camera.image_cv
 
             extrinsic = toNumpy(camera.world2cameraCV, np.float32)
             intrinsic = toNumpy(camera.intrinsic, np.float32)

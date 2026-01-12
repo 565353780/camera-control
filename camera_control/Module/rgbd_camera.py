@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from typing import Optional, Union, Tuple
 
-from camera_control.Method.data import toTensor
+from camera_control.Method.data import toNumpy, toTensor
 from camera_control.Module.camera import Camera
 
 
@@ -38,6 +38,42 @@ class RGBDCamera(Camera):
         )
         return
 
+    @property
+    def depth_vis(self) -> torch.Tensor:
+        """
+        将self.depth转换为可视化的RGB格式tensor图像
+
+        Returns:
+            depth_vis: [H, W, 3] RGB格式的深度可视化图像，值在0-1范围内
+        """
+        # 获取有效深度值
+        mask = self.valid_depth_mask
+        valid_depth = self.depth[mask]
+
+        # 归一化深度值
+        if valid_depth.numel() > 0:
+            depth_min = valid_depth.min()
+            depth_max = valid_depth.max()
+            depth_normalized = (self.depth - depth_min) / (depth_max - depth_min + 1e-8)
+        else:
+            depth_normalized = torch.zeros_like(self.depth)
+
+        # 将无效像素的归一化深度设置为0
+        depth_normalized = torch.where(mask, depth_normalized, torch.zeros_like(depth_normalized))
+
+        # 转换为RGB格式（灰度图，三个通道相同）
+        depth_vis = torch.stack([depth_normalized] * 3, dim=-1)  # [H, W, 3]
+
+        return depth_vis
+
+    @property
+    def image_cv(self) -> np.ndarray:
+        return toNumpy(self.image * 255.0, np.uint8)[..., ::-1]
+
+    @property
+    def depth_vis_cv(self) -> np.ndarray:
+        return toNumpy(self.depth_vis * 255.0, np.uint8)[..., ::-1]
+
     def loadImage(
         self,
         image: Union[torch.Tensor, np.ndarray, list],
@@ -54,7 +90,7 @@ class RGBDCamera(Camera):
         depth = toTensor(depth, self.dtype, self.device).reshape(self.height, self.width)
 
         if conf is None:
-            conf = torch.zeros_like(depth)
+            conf = torch.ones_like(depth)
         else:
             conf = toTensor(conf, self.dtype, self.device).reshape(self.height, self.width)
 
@@ -133,3 +169,4 @@ class RGBDCamera(Camera):
         valid_mask = valid_mask.reshape(orig_shape)
 
         return points, valid_mask
+
