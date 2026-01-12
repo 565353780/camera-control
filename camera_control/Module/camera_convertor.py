@@ -2,8 +2,8 @@ import os
 import cv2
 import numpy as np
 import open3d as o3d
-from shutil import rmtree
 from typing import List
+from shutil import rmtree
 
 from camera_control.Module.rgbd_camera import RGBDCamera
 
@@ -90,7 +90,7 @@ class CameraConvertor(object):
         print('\t start create colmap data folder...')
         for i in range(camera_num):
             camera = cameras[i]
-            rgb = cameras[i].image.cpu().numpy()
+            rgb = camera.image_cv
 
             colmap_pose = camera.toColmapPose().cpu().numpy()
 
