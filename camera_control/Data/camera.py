@@ -108,6 +108,18 @@ class CameraData(object):
         camera.setVGGTPose(extrinsic, intrinsic)
         return camera
 
+    @classmethod
+    def fromDA3Pose(
+        cls,
+        extrinsic: Union[torch.Tensor, np.ndarray, list],
+        intrinsic: Union[torch.Tensor, np.ndarray, list],
+        dtype=torch.float32,
+        device: str='cpu',
+    ) -> "CameraData":
+        camera = cls(dtype=dtype, device=device)
+        camera.setDA3Pose(extrinsic, intrinsic)
+        return camera
+
     def clone(self):
         return deepcopy(self)
 
@@ -164,21 +176,20 @@ class CameraData(object):
         C = torch.diag(torch.tensor([1, -1, -1, 1], dtype=self.dtype, device=self.device))
         return C @ self.camera2world @ C
 
+    def match(self, dtype=None, device: Optional[str]=None) -> bool:
+        if dtype != self.dtype:
+            return False
+        if device != self.device:
+            return False
+
+        return True
+
     def to(self, dtype=None, device: Optional[str]=None) -> bool:
-        need_update = False
-
-        if dtype is not None:
-            if dtype != self.dtype:
-                self.dtype = dtype
-                need_update = True
-
-        if device is not None:
-            if device != self.device:
-                self.device = device
-                need_update = True
-
-        if not need_update:
+        if not self.match(dtype, device):
             return True
+
+        self.dtype = dtype
+        self.device = device
 
         self.world2camera = self.world2camera.to(dtype=self.dtype, device=self.device)
         return True
@@ -416,6 +427,24 @@ class CameraData(object):
         self.world2camera = C @ extrinsic
         return True
 
+    def setDA3Pose(
+        self,
+        extrinsic: Union[torch.Tensor, np.ndarray, list],
+        intrinsic: Union[torch.Tensor, np.ndarray, list],
+    ) -> bool:
+        extrinsic = toTensor(extrinsic, self.dtype, self.device).reshape(4, 4)
+        intrinsic = toNumpy(intrinsic, np.float64).reshape(3, 3)
+
+        self.cx = float(intrinsic[0][2])
+        self.cy = float(intrinsic[1][2])
+        self.width = int(2.0 * self.cx)
+        self.height = int(2.0 * self.cy)
+        self.fx = float(intrinsic[0][0])
+        self.fy = float(intrinsic[1][1])
+
+        self.setWorld2CameraCV(extrinsic)
+        return True
+ 
     def loadOmniVGGTCameraFile(
         self,
         vggt_camera_txt_file_path: str,

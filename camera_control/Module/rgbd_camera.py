@@ -36,7 +36,34 @@ class RGBDCamera(Camera):
             dtype,
             device,
         )
+
+        self.image: torch.Tensor = None
+        self.depth: torch.Tensor = None
+        self.conf: torch.Tensor = None
+        self.valid_depth_mask: torch.Tensor = None
+        self.ccm: torch.Tensor = None
         return
+
+    def to(self, dtype=None, device: Optional[str]=None) -> bool:
+        if not self.match(dtype, device):
+            return True
+
+        self.dtype = dtype
+        self.device = device
+
+        self.world2camera = self.world2camera.to(dtype=self.dtype, device=self.device)
+
+        if self.image is not None:
+            self.image = self.image.to(dtype=self.dtype, device=self.device)
+        if self.depth is not None:
+            self.depth = self.depth.to(dtype=self.dtype, device=self.device)
+        if self.conf is not None:
+            self.conf = self.conf.to(dtype=self.dtype, device=self.device)
+        if self.valid_depth_mask is not None:
+            self.valid_depth_mask = self.valid_depth_mask.to(dtype=self.dtype, device=self.device)
+        if self.ccm is not None:
+            self.ccm = self.ccm.to(dtype=self.dtype, device=self.device)
+        return True
 
     @property
     def image_cv(self) -> np.ndarray:
@@ -180,4 +207,3 @@ class RGBDCamera(Camera):
         valid_mask = valid_mask.reshape(orig_shape)
 
         return points, valid_mask
-
