@@ -48,8 +48,10 @@ class RGBDCamera(Camera):
         if self.match(dtype, device):
             return True
 
-        self.dtype = dtype
-        self.device = device
+        if dtype is not None:
+            self.dtype = dtype
+        if device is not None:
+            self.device = device
 
         self.world2camera = self.world2camera.to(dtype=self.dtype, device=self.device)
 
