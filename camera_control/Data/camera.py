@@ -185,7 +185,7 @@ class CameraData(object):
         return True
 
     def to(self, dtype=None, device: Optional[str]=None) -> bool:
-        if not self.match(dtype, device):
+        if self.match(dtype, device):
             return True
 
         self.dtype = dtype
