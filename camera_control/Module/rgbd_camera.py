@@ -146,11 +146,11 @@ class RGBDCamera(Camera):
     def queryPixelPoints(
         self,
         query_pixel: Union[torch.Tensor, np.ndarray, list],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         给定像素坐标，查询 self.ccm 得到空间点坐标和有效mask。
         query_pixel: [..., 2] (最后一维是[u, v])
-        返回: (points: [..., 3], valid_mask: [...])
+        返回: (points: [..., 3], confs: [...], valid_mask: [...])
         """
         # 转换为张量，保持原 shape
         query_pixel_tensor = toTensor(query_pixel, torch.int64, self.device)
@@ -163,22 +163,24 @@ class RGBDCamera(Camera):
 
         # 取对应点
         points = self.ccm[v, u]  # (N, 3)
+        confs = self.conf[v, u]
         valid_mask = self.valid_depth_mask[v, u]  # (N,)
 
         # 恢复原 shape
         points = points.reshape(*orig_shape, 3)
+        confs = confs.reshape(orig_shape)
         valid_mask = valid_mask.reshape(orig_shape)
 
-        return points, valid_mask
+        return points, confs, valid_mask
 
     def queryUVPoints(
         self,
         query_uv: Union[torch.Tensor, np.ndarray, list],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         给定归一化UV坐标，找到最近的像素，使用该像素的depth和准确的query_uv值反投影得到3D点。
         query_uv: [..., 2] (最后一维是归一化的[u, v]，范围[0, 1])
-        返回: (points: [..., 3], valid_mask: [...])
+        返回: (points: [..., 3], confs: [...], valid_mask: [...])
         """
         # 转换为张量，保持原 shape
         query_uv_tensor = toTensor(query_uv, self.dtype, self.device)
@@ -195,6 +197,7 @@ class RGBDCamera(Camera):
 
         # 从depth map获取最近像素的depth值
         depth_values = self.depth[v_nearest, u_nearest]  # (N,)
+        confs = self.conf[v_nearest, u_nearest]  # (N,)
         valid_mask = self.valid_depth_mask[v_nearest, u_nearest]  # (N,)
 
         # 使用准确的query_uv值和获取的depth值反投影得到3D点
@@ -204,6 +207,7 @@ class RGBDCamera(Camera):
 
         # 恢复原 shape
         points = points.reshape(*orig_shape, 3)
+        confs = confs.reshape(orig_shape)
         valid_mask = valid_mask.reshape(orig_shape)
 
-        return points, valid_mask
+        return points, confs, valid_mask
