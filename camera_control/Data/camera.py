@@ -151,8 +151,8 @@ class CameraData(object):
         C = torch.diag(torch.tensor([1, -1, -1, 1], dtype=self.dtype, device=self.device))
         return C @ self.world2camera @ C
 
-    @property
-    def camera2world(self) -> torch.Tensor:
+    @staticmethod
+    def toInvMat(mat: torch.Tensor) -> torch.Tensor:
         """
         计算相机坐标系到世界坐标系的变换矩阵
 
@@ -163,18 +163,40 @@ class CameraData(object):
         camera2world = [R^T | -R^T @ t]
                        [0   | 1       ]
         """
-        R_T = self.R.T
+        R = mat[:3, :3]
+        t = mat[:3, 3]
 
-        camera2world = torch.eye(4, dtype=self.dtype, device=self.device)
-        camera2world[:3, :3] = R_T  # R的转置
-        camera2world[:3, 3] = -R_T @ self.t  # -R^T @ t
+        R_T = R.T
 
-        return camera2world
+        inv_mat = torch.eye(4, dtype=mat.dtype, device=mat.device)
+        inv_mat[:3, :3] = R_T  # R的转置
+        inv_mat[:3, 3] = -R_T @ t  # -R^T @ t
+
+        return inv_mat
+
+    @property
+    def camera2world(self) -> torch.Tensor:
+        return CameraData.toInvMat(self.world2camera)
 
     @property
     def camera2worldCV(self) -> torch.Tensor:
+        return CameraData.toInvMat(self.world2cameraCV)
+
+    @property
+    def world2cameraColmap(self) -> torch.Tensor:
+        # 坐标系转换矩阵：只转换相机坐标系（Y和Z轴翻转），保持世界坐标系不变
+        # 原始坐标系: X右，Y上，Z后
+        # COLMAP坐标系: X右，Y下，Z前
         C = torch.diag(torch.tensor([1, -1, -1, 1], dtype=self.dtype, device=self.device))
-        return C @ self.camera2world @ C
+
+        # 只转换相机坐标系，不转换世界坐标系
+        # world2camera_colmap = C @ world2camera
+        # 这样点云（世界坐标系）保持不变，只有相机坐标系从原始坐标系转换到COLMAP坐标系
+        return C @ self.world2camera
+
+    @property
+    def camera2worldColmap(self) -> torch.Tensor:
+        return CameraData.toInvMat(self.world2cameraColmap)
 
     def match(self, dtype=None, device: Optional[str]=None) -> bool:
         if dtype != self.dtype:
@@ -299,7 +321,7 @@ class CameraData(object):
         转换关系：
         camera2world = [R^T | -R^T @ t]
                       [0   | 1       ]
-        
+
         world2camera = [R | t]
                       [0 | 1]
 
