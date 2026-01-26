@@ -5,7 +5,7 @@ import open3d as o3d
 from typing import List
 from shutil import rmtree
 
-from camera_control.Module.rgbd_camera import RGBDCamera
+from camera_control.Module.camera import Camera
 
 
 class CameraConvertor(object):
@@ -14,7 +14,7 @@ class CameraConvertor(object):
 
     @staticmethod
     def createColmapDataFolder(
-        cameras: List[RGBDCamera],
+        cameras: List[Camera],
         pcd: o3d.geometry.PointCloud,
         save_data_folder_path: str,
     ) -> bool:

@@ -3,60 +3,17 @@ import numpy as np
 from typing import Optional, Union, Tuple
 
 from camera_control.Method.data import toNumpy, toTensor
-from camera_control.Module.camera import Camera
 
 
-class RGBDCamera(Camera):
-    def __init__(
-        self,
-        width: int = 640,
-        height: int = 480,
-        fx: float = 500,
-        fy: float = 500,
-        cx: Optional[float] = None,
-        cy: Optional[float] = None,
-        pos: Union[torch.Tensor, np.ndarray, list] = [0, 0, 0],
-        look_at: Union[torch.Tensor, np.ndarray, list] = [1, 0, 0],
-        up: Union[torch.Tensor, np.ndarray, list] = [0, 0, 1],
-        world2camera: Union[torch.Tensor, np.ndarray, list, None] = None,
-        dtype=torch.float32,
-        device: str = 'cpu',
-    ) -> None:
-        super().__init__(
-            width,
-            height,
-            fx,
-            fy,
-            cx,
-            cy,
-            pos,
-            look_at,
-            up,
-            world2camera,
-            dtype,
-            device,
-        )
-
-        self.image: torch.Tensor = None
+class DepthChannel(object):
+    def __init__(self) -> None:
         self.depth: torch.Tensor = None
         self.conf: torch.Tensor = None
         self.valid_depth_mask: torch.Tensor = None
         self.ccm: torch.Tensor = None
         return
 
-    def to(self, dtype=None, device: Optional[str]=None) -> bool:
-        if self.match(dtype, device):
-            return True
-
-        if dtype is not None:
-            self.dtype = dtype
-        if device is not None:
-            self.device = device
-
-        self.world2camera = self.world2camera.to(dtype=self.dtype, device=self.device)
-
-        if self.image is not None:
-            self.image = self.image.to(dtype=self.dtype, device=self.device)
+    def update(self) -> bool:
         if self.depth is not None:
             self.depth = self.depth.to(dtype=self.dtype, device=self.device)
         if self.conf is not None:
@@ -66,10 +23,6 @@ class RGBDCamera(Camera):
         if self.ccm is not None:
             self.ccm = self.ccm.to(dtype=self.dtype, device=self.device)
         return True
-
-    @property
-    def image_cv(self) -> np.ndarray:
-        return toNumpy(self.image * 255.0, np.uint8)[..., ::-1]
 
     def toDepthVis(
         self,
@@ -113,13 +66,6 @@ class RGBDCamera(Camera):
         depth_max: Optional[float]=None,
     ) -> np.ndarray:
         return toNumpy(self.toDepthVis(depth_min, depth_max) * 255.0, np.uint8)[..., ::-1]
-
-    def loadImage(
-        self,
-        image: Union[torch.Tensor, np.ndarray, list],
-    ) -> bool:
-        self.image = toTensor(image, self.dtype, self.device).reshape(self.height, self.width, 3)
-        return True
 
     def loadDepth(
         self,

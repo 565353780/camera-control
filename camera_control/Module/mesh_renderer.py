@@ -11,7 +11,7 @@ from camera_control.Method.pcd import toPcd
 from camera_control.Method.data import toNumpy
 from camera_control.Method.sample import sampleCamera
 from camera_control.Method.path import createFileFolder
-from camera_control.Module.rgbd_camera import RGBDCamera
+from camera_control.Module.camera import Camera
 from camera_control.Module.nvdiffrast_renderer import NVDiffRastRenderer
 from camera_control.Module.camera_convertor import CameraConvertor
 
@@ -33,7 +33,7 @@ class MeshRenderer(object):
         dtype = torch.float32,
         device: str = 'cuda:0',
         vertices_tensor: Optional[torch.Tensor] = None,
-    ) -> List[RGBDCamera]:
+    ) -> List[Camera]:
         camera_list = sampleCamera(
             mesh=mesh,
             camera_num=camera_num,
@@ -58,6 +58,13 @@ class MeshRenderer(object):
                 vertices_tensor=vertices_tensor,
             )
 
+            render_normal_dict = NVDiffRastRenderer.renderNormal(
+                mesh=mesh,
+                camera=camera,
+                bg_color=bg_color,
+                vertices_tensor=vertices_tensor,
+            )
+
             render_depth_dict = NVDiffRastRenderer.renderDepth(
                 mesh=mesh,
                 camera=camera,
@@ -66,6 +73,8 @@ class MeshRenderer(object):
             )
 
             camera.loadImage(render_image_dict['image'])
+
+            camera.loadNormal(render_normal_dict['normal_camera'])
 
             camera.loadDepth(render_depth_dict['depth'])
 

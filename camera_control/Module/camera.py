@@ -3,10 +3,18 @@ import numpy as np
 from typing import Union, Optional
 
 from camera_control.Data.camera import CameraData
+from camera_control.Data.rgb_channel import RGBChannel
+from camera_control.Data.normal_channel import NormalChannel
+from camera_control.Data.depth_channel import DepthChannel
 from camera_control.Method.data import toNumpy, toTensor
 from camera_control.Module.camera_refiner import solve_and_refine
 
-class Camera(CameraData):
+class Camera(
+    CameraData,
+    RGBChannel,
+    NormalChannel,
+    DepthChannel,
+):
     def __init__(
         self,
         width: int = 640,
@@ -108,6 +116,21 @@ class Camera(CameraData):
 
         return camera
 
+    def to(self, dtype=None, device: Optional[str]=None) -> bool:
+        if self.match(dtype, device):
+            return True
+
+        if dtype is not None:
+            self.dtype = dtype
+        if device is not None:
+            self.device = device
+
+        self.world2camera = self.world2camera.to(dtype=self.dtype, device=self.device)
+
+        RGBChannel.update(self)
+        NormalChannel.update(self)
+        DepthChannel.update(self)
+        return True
 
     def project_points_to_uv(
         self,
