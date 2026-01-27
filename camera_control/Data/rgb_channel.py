@@ -1,3 +1,5 @@
+import os
+import cv2
 import torch
 import numpy as np
 from typing import Union
@@ -25,3 +27,19 @@ class RGBChannel(object):
     ) -> bool:
         self.image = toTensor(image, self.dtype, self.device).reshape(self.height, self.width, 3)
         return True
+
+    def loadImageFile(
+        self,
+        image_file_path: str,
+    ) -> bool:
+        if not os.path.exists(image_file_path):
+            print('[ERROR][RGBChannel::loadImageFile]')
+            print('\t image file not exist!')
+            print('\t image_file_path:', image_file_path)
+            return False
+
+        image = cv2.imread(image_file_path)[..., ::-1].astype(np.float32) / 255.0
+
+        self.height, self.width = image.shape[:2]
+
+        return self.loadImage(image)
