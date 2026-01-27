@@ -2,7 +2,7 @@ import os
 import cv2
 import numpy as np
 import open3d as o3d
-from typing import List, Optional
+from typing import Union, List, Optional
 from shutil import rmtree
 
 from camera_control.Module.camera import Camera
@@ -15,7 +15,7 @@ class CameraConvertor(object):
     @staticmethod
     def createColmapDataFolder(
         cameras: List[Camera],
-        pcd: o3d.geometry.PointCloud,
+        pcd: Union[o3d.geometry.PointCloud, str],
         save_data_folder_path: str,
         point_num_max: Optional[int]=None,
     ) -> bool:
@@ -40,6 +40,20 @@ class CameraConvertor(object):
         - 世界坐标系保持不变（与mesh坐标系一致）
         - 只转换相机坐标系，不转换世界坐标系
         """
+        if isinstance(pcd, str):
+            if not os.path.exists(pcd):
+                print('[ERROR][CameraConvertor::createColmapDataFolder]')
+                print('\t pcd file not exist!')
+                print('\t pcd:', pcd)
+                return False
+
+            pcd = o3d.io.read_point_cloud(pcd)
+
+        if not isinstance(pcd, o3d.geometry.PointCloud):
+            print('[ERROR][CameraConvertor::createColmapDataFolder]')
+            print('\t pcd is not o3d.geometry.PointCloud!')
+            return False
+
         if point_num_max is not None:
             point_num = len(pcd.points)
             if point_num > point_num_max:
