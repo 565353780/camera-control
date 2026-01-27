@@ -2,7 +2,7 @@ import os
 import cv2
 import numpy as np
 import open3d as o3d
-from typing import List
+from typing import List, Optional
 from shutil import rmtree
 
 from camera_control.Module.camera import Camera
@@ -17,6 +17,7 @@ class CameraConvertor(object):
         cameras: List[Camera],
         pcd: o3d.geometry.PointCloud,
         save_data_folder_path: str,
+        point_num_max: Optional[int]=None,
     ) -> bool:
         """
         创建用于训练3DGS的COLMAP格式数据文件夹
@@ -39,6 +40,12 @@ class CameraConvertor(object):
         - 世界坐标系保持不变（与mesh坐标系一致）
         - 只转换相机坐标系，不转换世界坐标系
         """
+        if point_num_max is not None:
+            point_num = len(pcd.points)
+            if point_num > point_num_max:
+                sample_ratio = point_num_max / point_num
+                pcd = pcd.random_down_sample(sample_ratio)
+
         # 检查pcd，如果没有颜色则全部赋值为[128,128,128]
         if not pcd.has_colors():
             colors = np.tile(np.array([[128, 128, 128]], dtype=np.float64) / 255.0, (np.asarray(pcd.points).shape[0], 1))
