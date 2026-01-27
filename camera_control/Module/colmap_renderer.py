@@ -1,3 +1,4 @@
+import os
 import time
 import tyro
 import random
@@ -106,8 +107,8 @@ class COLMAPRenderer(object):
                 cam = cameras[img.camera_id]
 
                 # Skip images that don't exist.
-                image_filename = images_path / img.name
-                if not image_filename.exists():
+                image_filename = images_path + img.name
+                if not os.path.exists(image_filename):
                     continue
 
                 T_world_camera = vtf.SE3.from_rotation_and_translation(
