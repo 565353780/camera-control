@@ -37,7 +37,7 @@ class COLMAPRenderer(object):
         pcd = o3d.io.read_point_cloud(colmap_path + "points3D.ply")
 
         points = np.asarray(pcd.points)
-        colors = np.asrray(pcd.colors)
+        colors = np.asarray(pcd.colors)
 
         gui_reset_up = server.gui.add_button(
             "Reset up direction",
