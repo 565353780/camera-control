@@ -1,16 +1,76 @@
 import os
 import cv2
+import torch
 import numpy as np
 import open3d as o3d
 from typing import Union, List, Optional
 from shutil import rmtree
 
+from camera_control.Method.pcd import toPcd
 from camera_control.Module.camera import Camera
 
 
 class CameraConvertor(object):
     def __init__(self) -> None:
         return
+
+    @staticmethod
+    def createDepthPcd(
+        camera_list: List[Camera],
+        conf_thresh: float=0.8,
+    ) -> o3d.geometry.PointCloud:
+        uv = camera_list[0].toImageUV()
+
+        points_list = []
+        colors_list = []
+        for i in range(len(camera_list)):
+            camera = camera_list[i]
+
+            image = camera.image  # (H, W, 3), float32 or similar, tensor
+            depth = camera.depth  # (H, W), tensor
+            conf = camera.conf    # (H, W), tensor
+
+            conf_1d = conf.reshape(-1)
+            conf_thresh_tensor = torch.quantile(conf_1d, conf_thresh)
+            conf_mask = conf >= conf_thresh_tensor  # (H, W), bool tensor
+
+            # Find valid indices (flattened and 2d)
+            H, W = image.shape[:2]
+            conf_mask_flat = conf_mask.flatten()
+            valid_indices = torch.nonzero(conf_mask_flat, as_tuple=False).squeeze(1)
+
+            # Prepare UV coordinates
+            # uv shape: (H, W, 2), so flatten to (H*W, 2), gather with valid_indices
+            uv_flat = uv.reshape(-1, 2)
+            valid_uv = uv_flat[valid_indices]  # (M, 2)
+
+            # Depth flatten and gather
+            depth_flat = depth.reshape(-1)
+            valid_depth = depth_flat[valid_indices]  # (M,)
+
+            points = camera.projectUV2Points(valid_uv, valid_depth)
+
+            # Get color for valid_uv
+            u = valid_uv[:, 0]  # (M,)
+            v = valid_uv[:, 1]  # (M,)
+
+            # Compute image indices for color lookup (tensor ops, not np)
+            col_idx = torch.clamp((u * (W - 1)).round().long(), 0, W - 1)  # (M,)
+            row_idx = torch.clamp(((1.0 - v) * (H - 1)).round().long(), 0, H - 1)  # (M,)
+
+            # Gather color with advanced indices, use torch.flip for RGB->BGR if needed
+            valid_colors = image[row_idx, col_idx]  # (M, 3), still tensor
+            valid_colors = valid_colors[..., [2, 1, 0]]  # flip channels for BGR if needed
+
+            points_list.append(points)
+            colors_list.append(valid_colors)
+
+        points = torch.cat(points_list, dim=0)
+        colors = torch.cat(colors_list, dim=0)
+
+        pcd = toPcd(points, colors)
+
+        return pcd
 
     @staticmethod
     def createColmapDataFolder(
