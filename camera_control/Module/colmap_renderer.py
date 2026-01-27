@@ -32,8 +32,8 @@ class COLMAPRenderer(object):
         server.gui.configure_theme(titlebar_content=None, control_layout="collapsible")
 
         # Load the colmap info.
-        cameras = read_cameras_text(colmap_path + "cameras.bin")
-        images = read_images_text(colmap_path + "images.bin")
+        cameras = read_cameras_text(colmap_path + "cameras.txt")
+        images = read_images_text(colmap_path + "images.txt")
         pcd = o3d.io.read_point_cloud(colmap_path + "points3D.ply")
 
         points = np.asarray(pcd.points)
