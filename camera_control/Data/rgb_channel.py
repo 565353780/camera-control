@@ -2,7 +2,7 @@ import os
 import cv2
 import torch
 import numpy as np
-from typing import Union
+from typing import List, Union
 
 from camera_control.Method.data import toNumpy, toTensor
 
@@ -68,3 +68,30 @@ class RGBChannel(object):
 
         uv = torch.stack([uu, vv_new], dim=-1)  # shape: (height, width, 2)
         return uv
+
+    def toMaskedImage(
+        self,
+        background_color: List[float] = [255, 255, 255],
+    ) -> torch.Tensor:
+        """
+        self.mask 不存在时等价于返回 self.image；存在时按 image 每个像素的 UV 在 mask 上
+        最近邻采样得到遮罩，True 处保留 self.image，False 处填 background_color。
+        background_color: [R, G, B]，默认 0–255，内部会除以 255；输出 tensor 为 [0, 1]。
+        返回: (H, W, 3) tensor
+        """
+        assert self.image is not None
+        if getattr(self, "mask", None) is None:
+            return self.image
+        uv = self.toImageUV()  # (H, W, 2)
+        mask_t = self.sampleMaskAtUV(uv).unsqueeze(-1)  # (H, W, 1)
+        bg = toTensor(background_color, self.dtype, self.device) / 255.0
+        bg = bg.view(1, 1, 3) if bg.numel() == 3 else bg
+        out = torch.where(mask_t, self.image, bg.to(self.image.dtype))
+        return out
+
+    def toMaskedImageCV(
+        self,
+        background_color: List[float] = [255, 255, 255],
+    ) -> np.ndarray:
+        """toMaskedImage 的 OpenCV BGR uint8 版本。无 mask 时等价于 self.image_cv。"""
+        return toNumpy(self.toMaskedImage(background_color) * 255.0, np.uint8)[..., ::-1]

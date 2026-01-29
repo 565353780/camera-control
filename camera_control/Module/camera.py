@@ -3,6 +3,7 @@ import numpy as np
 from typing import Union, Optional
 
 from camera_control.Data.camera import CameraData
+from camera_control.Data.mask_channel import MaskChannel
 from camera_control.Data.rgb_channel import RGBChannel
 from camera_control.Data.normal_channel import NormalChannel
 from camera_control.Data.depth_channel import DepthChannel
@@ -11,6 +12,7 @@ from camera_control.Module.camera_refiner import solve_and_refine
 
 class Camera(
     CameraData,
+    MaskChannel,
     RGBChannel,
     NormalChannel,
     DepthChannel,
