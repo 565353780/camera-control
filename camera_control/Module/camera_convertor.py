@@ -300,6 +300,7 @@ class CameraConvertor(object):
             if not camera.loadImageFile(image_path):
                 print('[WARN][CameraConvertor::loadColmapDataFolder] load image failed:', image_path)
                 return None
+            camera.image_id = rec['name']
             return camera
 
         print('[INFO][CameraConvertor::loadColmapDataFolder]')
