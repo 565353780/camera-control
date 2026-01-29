@@ -7,6 +7,7 @@ import open3d as o3d
 from tqdm import tqdm
 from shutil import rmtree
 from typing import Union, List, Optional
+from concurrent.futures import ThreadPoolExecutor
 
 from camera_control.Method.pcd import toPcd
 from camera_control.Module.camera import Camera
@@ -281,14 +282,12 @@ class CameraConvertor(object):
             if i < len(lines):
                 i += 1  # 跳过 POINTS2D 行
 
-        print('[INFO][CameraConvertor::loadColmapDataFolder]')
-        print('\t start load colmap data...')
-        camera_list = []
-        for rec in tqdm(image_records):
+        def _process_one_record(rec):
+            """处理单条图像记录，返回 Camera 或 None（失败时）。"""
             camera_id = rec['camera_id']
             if camera_id not in cameras_dict:
                 print('[WARN][CameraConvertor::loadColmapDataFolder] unknown camera_id:', camera_id, 'skip image', rec['name'])
-                continue
+                return None
             cam_info = cameras_dict[camera_id]
             intrinsic = np.array([
                 [cam_info['fx'], 0, cam_info['cx']],
@@ -297,10 +296,20 @@ class CameraConvertor(object):
             ], dtype=np.float64)
             pose = rec['pose']
             camera = Camera.fromColmapPose(pose, intrinsic)
-
             image_path = os.path.join(image_folder_path, rec['name'])
             if not camera.loadImageFile(image_path):
                 print('[WARN][CameraConvertor::loadColmapDataFolder] load image failed:', image_path)
-                continue
-            camera_list.append(camera)
+                return None
+            return camera
+
+        print('[INFO][CameraConvertor::loadColmapDataFolder]')
+        print('\t start load colmap data...')
+        max_workers = min(32, (os.cpu_count() or 4) * 2)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            results = list(tqdm(
+                executor.map(_process_one_record, image_records),
+                total=len(image_records),
+                desc='load colmap',
+            ))
+        camera_list = [c for c in results if isinstance(c, Camera)]
         return camera_list
