@@ -213,6 +213,7 @@ class CameraConvertor(object):
     @staticmethod
     def loadColmapDataFolder(
         colmap_data_folder_path: str,
+        image_folder_name: str='images',
     ) -> List[Camera]:
         """
         从 COLMAP 数据目录加载相机列表。
@@ -221,7 +222,7 @@ class CameraConvertor(object):
         """
         if not colmap_data_folder_path.endswith('/'):
             colmap_data_folder_path += '/'
-        image_folder_path = colmap_data_folder_path + 'images/'
+        image_folder_path = colmap_data_folder_path + image_folder_name + '/'
         camera_intrinsic_file_path = colmap_data_folder_path + 'sparse/0/cameras.txt'
         camera_extrinsic_file_path = colmap_data_folder_path + 'sparse/0/images.txt'
 
