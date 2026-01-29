@@ -47,6 +47,10 @@ class Camera(
             dtype,
             device,
         )
+        MaskChannel.__init__(self)
+        RGBChannel.__init__(self)
+        NormalChannel.__init__(self)
+        DepthChannel.__init__(self)
         return
 
     @classmethod
@@ -130,6 +134,7 @@ class Camera(
 
         self.world2camera = self.world2camera.to(dtype=self.dtype, device=self.device)
 
+        MaskChannel.update(self)
         RGBChannel.update(self)
         NormalChannel.update(self)
         DepthChannel.update(self)
