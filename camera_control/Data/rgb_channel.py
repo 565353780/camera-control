@@ -25,7 +25,11 @@ class RGBChannel(object):
         self,
         image: Union[torch.Tensor, np.ndarray, list],
     ) -> bool:
-        self.image = toTensor(image, self.dtype, self.device).reshape(self.height, self.width, 3)
+        image = toTensor(image, self.dtype, self.device)
+
+        self.height, self.width = image.shape[:2]
+
+        self.image = image.reshape(self.height, self.width, 3)
         return True
 
     def loadImageFile(
