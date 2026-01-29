@@ -3,8 +3,9 @@ import cv2
 import torch
 import numpy as np
 import open3d as o3d
-from typing import Union, List, Optional
+
 from shutil import rmtree
+from typing import Union, List, Optional
 
 from camera_control.Method.pcd import toPcd
 from camera_control.Module.camera import Camera
@@ -207,3 +208,95 @@ class CameraConvertor(object):
         print(f'\t total images: {camera_num}')
         print(f'\t total points: {len(pcd.points)}')
         return True
+
+    @staticmethod
+    def loadColmapDataFolder(
+        colmap_data_folder_path: str,
+    ) -> List[Camera]:
+        """
+        从 COLMAP 数据目录加载相机列表。
+        cameras.txt: CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[] (PINHOLE: fx, fy, cx, cy)
+        images.txt: 每张图两行，第一行 IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME
+        """
+        if not colmap_data_folder_path.endswith('/'):
+            colmap_data_folder_path += '/'
+        image_folder_path = colmap_data_folder_path + 'images/'
+        camera_intrinsic_file_path = colmap_data_folder_path + 'sparse/0/cameras.txt'
+        camera_extrinsic_file_path = colmap_data_folder_path + 'sparse/0/images.txt'
+
+        if not os.path.exists(image_folder_path):
+            print('[ERROR][CameraConvertor::loadColmapDataFolder] image folder not exist:', image_folder_path)
+            return []
+        if not os.path.exists(camera_intrinsic_file_path):
+            print('[ERROR][CameraConvertor::loadColmapDataFolder] cameras.txt not exist:', camera_intrinsic_file_path)
+            return []
+        if not os.path.exists(camera_extrinsic_file_path):
+            print('[ERROR][CameraConvertor::loadColmapDataFolder] images.txt not exist:', camera_extrinsic_file_path)
+            return []
+
+        # 解析 cameras.txt: CAMERA_ID MODEL WIDTH HEIGHT fx fy cx cy (PINHOLE)
+        cameras_dict = {}
+        with open(camera_intrinsic_file_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                parts = line.split()
+                if len(parts) < 8:
+                    continue
+                camera_id = int(parts[0])
+                model = parts[1]
+                width = int(parts[2])
+                height = int(parts[3])
+                if model == 'PINHOLE' and len(parts) >= 8:
+                    fx, fy, cx, cy = float(parts[4]), float(parts[5]), float(parts[6]), float(parts[7])
+                    cameras_dict[camera_id] = {'width': width, 'height': height, 'fx': fx, 'fy': fy, 'cx': cx, 'cy': cy}
+
+        # 解析 images.txt: 每张图两行，第一行 IMAGE_ID QW QX QY QZ TX TY TZ CAMERA_ID NAME
+        image_records = []
+        with open(camera_extrinsic_file_path, 'r') as f:
+            lines = f.readlines()
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            i += 1
+            if not line or line.startswith('#'):
+                continue
+            parts = line.split()
+            if len(parts) < 10:
+                continue
+            image_id = int(parts[0])
+            qw, qx, qy, qz = float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4])
+            tx, ty, tz = float(parts[5]), float(parts[6]), float(parts[7])
+            camera_id = int(parts[8])
+            name = parts[9]
+            image_records.append({
+                'image_id': image_id,
+                'pose': [qw, qx, qy, qz, tx, ty, tz],
+                'camera_id': camera_id,
+                'name': name,
+            })
+            if i < len(lines):
+                i += 1  # 跳过 POINTS2D 行
+
+        camera_list = []
+        for rec in image_records:
+            camera_id = rec['camera_id']
+            if camera_id not in cameras_dict:
+                print('[WARN][CameraConvertor::loadColmapDataFolder] unknown camera_id:', camera_id, 'skip image', rec['name'])
+                continue
+            cam_info = cameras_dict[camera_id]
+            intrinsic = np.array([
+                [cam_info['fx'], 0, cam_info['cx']],
+                [0, cam_info['fy'], cam_info['cy']],
+                [0, 0, 1],
+            ], dtype=np.float64)
+            pose = rec['pose']
+            camera = Camera.fromColmapPose(pose, intrinsic)
+
+            image_path = os.path.join(image_folder_path, rec['name'])
+            if not camera.loadImageFile(image_path):
+                print('[WARN][CameraConvertor::loadColmapDataFolder] load image failed:', image_path)
+                continue
+            camera_list.append(camera)
+        return camera_list

@@ -36,3 +36,23 @@ def rotmat2qvec(R: torch.Tensor) -> torch.Tensor:
     if qvec[0] < 0:
         qvec = -qvec
     return qvec
+
+
+def qvec2rotmat(qvec: torch.Tensor) -> torch.Tensor:
+    """
+    将四元数 (w, x, y, z) 转换为 3x3 旋转矩阵
+    与 COLMAP 的 rotmat2qvec 互为逆变换
+
+    Args:
+        qvec: 四元数 [w, x, y, z] (torch.Tensor)
+
+    Returns:
+        3x3 旋转矩阵 (torch.Tensor)
+    """
+    qw, qx, qy, qz = qvec[0], qvec[1], qvec[2], qvec[3]
+    R = torch.stack([
+        torch.stack([1 - 2*qy*qy - 2*qz*qz, 2*qx*qy - 2*qw*qz, 2*qx*qz + 2*qw*qy], dim=0),
+        torch.stack([2*qx*qy + 2*qw*qz, 1 - 2*qx*qx - 2*qz*qz, 2*qy*qz - 2*qw*qx], dim=0),
+        torch.stack([2*qx*qz - 2*qw*qy, 2*qy*qz + 2*qw*qx, 1 - 2*qx*qx - 2*qy*qy], dim=0),
+    ], dim=0)
+    return R

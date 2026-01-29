@@ -1,5 +1,5 @@
 import os
-from camera_control.Method.rotate import rotmat2qvec
+from camera_control.Method.rotate import rotmat2qvec, qvec2rotmat
 import torch
 import numpy as np
 import open3d as o3d
@@ -118,6 +118,23 @@ class CameraData(object):
     ) -> "CameraData":
         camera = cls(dtype=dtype, device=device)
         camera.setDA3Pose(extrinsic, intrinsic)
+        return camera
+
+    @classmethod
+    def fromColmapPose(
+        cls,
+        pose: Union[torch.Tensor, np.ndarray, list],
+        intrinsic: Union[torch.Tensor, np.ndarray, list],
+        dtype=torch.float32,
+        device: str='cpu',
+    ) -> "CameraData":
+        """
+        从 COLMAP 位姿创建相机。
+        pose: (qw, qx, qy, qz, tx, ty, tz) 共 7 个数
+        intrinsic: 3x3 内参矩阵 [fx, 0, cx; 0, fy, cy; 0, 0, 1]
+        """
+        camera = cls(dtype=dtype, device=device)
+        camera.setColmapPose(pose, intrinsic)
         return camera
 
     def clone(self):
@@ -468,7 +485,41 @@ class CameraData(object):
 
         self.setWorld2CameraCV(extrinsic)
         return True
- 
+
+    def setColmapPose(
+        self,
+        pose: Union[torch.Tensor, np.ndarray, list],
+        intrinsic: Union[torch.Tensor, np.ndarray, list],
+    ) -> bool:
+        """
+        设置 COLMAP 格式的位姿。
+        pose: (qw, qx, qy, qz, tx, ty, tz) 共 7 个数，对应 toColmapPose 的返回值
+        intrinsic: 3x3 内参矩阵
+        """
+        pose = toTensor(pose, self.dtype, self.device).reshape(7)
+        intrinsic = toNumpy(intrinsic, np.float64).reshape(3, 3)
+
+        self.cx = float(intrinsic[0][2])
+        self.cy = float(intrinsic[1][2])
+        self.width = int(2.0 * self.cx)
+        self.height = int(2.0 * self.cy)
+        self.fx = float(intrinsic[0][0])
+        self.fy = float(intrinsic[1][1])
+
+        quat = pose[:4]   # qw, qx, qy, qz
+        t = pose[4:7]     # tx, ty, tz
+
+        # 四元数 -> 旋转矩阵，得到 COLMAP 坐标系下的 world2camera
+        R = qvec2rotmat(quat)
+        world2camera_colmap = torch.eye(4, dtype=self.dtype, device=self.device)
+        world2camera_colmap[:3, :3] = R
+        world2camera_colmap[:3, 3] = t
+
+        # 坐标系转换：COLMAP (X右Y下Z前) -> 内部 (X右Y上Z后)，C = diag(1,-1,-1,1)，C^{-1} = C
+        C = torch.diag(torch.tensor([1, -1, -1, 1], dtype=self.dtype, device=self.device))
+        self.world2camera = C @ world2camera_colmap
+        return True
+
     def loadOmniVGGTCameraFile(
         self,
         vggt_camera_txt_file_path: str,
