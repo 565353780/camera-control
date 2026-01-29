@@ -31,6 +31,14 @@ class DepthChannel(object):
             self.ccm = self.ccm.to(dtype=self.dtype, device=self.device)
         return True
 
+    @property
+    def depth_cv(self) -> np.ndarray:
+        return self.toDepthVisCV()
+
+    @property
+    def masked_depth_cv(self) -> np.ndarray:
+        return self.toMaskedDepthVisCV()
+
     def toDepthUV(self) -> torch.Tensor:
         """
         生成 self.depth 每个像素的归一化 UV 坐标 [0,1]，与 camera 的 UV 约定一致。
