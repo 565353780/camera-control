@@ -24,6 +24,30 @@ class DepthChannel(object):
             self.ccm = self.ccm.to(dtype=self.dtype, device=self.device)
         return True
 
+    def loadDepth(
+        self,
+        depth: Union[torch.Tensor, np.ndarray, list],
+        conf: Union[torch.Tensor, np.ndarray, list, None]=None,
+    ) -> bool:
+        uv = self.toImageUV()
+        depth = toTensor(depth, self.dtype, self.device).reshape(self.height, self.width)
+
+        if conf is None:
+            conf = torch.ones_like(depth)
+        else:
+            conf = toTensor(conf, self.dtype, self.device).reshape(self.height, self.width)
+
+        # 存储depth map
+        self.depth = depth
+        self.conf = conf
+
+        # 记录有效像素位置
+        self.valid_depth_mask = (depth > 1e-5) & (depth < 1e5)
+
+        # self.ccm 为 HxWx3 的空间点坐标
+        self.ccm = self.projectUV2Points(uv, depth)
+        return True
+
     def toDepthVis(
         self,
         depth_min: Optional[float]=None,
@@ -66,30 +90,6 @@ class DepthChannel(object):
         depth_max: Optional[float]=None,
     ) -> np.ndarray:
         return toNumpy(self.toDepthVis(depth_min, depth_max) * 255.0, np.uint8)[..., ::-1]
-
-    def loadDepth(
-        self,
-        depth: Union[torch.Tensor, np.ndarray, list],
-        conf: Union[torch.Tensor, np.ndarray, list, None]=None,
-    ) -> bool:
-        uv = self.toImageUV()
-        depth = toTensor(depth, self.dtype, self.device).reshape(self.height, self.width)
-
-        if conf is None:
-            conf = torch.ones_like(depth)
-        else:
-            conf = toTensor(conf, self.dtype, self.device).reshape(self.height, self.width)
-
-        # 存储depth map
-        self.depth = depth
-        self.conf = conf
-
-        # 记录有效像素位置
-        self.valid_depth_mask = (depth > 1e-5) & (depth < 1e5)
-
-        # self.ccm 为 HxWx3 的空间点坐标
-        self.ccm = self.projectUV2Points(uv, depth)
-        return True
 
     def queryPixelPoints(
         self,
@@ -159,3 +159,35 @@ class DepthChannel(object):
         valid_mask = valid_mask.reshape(orig_shape)
 
         return points, confs, valid_mask
+
+    def getConfPoints(
+        self,
+        conf_thresh: float = 0.8,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        根据 conf 从小到大排序的分位数 conf_thresh 筛选 ccm 点。
+        保留 conf >= 该分位数对应值的点。
+        conf_thresh=0.8 表示保留 conf 处于 80% 分位及以上的点（即高置信度部分）。
+
+        Returns:
+            points: [N, 3] 筛选后的空间点坐标
+            conf: [N] 筛选后对应的置信度
+        """
+        assert self.ccm is not None and self.conf is not None
+        mask = self.valid_depth_mask
+        conf_flat = self.conf[mask]  # (M,)
+        points_flat = self.ccm[mask]  # (M, 3)
+
+        if conf_flat.numel() == 0:
+            return (
+                torch.empty(0, 3, dtype=self.ccm.dtype, device=self.device),
+                torch.empty(0, dtype=self.conf.dtype, device=self.device),
+            )
+
+        # 分位数：conf 从小到大排序时，取 conf_thresh 分位对应的值作为阈值
+        thresh_value = torch.quantile(conf_flat.float(), conf_thresh, interpolation="lower")
+        keep = conf_flat >= thresh_value
+
+        points = points_flat[keep]  # (N, 3)
+        conf = conf_flat[keep]     # (N,)
+        return points, conf

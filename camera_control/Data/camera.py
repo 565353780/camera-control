@@ -1,5 +1,4 @@
 import os
-from camera_control.Method.rotate import rotmat2qvec, qvec2rotmat
 import torch
 import numpy as np
 import open3d as o3d
@@ -7,6 +6,7 @@ from copy import deepcopy
 from typing import Union, Optional
 
 from camera_control.Method.data import toNumpy, toTensor
+from camera_control.Method.rotate import rotmat2qvec, qvec2rotmat
 from camera_control.Method.path import removeFile, createFileFolder
 
 
