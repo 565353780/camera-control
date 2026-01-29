@@ -21,13 +21,22 @@ class RGBChannel(object):
     def image_cv(self) -> np.ndarray:
         return toNumpy(self.image * 255.0, np.uint8)[..., ::-1]
 
+    def setImageSize(
+        self,
+        width: int,
+        height: int,
+    ) -> bool:
+        self.width = int(width)
+        self.height = int(height)
+        return True
+
     def loadImage(
         self,
         image: Union[torch.Tensor, np.ndarray, list],
     ) -> bool:
         image = toTensor(image, self.dtype, self.device)
 
-        self.height, self.width = image.shape[:2]
+        self.setImageSize(image.shape[1], image.shape[0])
 
         self.image = image.reshape(self.height, self.width, 3)
         return True
@@ -43,8 +52,6 @@ class RGBChannel(object):
             return False
 
         image = cv2.imread(image_file_path)[..., ::-1].astype(np.float32) / 255.0
-
-        self.height, self.width = image.shape[:2]
 
         return self.loadImage(image)
 
