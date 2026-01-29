@@ -1,3 +1,5 @@
+import os
+import cv2
 import torch
 import numpy as np
 from typing import Union
@@ -31,6 +33,31 @@ class MaskChannel(object):
         mask: Union[torch.Tensor, np.ndarray, list],
     ) -> bool:
         self.mask = toTensor(mask, torch.bool, self.device)
+        return True
+
+    def loadMaskFile(
+        self,
+        mask_file_path: str,
+    ) -> bool:
+        if not os.path.exists(mask_file_path):
+            print('[ERROR][MaskChannel::loadMaskFile]')
+            print('\t mask file not exist!')
+            print('\t mask_file_path:', mask_file_path)
+            return False
+
+        img = cv2.imread(mask_file_path)
+        if img is None:
+            print('[ERROR][MaskChannel::loadMaskFile]')
+            print('\t cv2.imread failed!')
+            print('\t mask_file_path:', mask_file_path)
+            return False
+
+        if img.ndim == 2:
+            mask_np = (img > 0)
+        else:
+            # 3 通道 (BGR)：任一通道 > 0 视为前景
+            mask_np = (img.max(axis=-1) > 0)
+        self.mask = toTensor(mask_np, torch.bool, self.device)  # (H, W)
         return True
 
     def sampleMaskAtUV(self, uv_grid: Union[torch.Tensor, np.ndarray]) -> torch.Tensor:
