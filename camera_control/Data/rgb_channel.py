@@ -2,7 +2,7 @@ import os
 import cv2
 import torch
 import numpy as np
-from typing import List, Union
+from typing import List, Union, Optional
 
 from camera_control.Method.data import toNumpy, toTensor
 
@@ -10,6 +10,7 @@ from camera_control.Method.data import toNumpy, toTensor
 class RGBChannel(object):
     def __init__(self) -> None:
         self.image: torch.Tensor = None
+        self.image_id: Optional[str]=None
         return
 
     def update(self) -> bool:
