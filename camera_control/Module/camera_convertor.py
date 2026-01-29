@@ -4,6 +4,7 @@ import torch
 import numpy as np
 import open3d as o3d
 
+from tqdm import tqdm
 from shutil import rmtree
 from typing import Union, List, Optional
 
@@ -279,8 +280,10 @@ class CameraConvertor(object):
             if i < len(lines):
                 i += 1  # 跳过 POINTS2D 行
 
+        print('[INFO][CameraConvertor::loadColmapDataFolder]')
+        print('\t start load colmap data...')
         camera_list = []
-        for rec in image_records:
+        for rec in tqdm(image_records):
             camera_id = rec['camera_id']
             if camera_id not in cameras_dict:
                 print('[WARN][CameraConvertor::loadColmapDataFolder] unknown camera_id:', camera_id, 'skip image', rec['name'])
