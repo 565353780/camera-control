@@ -187,20 +187,6 @@ class Camera(
 
         return uv
 
-    def toImageUV(self) -> torch.Tensor:
-        """
-        生成每个像素的归一化UV坐标，原点在左下角，u向右，v向上。
-        返回: torch.Tensor, shape (height, width, 2), dtype为self.dtype, device为self.device
-        """
-        u = torch.arange(self.width, dtype=self.dtype, device=self.device) / (self.width - 1.0)
-        v = torch.arange(self.height, dtype=self.dtype, device=self.device) / (self.height - 1.0)
-
-        uu, vv = torch.meshgrid(u, v, indexing='xy')  # uu/vv shape: [height, width]
-        vv_new = 1.0 - vv  # [height, width], 左下角为0,0，v向上增大
-
-        uv = torch.stack([uu, vv_new], dim=-1)  # shape: (height, width, 2)
-        return uv
-
     def projectUV2Points(
         self,
         uv: Union[torch.Tensor, np.ndarray, list],
