@@ -114,7 +114,8 @@ class Camera(
         R = C @ R
         t = C @ t
 
-        camera.setWorld2CameraByRt(R, t)
+        camera.setR(R)
+        camera.setT(t)
 
         return camera
 
