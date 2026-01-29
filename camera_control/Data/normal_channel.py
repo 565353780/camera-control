@@ -2,6 +2,7 @@ import torch
 import numpy as np
 from typing import List, Union
 
+from camera_control.Method.io import loadImage
 from camera_control.Method.data import toNumpy, toTensor
 
 
@@ -25,6 +26,21 @@ class NormalChannel(object):
     ) -> bool:
         self.normal = toTensor(normal, self.dtype, self.device)
         return True
+
+    def loadNormalFile(
+        self,
+        normal_file_path: str,
+    ) -> bool:
+        normal = loadImage(normal_file_path)
+
+        if normal is None:
+            print('[ERROR][NormalChannel::loadNormalFile]')
+            print('\t loadImage failed!')
+            return False
+
+        normal = normal[..., ::-1].astype(np.float32) / 255.0
+
+        return self.loadNormal(normal)
 
     def toNormalUV(self) -> torch.Tensor:
         """

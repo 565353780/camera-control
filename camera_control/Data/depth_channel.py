@@ -1,6 +1,7 @@
+import os
 import torch
 import numpy as np
-from typing import List, Optional, Union, Tuple
+from typing import Optional, Union, Tuple
 
 from camera_control.Method.data import toNumpy, toTensor
 
@@ -83,6 +84,20 @@ class DepthChannel(object):
         uv = self.toDepthUV()  # (depth_height, depth_width, 2)
         self.ccm = self.projectUV2Points(uv, depth)
         return True
+
+    def loadDepthFile(
+        self,
+        depth_file_path: str,
+    ) -> bool:
+        if not os.path.exists(depth_file_path):
+            print('[ERROR][DepthChannel::loadDepthFile]')
+            print('\t depth file not exist!')
+            print('\t depth_file_path:', depth_file_path)
+            return False
+
+        depth = np.load(depth_file_path)
+
+        return self.loadDepth(depth)
 
     def queryPixelPoints(
         self,

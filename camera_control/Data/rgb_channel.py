@@ -4,6 +4,7 @@ import torch
 import numpy as np
 from typing import List, Union, Optional
 
+from camera_control.Method.io import loadImage
 from camera_control.Method.data import toNumpy, toTensor
 
 
@@ -46,13 +47,14 @@ class RGBChannel(object):
         self,
         image_file_path: str,
     ) -> bool:
-        if not os.path.exists(image_file_path):
+        image = loadImage(image_file_path)
+
+        if image is None:
             print('[ERROR][RGBChannel::loadImageFile]')
-            print('\t image file not exist!')
-            print('\t image_file_path:', image_file_path)
+            print('\t loadImage failed!')
             return False
 
-        image = cv2.imread(image_file_path)[..., ::-1].astype(np.float32) / 255.0
+        image = image[..., ::-1].astype(np.float32) / 255.0
 
         return self.loadImage(image)
 
