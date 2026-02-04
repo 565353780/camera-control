@@ -6,6 +6,28 @@ from typing import List
 from camera_control.Module.camera import Camera
 
 
+def sampleFibonacciPolars(num_polars: int) -> np.ndarray:
+    """
+    使用Fibonacci球面采样生成均匀分布的极角 (phi, theta)。
+
+    Args:
+        num_polars: 极角对的数量
+
+    Returns:
+        polars: shape (num_polars, 2) 的数组，每行为 (phi, theta)；
+               phi 为极角/天顶角 [0, pi]，theta 为方位角。
+    """
+    golden_angle = np.pi * (3.0 - np.sqrt(5.0))
+    i = np.arange(num_polars, dtype=np.float64)
+    if num_polars > 1:
+        y = 1.0 - (i / (num_polars - 1)) * 2.0
+    else:
+        y = np.array([0.0])
+    phi = np.arccos(np.clip(y, -1.0, 1.0))
+    theta = golden_angle * i
+    return np.stack([phi, theta], axis=1)
+
+
 def sampleFibonacciSpherePoints(
     num_points: int,
     radius: float,
@@ -22,26 +44,15 @@ def sampleFibonacciSpherePoints(
     Returns:
         points: shape (num_points, 3) 的点坐标数组
     """
-    points = []
-    phi = np.pi * (3.0 - np.sqrt(5.0))
-
-    for i in range(num_points):
-        # 纵向位置 [-1, 1]
-        y = 1 - (i / float(num_points - 1)) * 2
-        # 该高度处的半径
-        radius_at_y = np.sqrt(1 - y * y)
-        # 横向角度
-        theta = phi * i
-
-        # 计算球面坐标
-        x = np.cos(theta) * radius_at_y
-        z = np.sin(theta) * radius_at_y
-
-        # 缩放到指定半径并平移到中心
-        point = np.array([x, y, z]) * radius + center
-        points.append(point)
-
-    return np.array(points)
+    polars = sampleFibonacciPolars(num_points)  # (num_points, 2), (phi, theta)
+    phi = polars[:, 0]
+    theta = polars[:, 1]
+    sin_phi = np.sin(phi)
+    x = sin_phi * np.cos(theta)
+    y = np.cos(phi)
+    z = sin_phi * np.sin(theta)
+    points = np.stack([x, y, z], axis=1) * radius + center
+    return points
 
 def sampleCamera(
     mesh: trimesh.Trimesh,
