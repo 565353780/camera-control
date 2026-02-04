@@ -126,16 +126,16 @@ class CameraConvertor(object):
                 cam.world2camera[:3, :3] = cam.R @ Q_flip.T
 
         # ===============================
-        # Step 3: 世界坐标系轴置换 (XYZ -> ZXY)
+        # Step 3: 世界坐标系轴置换 (ZXY -> XYZ)
         # ===============================
         P = torch.tensor([
+            [0., 1., 0.],
             [0., 0., 1.],
             [1., 0., 0.],
-            [0., 1., 0.],
         ], dtype=dtype, device=device)
 
         for cam in normalized_camera_list:
-            cam.world2camera[:3, :3] = cam.world2camera[:3, :3] @ P
+            cam.world2camera[:3, :3] = cam.world2camera[:3, :3] @ P.T
         return normalized_camera_list
 
     @staticmethod
