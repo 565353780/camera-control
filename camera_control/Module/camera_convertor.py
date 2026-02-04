@@ -19,112 +19,123 @@ class CameraConvertor(object):
         return
 
     @staticmethod
-    def _rayAtCenter(camera: Camera):
-        """获取相机在 u=0.5, v=0.5 处的射线：原点（世界）和方向（单位向量，世界系）。"""
-        # 相机坐标系：X右 Y上 Z后，像心方向在相机系中为 ( (0.5*W-cx)/fx, (0.5*H-cy)/fy, -1 )
-        u_c, v_c = 0.5 * camera.width, 0.5 * camera.height
-        dx = (u_c - camera.cx) / camera.fx
-        dy = (v_c - camera.cy) / camera.fy
-        dz = -1.0
-        dir_cam = np.array([dx, dy, dz], dtype=np.float64)
-        dir_cam = dir_cam / (np.linalg.norm(dir_cam) + 1e-10)
-        # 世界系方向 = R^T @ dir_cam（world2camera 的 R 是 world->camera，故 camera 方向转世界为 R^T @ d）
-        R = camera.R.detach().cpu().numpy()
-        dir_world = R.T @ dir_cam
-        dir_world = dir_world / (np.linalg.norm(dir_world) + 1e-10)
-        origin = camera.pos.detach().cpu().numpy()
-        return origin, dir_world
-
-    @staticmethod
-    def _gazeCenterFromRays(origins: np.ndarray, directions: np.ndarray) -> np.ndarray:
-        """
-        求到所有射线距离之和最小的空间点 P。
-        dist(P, ray_i)^2 = |P - O_i|^2 - ((P-O_i)·D_i)^2，求导得线性方程 A P = b。
-        A = n*I - sum_i D_i D_i^T,  b = sum_i [ O_i - (O_i·D_i) D_i ]
-        """
-        n = origins.shape[0]
-        A = n * np.eye(3, dtype=np.float64)
-        b = np.zeros(3, dtype=np.float64)
-        for i in range(n):
-            O = origins[i]
-            D = directions[i]
-            A -= np.outer(D, D)
-            b += O - (np.dot(O, D)) * D
-        P, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
-        return P
-
-    @staticmethod
     def normalizeCameras(
         camera_list: List[Camera],
     ) -> List[Camera]:
-        """
-        将相机视为整体进行归一化：
-        1) 图像 Y 轴在世界系中的平均方向旋转到世界 Z 轴；
-        2) 第一个相机的 Z 轴朝向对齐世界 X 轴；
-        3) 所有相机在 u=0.5,v=0.5 的射线对应的注视中心（到各射线距离最小的点）平移到世界原点。
-        """
-        if len(camera_list) == 0:
-            return []
-
         normalized_camera_list = deepcopy(camera_list)
 
-        device = camera_list[0].device
-        dtype = camera_list[0].dtype
+        device = normalized_camera_list[0].device
+        dtype = normalized_camera_list[0].dtype
 
-        # 1) 各相机中心射线
-        origins = []
-        directions = []
+        # =====================================================
+        # Step 1: 主光轴最近公共点 -> 世界原点
+        # =====================================================
+        origins, dirs = [], []
+        z_cam = torch.tensor([0., 0., 1.], dtype=dtype, device=device)
+
         for cam in camera_list:
-            o, d = CameraConvertor._rayAtCenter(cam)
-            origins.append(o)
-            directions.append(d)
-        origins = np.stack(origins, axis=0)
-        directions = np.stack(directions, axis=0)
+            R, t = cam.R, cam.t
+            C = -R.T @ t
+            d = -R.T @ z_cam
+            d = d / (torch.linalg.norm(d) + 1e-8)
+            origins.append(C)
+            dirs.append(d)
 
-        # 2) 注视中心
-        gaze_center = CameraConvertor._gazeCenterFromRays(origins, directions)
+        origins = torch.stack(origins)
+        dirs = torch.stack(dirs)
 
-        # 3) 所有相机图像 Y 轴（世界系）的平均方向
-        y_axes = []
-        for cam in camera_list:
-            R = cam.R.detach().cpu().numpy()
-            y_axes.append(R[1])
-        y_axes = np.stack(y_axes, axis=0)
-        avg_y = np.mean(y_axes, axis=0)
-        avg_y = avg_y / (np.linalg.norm(avg_y) + 1e-10)
+        I = torch.eye(3, dtype=dtype, device=device)
+        A = torch.zeros((3, 3), dtype=dtype, device=device)
+        b = torch.zeros((3,), dtype=dtype, device=device)
 
-        # 4) 第一个相机的 Z 轴（世界系）
-        first_R = camera_list[0].R.detach().cpu().numpy()
-        first_z = first_R[2]
-        first_z = first_z / (np.linalg.norm(first_z) + 1e-10)
+        for o, d in zip(origins, dirs):
+            P = I - d[:, None] @ d[None, :]
+            A += P
+            b += P @ o
 
-        # 5) 旋转矩阵：first_z -> X, avg_y -> Z，第三轴 first_z × avg_y -> Y（右手系）
-        third = np.cross(first_z, avg_y)
-        third = third / (np.linalg.norm(third) + 1e-10)
-        # R_align 行：使 R_align @ first_z = [1,0,0], R_align @ third = [0,1,0], R_align @ avg_y = [0,0,1]
-        R_align = np.array([
-            first_z,
-            third,
-            avg_y,
-        ], dtype=np.float64)
-
-        # 6) 对每个相机：先平移到注视中心为原点，再应用 R_align
-        # 新世界点 p' = R_align @ (p - gaze_center)
-        # 原 world2camera: p_c = R @ p_w + t，即 p_w 为旧世界
-        # p_w = R_align^T @ p' + gaze_center
-        # p_c = R @ (R_align^T @ p' + gaze_center) + t = R @ R_align^T @ p' + R @ gaze_center + t
-        # 故新 world2camera: R' = R @ R_align^T,  t' = R @ gaze_center + t
-        gaze_center_t = torch.from_numpy(gaze_center).to(dtype=dtype, device=device)
-        R_align_t = torch.from_numpy(R_align).to(dtype=dtype, device=device)
+        focus = torch.linalg.solve(A, b)
 
         for cam in normalized_camera_list:
-            R_old = cam.R
-            t_old = cam.t
-            R_new = R_old @ R_align_t.T
-            t_new = R_old @ gaze_center_t + t_old
-            cam.setR(R_new)
-            cam.setT(t_new)
+            cam.world2camera[:3, 3] += cam.R @ focus
 
+        # =====================================================
+        # Step 2.1: 平均 image-Y -> 世界 +Z
+        # =====================================================
+        y_cam = torch.tensor([0., 1., 0.], dtype=dtype, device=device)
+        z_world = torch.tensor([0., 0., 1.], dtype=dtype, device=device)
+
+        y_world = torch.stack([cam.R.T @ y_cam for cam in normalized_camera_list]).mean(dim=0)
+        y_world = y_world / (torch.linalg.norm(y_world) + 1e-8)
+
+        def rot_from_a_to_b(a, b):
+            v = torch.cross(a, b)
+            c = torch.dot(a, b)
+            s = torch.linalg.norm(v)
+            if s < 1e-8:
+                return torch.eye(3, dtype=dtype, device=device)
+            vx = torch.tensor([
+                [0, -v[2], v[1]],
+                [v[2], 0, -v[0]],
+                [-v[1], v[0], 0]
+            ], dtype=dtype, device=device)
+            return torch.eye(3, dtype=dtype, device=device) + vx + vx @ vx * ((1 - c) / (s * s))
+
+        Q_y = rot_from_a_to_b(y_world, z_world)
+
+        for cam in normalized_camera_list:
+            cam.world2camera[:3, :3] = cam.R @ Q_y.T
+
+        # =====================================================
+        # Step 2.2: 仅绕世界 Z 轴，使 cam0.image-Z → +X
+        # =====================================================
+        cam0 = normalized_camera_list[0]
+        z0_world = cam0.R.T @ z_cam
+
+        # 投影到 XY 平面
+        z0_xy = z0_world.clone()
+        z0_xy[2] = 0.0
+        z0_xy = z0_xy / (torch.linalg.norm(z0_xy) + 1e-8)
+
+        # yaw 角
+        yaw = torch.atan2(z0_xy[1], z0_xy[0])
+
+        cos_y, sin_y = torch.cos(-yaw), torch.sin(-yaw)
+        Q_z = torch.tensor([
+            [cos_y, -sin_y, 0.0],
+            [sin_y,  cos_y, 0.0],
+            [0.0,    0.0,   1.0]
+        ], dtype=dtype, device=device)
+
+        for cam in normalized_camera_list:
+            cam.world2camera[:3, :3] = cam.R @ Q_z.T
+
+        # =====================================================
+        # Step 2.3: 方向一致性修正（避免整体翻转）
+        # =====================================================
+        x_cam = torch.tensor([1., 0., 0.], dtype=dtype, device=device)
+        x0_world = normalized_camera_list[0].R.T @ x_cam
+
+        if x0_world[1] < 0:  # image-X 不应指向 -Y
+            Q_flip = torch.tensor([
+                [-1.,  0., 0.],
+                [ 0., -1., 0.],
+                [ 0.,  0., 1.]
+            ], dtype=dtype, device=device)
+
+            for cam in normalized_camera_list:
+                cam.world2camera[:3, :3] = cam.R @ Q_flip.T
+
+        # ===============================
+        # Step 3: 世界坐标系轴置换 (XYZ -> ZXY)
+        # ===============================
+        P = torch.tensor([
+            [0., 0., 1.],
+            [1., 0., 0.],
+            [0., 1., 0.],
+        ], dtype=dtype, device=device)
+
+        for cam in normalized_camera_list:
+            cam.world2camera[:3, :3] = cam.world2camera[:3, :3] @ P
         return normalized_camera_list
 
     @staticmethod
