@@ -27,6 +27,36 @@ def sampleFibonacciPolars(num_polars: int) -> np.ndarray:
     theta = golden_angle * i
     return np.stack([phi, theta], axis=1)
 
+def sampleFibonacciRotations(num_rotations: int) -> np.ndarray:
+    """
+    基于 sampleFibonacciPolars 并行生成 num_rotations 个 3x3 旋转矩阵。
+    R = Rz(phi) @ Ry(theta)，phi 为方位角 (xy 平面)，theta 为极角 (与 z 轴夹角)。
+
+    Args:
+        num_rotations: 旋转数量
+
+    Returns:
+        R: shape (num_rotations, 3, 3) 的旋转矩阵数组
+    """
+    polars = sampleFibonacciPolars(num_rotations)  # (n, 2), (phi, theta)
+    phi = polars[:, 0]
+    theta = polars[:, 1]
+    cphi, sphi = np.cos(phi), np.sin(phi)
+    cth, sth = np.cos(theta), np.sin(theta)
+    n = num_rotations
+    Rz = np.zeros((n, 3, 3), dtype=np.float64)
+    Rz[:, 0, 0] = cphi
+    Rz[:, 0, 1] = -sphi
+    Rz[:, 1, 0] = sphi
+    Rz[:, 1, 1] = cphi
+    Rz[:, 2, 2] = 1.0
+    Ry = np.zeros((n, 3, 3), dtype=np.float64)
+    Ry[:, 0, 0] = cth
+    Ry[:, 0, 2] = sth
+    Ry[:, 1, 1] = 1.0
+    Ry[:, 2, 0] = -sth
+    Ry[:, 2, 2] = cth
+    return np.matmul(Rz, Ry)
 
 def sampleFibonacciSpherePoints(
     num_points: int,
