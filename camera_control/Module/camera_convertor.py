@@ -5,6 +5,7 @@ import numpy as np
 import open3d as o3d
 
 from tqdm import tqdm
+from copy import deepcopy
 from shutil import rmtree
 from typing import Union, List, Optional
 from concurrent.futures import ThreadPoolExecutor
@@ -16,6 +17,115 @@ from camera_control.Module.camera import Camera
 class CameraConvertor(object):
     def __init__(self) -> None:
         return
+
+    @staticmethod
+    def _rayAtCenter(camera: Camera):
+        """获取相机在 u=0.5, v=0.5 处的射线：原点（世界）和方向（单位向量，世界系）。"""
+        # 相机坐标系：X右 Y上 Z后，像心方向在相机系中为 ( (0.5*W-cx)/fx, (0.5*H-cy)/fy, -1 )
+        u_c, v_c = 0.5 * camera.width, 0.5 * camera.height
+        dx = (u_c - camera.cx) / camera.fx
+        dy = (v_c - camera.cy) / camera.fy
+        dz = -1.0
+        dir_cam = np.array([dx, dy, dz], dtype=np.float64)
+        dir_cam = dir_cam / (np.linalg.norm(dir_cam) + 1e-10)
+        # 世界系方向 = R^T @ dir_cam（world2camera 的 R 是 world->camera，故 camera 方向转世界为 R^T @ d）
+        R = camera.R.detach().cpu().numpy()
+        dir_world = R.T @ dir_cam
+        dir_world = dir_world / (np.linalg.norm(dir_world) + 1e-10)
+        origin = camera.pos.detach().cpu().numpy()
+        return origin, dir_world
+
+    @staticmethod
+    def _gazeCenterFromRays(origins: np.ndarray, directions: np.ndarray) -> np.ndarray:
+        """
+        求到所有射线距离之和最小的空间点 P。
+        dist(P, ray_i)^2 = |P - O_i|^2 - ((P-O_i)·D_i)^2，求导得线性方程 A P = b。
+        A = n*I - sum_i D_i D_i^T,  b = sum_i [ O_i - (O_i·D_i) D_i ]
+        """
+        n = origins.shape[0]
+        A = n * np.eye(3, dtype=np.float64)
+        b = np.zeros(3, dtype=np.float64)
+        for i in range(n):
+            O = origins[i]
+            D = directions[i]
+            A -= np.outer(D, D)
+            b += O - (np.dot(O, D)) * D
+        P, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
+        return P
+
+    @staticmethod
+    def normalizeCameras(
+        camera_list: List[Camera],
+    ) -> List[Camera]:
+        """
+        将相机视为整体进行归一化：
+        1) 图像 Y 轴在世界系中的平均方向旋转到世界 Z 轴；
+        2) 第一个相机的 Z 轴朝向对齐世界 X 轴；
+        3) 所有相机在 u=0.5,v=0.5 的射线对应的注视中心（到各射线距离最小的点）平移到世界原点。
+        """
+        if len(camera_list) == 0:
+            return []
+
+        normalized_camera_list = deepcopy(camera_list)
+
+        device = camera_list[0].device
+        dtype = camera_list[0].dtype
+
+        # 1) 各相机中心射线
+        origins = []
+        directions = []
+        for cam in camera_list:
+            o, d = CameraConvertor._rayAtCenter(cam)
+            origins.append(o)
+            directions.append(d)
+        origins = np.stack(origins, axis=0)
+        directions = np.stack(directions, axis=0)
+
+        # 2) 注视中心
+        gaze_center = CameraConvertor._gazeCenterFromRays(origins, directions)
+
+        # 3) 所有相机图像 Y 轴（世界系）的平均方向
+        y_axes = []
+        for cam in camera_list:
+            R = cam.R.detach().cpu().numpy()
+            y_axes.append(R[1])
+        y_axes = np.stack(y_axes, axis=0)
+        avg_y = np.mean(y_axes, axis=0)
+        avg_y = avg_y / (np.linalg.norm(avg_y) + 1e-10)
+
+        # 4) 第一个相机的 Z 轴（世界系）
+        first_R = camera_list[0].R.detach().cpu().numpy()
+        first_z = first_R[2]
+        first_z = first_z / (np.linalg.norm(first_z) + 1e-10)
+
+        # 5) 旋转矩阵：first_z -> X, avg_y -> Z，第三轴 first_z × avg_y -> Y（右手系）
+        third = np.cross(first_z, avg_y)
+        third = third / (np.linalg.norm(third) + 1e-10)
+        # R_align 行：使 R_align @ first_z = [1,0,0], R_align @ third = [0,1,0], R_align @ avg_y = [0,0,1]
+        R_align = np.array([
+            first_z,
+            third,
+            avg_y,
+        ], dtype=np.float64)
+
+        # 6) 对每个相机：先平移到注视中心为原点，再应用 R_align
+        # 新世界点 p' = R_align @ (p - gaze_center)
+        # 原 world2camera: p_c = R @ p_w + t，即 p_w 为旧世界
+        # p_w = R_align^T @ p' + gaze_center
+        # p_c = R @ (R_align^T @ p' + gaze_center) + t = R @ R_align^T @ p' + R @ gaze_center + t
+        # 故新 world2camera: R' = R @ R_align^T,  t' = R @ gaze_center + t
+        gaze_center_t = torch.from_numpy(gaze_center).to(dtype=dtype, device=device)
+        R_align_t = torch.from_numpy(R_align).to(dtype=dtype, device=device)
+
+        for cam in normalized_camera_list:
+            R_old = cam.R
+            t_old = cam.t
+            R_new = R_old @ R_align_t.T
+            t_new = R_old @ gaze_center_t + t_old
+            cam.setR(R_new)
+            cam.setT(t_new)
+
+        return normalized_camera_list
 
     @staticmethod
     def createDepthPcd(
