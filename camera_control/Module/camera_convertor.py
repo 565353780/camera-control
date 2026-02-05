@@ -139,22 +139,25 @@ class CameraConvertor(object):
         return normalized_camera_list
 
     @staticmethod
+    def _process_camera_for_pcd(camera: Camera, conf_thresh: float):
+        mask = camera.toMaskedValidDepthMask(conf_thresh)
+        image_colors = camera.sampleRGBAtUV(camera.toDepthUV())
+        colors = image_colors[mask][..., ::-1]
+        points, _ = camera.toMaskedPoints(conf_thresh)
+        return points, colors
+
+    @staticmethod
     def createDepthPcd(
         camera_list: List[Camera],
         conf_thresh: float=0.95,
     ) -> o3d.geometry.PointCloud:
-        points_list = []
-        colors_list = []
-        for i in range(len(camera_list)):
-            camera = camera_list[i]
-
-            mask = camera.toMaskedValidDepthMask(conf_thresh)
-            image_colors = camera.sampleRGBAtUV(camera.toDepthUV())
-            colors = image_colors[mask][..., ::-1]
-            points, confs = camera.toMaskedPoints(conf_thresh)
-
-            points_list.append(points)
-            colors_list.append(colors)
+        with ThreadPoolExecutor() as executor:
+            results = list(executor.map(
+                lambda cam: CameraConvertor._process_camera_for_pcd(cam, conf_thresh),
+                camera_list,
+            ))
+        points_list = [r[0] for r in results]
+        colors_list = [r[1] for r in results]
 
         points = torch.cat(points_list, dim=0)
         colors = torch.cat(colors_list, dim=0)
