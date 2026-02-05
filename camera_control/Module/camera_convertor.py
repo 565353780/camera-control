@@ -142,7 +142,7 @@ class CameraConvertor(object):
     def _process_camera_for_pcd(camera: Camera, conf_thresh: float):
         mask = camera.toMaskedValidDepthMask(conf_thresh)
         image_colors = camera.sampleRGBAtUV(camera.toDepthUV())
-        colors = image_colors[mask][..., ::-1]
+        colors = torch.flip(image_colors[mask], dims=[-1])
         points, _ = camera.toMaskedPoints(conf_thresh)
         return points, colors
 
