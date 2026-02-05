@@ -4,7 +4,7 @@ import torch
 import numpy as np
 import open3d as o3d
 
-from tqdm import tqdm, trange
+from tqdm import tqdm
 from copy import deepcopy
 from shutil import rmtree
 from typing import Union, List, Optional
