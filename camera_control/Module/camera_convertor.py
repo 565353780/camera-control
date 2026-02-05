@@ -229,12 +229,12 @@ class CameraConvertor(object):
         cx = cameras[0].cx
         cy = cameras[0].cy
 
+        # 创建文件夹结构
+        if save_data_folder_path[-1] != '/':
+            save_data_folder_path += '/'
+
         if os.path.exists(save_data_folder_path):
             rmtree(save_data_folder_path)
-
-        # 创建文件夹结构
-        if not save_data_folder_path.endswith('/'):
-            save_data_folder_path += '/'
 
         image_folder_path = save_data_folder_path + 'images/'
         mask_folder_path = save_data_folder_path + 'masks/'
