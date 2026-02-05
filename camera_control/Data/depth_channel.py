@@ -219,9 +219,8 @@ class DepthChannel(object):
             mask_t = self.sampleMaskAtUV(uv) & self.valid_depth_mask  # (H, W)
 
         if conf_thresh is not None and self.conf is not None:
-            conf_flat = self.conf[mask_t]
-            if conf_flat.numel() > 0:
-                thresh_value = torch.quantile(conf_flat.float(), conf_thresh, interpolation="lower")
+            if self.conf.numel() > 0:
+                thresh_value = torch.quantile(self.conf.float(), conf_thresh, interpolation="lower")
                 mask_t = mask_t & (self.conf >= thresh_value)
         return mask_t
 

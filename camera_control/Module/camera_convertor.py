@@ -149,7 +149,7 @@ class CameraConvertor(object):
     @staticmethod
     def createDepthPcd(
         camera_list: List[Camera],
-        conf_thresh: float=0.95,
+        conf_thresh: float=0.8,
     ) -> o3d.geometry.PointCloud:
         with ThreadPoolExecutor() as executor:
             results = list(executor.map(
@@ -404,4 +404,5 @@ class CameraConvertor(object):
                 desc='load colmap',
             ))
         camera_list = [c for c in results if isinstance(c, Camera)]
+        camera_list.sort(key=lambda c: c.image_id)
         return camera_list
