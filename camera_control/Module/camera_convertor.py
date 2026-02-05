@@ -141,7 +141,7 @@ class CameraConvertor(object):
     @staticmethod
     def createDepthPcd(
         camera_list: List[Camera],
-        conf_thresh: float=0.8,
+        conf_thresh: float=0.95,
     ) -> o3d.geometry.PointCloud:
         points_list = []
         colors_list = []
