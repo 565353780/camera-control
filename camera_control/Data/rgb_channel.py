@@ -1,5 +1,3 @@
-import os
-import cv2
 import torch
 import numpy as np
 from typing import List, Union, Optional
@@ -98,3 +96,19 @@ class RGBChannel(object):
     ) -> np.ndarray:
         """toMaskedImage 的 OpenCV BGR uint8 版本。无 mask 时等价于 self.image_cv。"""
         return toNumpy(self.toMaskedImage(background_color) * 255.0, np.uint8)[..., ::-1]
+
+    def sampleRGBAtUV(self, uv_grid: Union[torch.Tensor, np.ndarray]) -> torch.Tensor:
+        """
+        按归一化 UV 在 self.image 上做最近邻采样，供各模态按自身 UV 对齐 image，节省重复计算。
+        uv_grid: (..., 2) 归一化 UV [0,1]，u 向右、v 向上（v=0 为左下）。
+        image 行 0 对应 v=1（上），行 Mh-1 对应 v=0（下）。
+        返回: 与 uv_grid 前若干维同形状的 (..., 3) float tensor。
+        """
+        assert self.image is not None
+        uv_grid = toTensor(uv_grid, torch.float32, self.device)
+        Mh, Mw = self.image.shape[0], self.image.shape[1]
+        u = uv_grid[..., 0]
+        v = uv_grid[..., 1]
+        idx_w = (u * (Mw - 1)).round().long().clamp(0, Mw - 1)
+        idx_h = ((1.0 - v) * (Mh - 1)).round().long().clamp(0, Mh - 1)
+        return self.image[idx_h, idx_w]

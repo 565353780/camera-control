@@ -208,6 +208,23 @@ class DepthChannel(object):
     ) -> np.ndarray:
         return toNumpy(self.toDepthVis(depth_min, depth_max) * 255.0, np.uint8)[..., ::-1]
 
+    def toMaskedValidDepthMask(
+        self,
+        conf_thresh: Optional[float] = None,
+    ) -> torch.Tensor:
+        if self.mask is None:
+            mask_t = self.valid_depth_mask
+        else:
+            uv = self.toDepthUV()  # (H, W, 2)
+            mask_t = self.sampleMaskAtUV(uv) & self.valid_depth_mask  # (H, W)
+
+        if conf_thresh is not None and self.conf is not None:
+            conf_flat = self.conf[mask_t]
+            if conf_flat.numel() > 0:
+                thresh_value = torch.quantile(conf_flat.float(), conf_thresh, interpolation="lower")
+                mask_t = mask_t & (self.conf >= thresh_value)
+        return mask_t
+
     def toMaskedDepth(
         self,
     ) -> torch.Tensor:
@@ -218,12 +235,7 @@ class DepthChannel(object):
         background_color: [R, G, B]，默认 0–255，内部会除以 255；输出 tensor 为 [0, 1]。
         返回: (depth_height, depth_width, 3) tensor
         """
-        if getattr(self, "mask", None) is None:
-            mask_t = self.valid_depth_mask
-        else:
-            uv = self.toDepthUV()  # (H, W, 2)
-            mask_t = self.sampleMaskAtUV(uv) & self.valid_depth_mask  # (H, W)
-        mask_t = mask_t.unsqueeze(-1)  # (H, W, 1)
+        mask_t = self.toMaskedValidDepthMask().unsqueeze(-1)  # (H, W, 1)
         bg = torch.zeros([1, 1, 3], dtype=self.dtype, device=self.device)
         out = torch.where(mask_t, self.depth, bg)
         return out
@@ -241,12 +253,7 @@ class DepthChannel(object):
         返回: (depth_height, depth_width, 3) tensor
         """
         depth_vis = self.toDepthVis(depth_min, depth_max)
-        if getattr(self, "mask", None) is None:
-            mask_t = self.valid_depth_mask
-        else:
-            uv = self.toDepthUV()  # (H, W, 2)
-            mask_t = self.sampleMaskAtUV(uv) & self.valid_depth_mask  # (H, W)
-        mask_t = mask_t.unsqueeze(-1)  # (H, W, 1)
+        mask_t = self.toMaskedValidDepthMask().unsqueeze(-1)  # (H, W, 1)
         bg = torch.zeros([1, 1, 3], dtype=self.dtype, device=self.device)
         out = torch.where(mask_t, depth_vis, bg)
         return out
@@ -273,19 +280,7 @@ class DepthChannel(object):
         conf_thresh=None 表示不做置信度筛选；conf_thresh=0.8 表示保留 conf 处于 80% 分位及以上的点。
         """
         assert self.ccm is not None
-        mask_t = self.valid_depth_mask
-        if conf_thresh is not None and self.conf is not None:
-            conf_flat = self.conf[mask_t]
-            if conf_flat.numel() == 0:
-                return (
-                    torch.empty(0, 3, dtype=self.ccm.dtype, device=self.device),
-                    torch.empty(0, dtype=self.conf.dtype, device=self.device),
-                )
-            thresh_value = torch.quantile(conf_flat.float(), conf_thresh, interpolation="lower")
-            mask_t = mask_t & (self.conf >= thresh_value)
-        if getattr(self, "mask", None) is not None:
-            uv = self.toDepthUV()
-            mask_t = mask_t & self.sampleMaskAtUV(uv)
+        mask_t = self.toMaskedValidDepthMask(conf_thresh)
         points = self.ccm[mask_t]  # (N, 3)
         confs = (
             self.conf[mask_t]
