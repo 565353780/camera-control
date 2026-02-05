@@ -4,7 +4,7 @@ import torch
 import numpy as np
 import open3d as o3d
 
-from tqdm import tqdm
+from tqdm import tqdm, trange
 from copy import deepcopy
 from shutil import rmtree
 from typing import Union, List, Optional
@@ -265,29 +265,31 @@ class CameraConvertor(object):
             f"# Number of images: {camera_num}\n",
         ]
 
+        def _process_one_camera(args):
+            i, cam, img_dir, msk_dir, msk_img_dir = args
+            colmap_pose = cam.toColmapPose().cpu().numpy()
+            image_name = f"{i:06d}.png"
+            image_id = i + 1
+            cv2.imwrite(img_dir + image_name, cam.image_cv)
+            cv2.imwrite(msk_dir + image_name, cam.mask_cv)
+            cv2.imwrite(msk_img_dir + image_name, cam.toMaskedImageCV())
+            return (image_id, image_name, colmap_pose)
+
         print('[INFO][MeshRenderer::createColmapDataFolder]')
         print('\t start create colmap data folder...')
-        for i in range(camera_num):
-            camera = cameras[i]
+        task_args = [
+            (i, cameras[i], image_folder_path, mask_folder_path, masked_image_folder_path)
+            for i in range(camera_num)
+        ]
+        max_workers = min(32, (os.cpu_count() or 4) + 4)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            results = list(tqdm(executor.map(_process_one_camera, task_args), total=camera_num, desc='colmap data'))
 
-            colmap_pose = camera.toColmapPose().cpu().numpy()
-
-            # 图像文件名
-            image_name = f"{i:06d}.png"
-            image_id = i + 1  # COLMAP的ID从1开始
-
-            # 保存图像
-            cv2.imwrite(image_folder_path + image_name, camera.image_cv)
-            cv2.imwrite(mask_folder_path + image_name, camera.mask_cv)
-            cv2.imwrite(masked_image_folder_path + image_name, camera.toMaskedImageCV())
-
-            # 添加到images.txt
-            # 格式: IMAGE_ID QW QX QY QZ TX TY TZ CAMERA_ID NAME
+        for (image_id, image_name, colmap_pose) in results:
             images_txt_lines.append(
                 f"{image_id} {colmap_pose[0]:.10f} {colmap_pose[1]:.10f} {colmap_pose[2]:.10f} {colmap_pose[3]:.10f} "
                 f"{colmap_pose[4]:.10f} {colmap_pose[5]:.10f} {colmap_pose[6]:.10f} 1 {image_name}\n"
             )
-            # 空行表示没有2D特征点
             images_txt_lines.append("\n")
 
         # 写入cameras.txt
