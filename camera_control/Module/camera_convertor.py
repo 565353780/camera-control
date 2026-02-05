@@ -236,9 +236,13 @@ class CameraConvertor(object):
         if not save_data_folder_path.endswith('/'):
             save_data_folder_path += '/'
 
-        images_folder_path = save_data_folder_path + 'images/'
+        image_folder_path = save_data_folder_path + 'images/'
+        mask_folder_path = save_data_folder_path + 'masks/'
+        masked_image_folder_path = save_data_folder_path + 'masked_images/'
         sparse_folder_path = save_data_folder_path + 'sparse/0/'
-        os.makedirs(images_folder_path, exist_ok=True)
+        os.makedirs(image_folder_path, exist_ok=True)
+        os.makedirs(mask_folder_path, exist_ok=True)
+        os.makedirs(masked_image_folder_path, exist_ok=True)
         os.makedirs(sparse_folder_path, exist_ok=True)
 
         # 准备cameras.txt内容
@@ -273,7 +277,9 @@ class CameraConvertor(object):
             image_id = i + 1  # COLMAP的ID从1开始
 
             # 保存图像
-            cv2.imwrite(images_folder_path + image_name, camera.image_cv)
+            cv2.imwrite(image_folder_path + image_name, camera.image_cv)
+            cv2.imwrite(mask_folder_path + image_name, camera.mask_cv)
+            cv2.imwrite(masked_image_folder_path + image_name, camera.toMaskedImageCV())
 
             # 添加到images.txt
             # 格式: IMAGE_ID QW QX QY QZ TX TY TZ CAMERA_ID NAME
