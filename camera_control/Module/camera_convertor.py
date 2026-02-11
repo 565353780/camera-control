@@ -314,6 +314,7 @@ class CameraConvertor(object):
     def loadColmapDataFolder(
         colmap_data_folder_path: str,
         image_folder_name: str='images',
+        mask_folder_name: str='masks',
     ) -> List[Camera]:
         """
         从 COLMAP 数据目录加载相机列表。
@@ -323,6 +324,7 @@ class CameraConvertor(object):
         if not colmap_data_folder_path.endswith('/'):
             colmap_data_folder_path += '/'
         image_folder_path = colmap_data_folder_path + image_folder_name + '/'
+        mask_folder_path = colmap_data_folder_path + mask_folder_name + '/'
         camera_intrinsic_file_path = colmap_data_folder_path + 'sparse/0/cameras.txt'
         camera_extrinsic_file_path = colmap_data_folder_path + 'sparse/0/images.txt'
 
@@ -395,10 +397,20 @@ class CameraConvertor(object):
             ], dtype=np.float64)
             pose = rec['pose']
             camera = Camera.fromColmapPose(pose, intrinsic)
-            image_path = os.path.join(image_folder_path, rec['name'])
-            if not camera.loadImageFile(image_path):
-                print('[WARN][CameraConvertor::loadColmapDataFolder] load image failed:', image_path)
+            image_file_path = os.path.join(image_folder_path, rec['name'])
+            if not camera.loadImageFile(image_file_path):
+                print('[WARN][CameraConvertor::loadColmapDataFolder]')
+                print('\t loadImageFile failed!')
+                print('\t image file path:', image_file_path)
                 return None
+
+            mask_file_path = os.path.join(mask_folder_path, rec['name'])
+            if os.path.exists(mask_file_path):
+                if not camera.loadMaskFile(mask_file_path):
+                    print('[WARN][CameraConvertor::loadColmapDataFolder]')
+                    print('\t loadMaskFile failed!')
+                    print('\t mask file path:', mask_file_path)
+
             camera.image_id = rec['name']
             return camera
 
