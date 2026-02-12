@@ -36,7 +36,8 @@ class CameraConvertor(object):
 
         R, s, t = decompose_similarity_from_T(T.T)
 
-        T_inv = invert_similarity(R, s, t)
+        # FIXME: may only work for some cases! need to check the scaling not matched problem
+        T_inv = invert_similarity(R, 1.0 / s, t)
 
         for cam in transformed_list:
             cam.world2camera = cam.world2camera @ T_inv
