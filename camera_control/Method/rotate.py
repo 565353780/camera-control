@@ -1,4 +1,5 @@
 import torch
+from typing import Tuple, Union
 
 
 def rotmat2qvec(R: torch.Tensor) -> torch.Tensor:
@@ -56,3 +57,79 @@ def qvec2rotmat(qvec: torch.Tensor) -> torch.Tensor:
         torch.stack([2*qx*qz - 2*qw*qy, 2*qy*qz + 2*qw*qx, 1 - 2*qx*qx - 2*qy*qy], dim=0),
     ], dim=0)
     return R
+
+def decompose_similarity_from_T(
+    T: Union[torch.Tensor, list],
+    enforce_positive_scale: bool = True,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    从任意 4x4 ICP 变换矩阵 T 中
+    求最接近的 similarity 变换参数 (R, s, t)
+
+    使得：
+        T ≈ [ sR  t ]
+            [  0   1 ]
+
+    Returns:
+        R: (3,3) 正交旋转矩阵
+        s: 标量 scale
+        t: (3,) 平移向量
+    """
+
+    if not torch.is_tensor(T):
+        T = torch.tensor(T, dtype=torch.float32)
+
+    T = T.reshape(4, 4)
+
+    M = T[:3, :3]
+    t = T[:3, 3].clone()
+
+    # --- SVD 分解 ---
+    U, S, Vt = torch.linalg.svd(M)
+
+    # 最优旋转
+    R = U @ Vt
+
+    # 修正 reflection
+    if torch.det(R) < 0:
+        Vt[-1, :] *= -1
+        R = U @ Vt
+
+    # 最优 scale（Frobenius 最小二乘）
+    s = (S.sum()) / 3.0
+
+    if enforce_positive_scale:
+        s = torch.abs(s)
+
+    return R, s, t
+
+def build_similarity_matrix(R, s, t):
+    T_clean = torch.eye(4, dtype=R.dtype, device=R.device)
+    T_clean[:3, :3] = s * R
+    T_clean[:3, 3] = t
+    return T_clean
+
+def invert_similarity(R, s, t):
+    """
+    输入:
+        R: (3,3)
+        s: scalar
+        t: (3,)
+    输出:
+        T_inv: (4,4)
+    """
+
+    device = R.device
+    dtype = R.dtype
+
+    R_inv = R.T
+    s_inv = 1.0 / s
+
+    A = s_inv * R_inv
+    b = -s_inv * (R_inv @ t)
+
+    T_inv = torch.eye(4, dtype=dtype, device=device)
+    T_inv[:3, :3] = A
+    T_inv[:3, 3] = b
+
+    return T_inv
