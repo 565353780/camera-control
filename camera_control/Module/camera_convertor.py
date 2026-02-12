@@ -1,6 +1,7 @@
 import os
 import cv2
 import torch
+import trimesh
 import numpy as np
 import open3d as o3d
 
@@ -11,12 +12,55 @@ from typing import Union, List, Optional
 from concurrent.futures import ThreadPoolExecutor
 
 from camera_control.Method.pcd import toPcd
+from camera_control.Method.data import toNumpy, toTensor
 from camera_control.Module.camera import Camera
 
 
 class CameraConvertor(object):
     def __init__(self) -> None:
         return
+
+    @staticmethod
+    def transformCameras(
+        camera_list: List[Camera],
+        world_transform: Union[torch.Tensor, np.ndarray, list],
+    ) -> List[Camera]:
+        """
+        用给定的 4x4 世界变换矩阵对所有相机的世界位姿进行变换。
+
+        约定：世界坐标系中 Nx3 的点可通过右乘该 4x4 矩阵做空间变换，即
+          P_new = (P_h @ world_transform)[:, :3]，
+        其中 P_h 为 (N, 4)，每行为 [x, y, z, 1]。
+
+        列向量等价形式：p_new = world_transform^T @ p_old，
+        故旧世界到新世界为 p_old = (world_transform^{-1})^T @ p_new。
+        相机到旧世界为 p_cam = world2camera @ p_old，代入得
+        p_cam = world2camera @ (world_transform^{-1})^T @ p_new，
+        因此新的 world2camera 为：world2camera_new = world2camera @ (world_transform^{-1})^T。
+
+        Args:
+            camera_list: 待变换的相机列表（会被深拷贝，不修改原列表）
+            world_transform: 4x4 变换矩阵，行向量右乘约定
+
+        Returns:
+            变换后的新相机列表
+        """
+
+        transformed_list = deepcopy(camera_list)
+        device = transformed_list[0].device
+        dtype = transformed_list[0].dtype
+
+        T = toTensor(world_transform, dtype, device).reshape(4, 4)
+        T_inv = torch.linalg.inv(T)
+        # 列向量下旧世界 -> 新世界 为 p_new = T^T @ p_old，故 旧->新 的矩阵为 T^T
+        # 新世界 -> 旧世界 为 p_old = (T^T)^{-1} @ p_new = (T^{-1})^T @ p_new
+        T_old_from_new = T_inv.T
+
+        for cam in transformed_list:
+            # world2camera_new = world2camera @ (新世界 -> 旧世界)
+            cam.world2camera = cam.world2camera @ T_old_from_new
+
+        return transformed_list
 
     @staticmethod
     def normalizeCameras(
@@ -169,7 +213,7 @@ class CameraConvertor(object):
     @staticmethod
     def createColmapDataFolder(
         cameras: List[Camera],
-        pcd: Union[o3d.geometry.PointCloud, str],
+        pcd: Union[trimesh.Trimesh, o3d.geometry.PointCloud, torch.Tensor, np.ndarray, list, str],
         save_data_folder_path: str,
         point_num_max: Optional[int]=None,
     ) -> bool:
@@ -202,6 +246,11 @@ class CameraConvertor(object):
                 return False
 
             pcd = o3d.io.read_point_cloud(pcd)
+        elif isinstance(pcd, trimesh.Trimesh):
+            pcd = toPcd(pcd.vertices)
+        elif isinstance(pcd, torch.Tensor) or isinstance(pcd, np.ndarray) or isinstance(pcd, list):
+            points = toNumpy(pcd).reshape(-1, 3)
+            pcd = toPcd(points)
 
         if not isinstance(pcd, o3d.geometry.PointCloud):
             print('[ERROR][CameraConvertor::createColmapDataFolder]')
