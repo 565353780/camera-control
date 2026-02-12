@@ -40,12 +40,6 @@ class DepthChannel(object):
     def masked_depth_cv(self) -> np.ndarray:
         return self.toMaskedDepthVisCV()
 
-    def updateCCM(self) -> bool:
-        # 用 depth 每个像素的 UV 作为统一位置信息反投影，与 camera.image 的 UV 一致
-        uv = self.toDepthUV()  # (depth_height, depth_width, 2)
-        self.ccm = self.projectUV2Points(uv, self.depth)
-        return True
-
     def toDepthUV(self) -> torch.Tensor:
         """
         生成 self.depth 每个像素的归一化 UV 坐标 [0,1]，与 camera 的 UV 约定一致。
@@ -60,6 +54,15 @@ class DepthChannel(object):
         vv_new = 1.0 - vv  # 左下角为 (0,0)，v 向上增大，与 camera UV 一致
         uv = torch.stack([uu, vv_new], dim=-1)  # (depth_height, depth_width, 2)
         return uv
+
+    def updateCCM(self) -> bool:
+        if self.depth is None:
+            return False
+
+        # 用 depth 每个像素的 UV 作为统一位置信息反投影，与 camera.image 的 UV 一致
+        uv = self.toDepthUV()  # (depth_height, depth_width, 2)
+        self.ccm = self.projectUV2Points(uv, self.depth)
+        return True
 
     def loadDepth(
         self,
