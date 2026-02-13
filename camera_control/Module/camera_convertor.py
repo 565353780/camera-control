@@ -48,9 +48,9 @@ class CameraConvertor(object):
         # 使用 SVD 提取出绝对纯净的左乘参数 R_left, s, t_left
         R_left, s, t_left = decompose_similarity_from_T(T_right.T, enforce_positive_scale=True)
 
-        # scale_safe = s.clamp(min=1e-8)
+        scale_safe = s.clamp(min=1e-8)
 
-        T_clean_left_inv = invert_similarity(R_left, s, t_left)
+        T_clean_left_inv = invert_similarity(R_left, scale_safe, t_left)
 
         for cam in transformed_list:
             # =========================================================
@@ -65,14 +65,14 @@ class CameraConvertor(object):
             # 这一步将 W2C 完美复原为正交的 SE(3) 刚体位姿，
             # 并在物理空间中将相机的物理位置等比例地精确推远 s 倍！
             # =========================================================
-            cam.world2camera[:3, :] = cam.world2camera[:3, :] * s
+            cam.world2camera[:3, :] = cam.world2camera[:3, :] * scale_safe
 
             # =========================================================
             # Step C: 更新深度与点云重投影
             # =========================================================
             if getattr(cam, "depth", None) is not None:
                 # 场景放大 s 倍，相机观察同视角的物理深度同步放大 s 倍
-                cam.depth = cam.depth * s
+                cam.depth = cam.depth * scale_safe
                 cam.updateCCM()
 
             # =========================================================
