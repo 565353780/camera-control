@@ -220,7 +220,7 @@ class NVDiffRastRenderer(object):
             image = dr.antialias(image.contiguous(), rast_out, vertices_clip, faces)
 
         return {
-            'image': image[0],  # [H, W, 3] RGB tensor
+            'rgb': image[0],  # [H, W, 3] RGB tensor
             'rasterize_output': rast_out[0],  # [H, W, 4]
             'bary_derivs': rast_out_db[0] if rast_out_db is not None else torch.zeros_like(rast_out[0]),
         }
@@ -309,7 +309,7 @@ class NVDiffRastRenderer(object):
             image = dr.antialias(image.contiguous(), rast_out, vertices_clip, faces)
 
         return {
-            'image': image[0],  # [H, W, 3] RGB tensor
+            'rgb': image[0],  # [H, W, 3] RGB tensor
             'rasterize_output': rast_out[0],  # [H, W, 4]
             'bary_derivs': rast_out_db[0] if rast_out_db is not None else torch.zeros_like(rast_out[0]),
         }
@@ -381,7 +381,7 @@ class NVDiffRastRenderer(object):
 
         return {
             'depth': depth,  # [H, W] float32
-            'image': image[0],  # [H, W, 3] RGB tensor
+            'rgb': image[0],  # [H, W, 3] RGB tensor
             'rasterize_output': rast_out[0],  # [H, W, 4]
             'bary_derivs': rast_out_db[0] if rast_out_db is not None else torch.zeros_like(rast_out[0]),
         }
@@ -439,8 +439,10 @@ class NVDiffRastRenderer(object):
             normals_camera_vis = dr.antialias(normals_camera_vis.contiguous(), rast_out, vertices_clip, faces)
 
         return {
-            'normal_world': normals_world_vis[0],  # [H, W, 3] RGB tensor
-            'normal_camera': normals_camera_vis[0],  # [H, W, 3] RGB tensor
+            'world': normals_world[0],  # [H, W, 3] XYZ tensor
+            'camera': normals_camera[0],  # [H, W, 3] XYZ tensor
+            'rgb_world': normals_world_vis[0],  # [H, W, 3] RGB tensor
+            'rgb_camera': normals_camera_vis[0],  # [H, W, 3] RGB tensor
             'rasterize_output': rast_out[0],  # [H, W, 4]
             'bary_derivs': rast_out_db[0] if rast_out_db is not None else torch.zeros_like(rast_out[0]),
         }
