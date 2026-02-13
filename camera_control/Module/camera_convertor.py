@@ -23,26 +23,66 @@ class CameraConvertor(object):
 
     @staticmethod
     def transformCameras(
-        camera_list: List[Camera],
-        world_transform,
-    ) -> List[Camera]:
+        camera_list: List["Camera"],
+        world_transform: Union[torch.Tensor, np.ndarray, list],
+    ) -> List["Camera"]:
+        """
+        用给定的 4x4 世界变换矩阵对所有相机的世界位姿进行变换。
 
+        约定：传入的 world_transform 是 Open3D ICP 矩阵的转置（行向量右乘约定）。
+        结合 SVD 分解，滤除所有仿射/错切噪声，确保对相机的变换是绝对严格的刚体+均匀缩放。
+        """
         transformed_list = deepcopy(camera_list)
+        if not transformed_list:
+            return transformed_list
 
         device = transformed_list[0].device
         dtype = transformed_list[0].dtype
 
-        T = toTensor(world_transform, dtype, device).reshape(4, 4)
+        # =========================================================
+        # 1. 矩阵桥接与 SVD 极度提纯
+        # =========================================================
+        # T_right 是行向量右乘矩阵 (p_new = p_old @ T_right)
+        T_right = toTensor(world_transform, dtype, device).reshape(4, 4)
 
-        R, s, t = decompose_similarity_from_T(T.T)
+        # 使用 SVD 提取出绝对纯净的左乘参数 R_left, s, t_left
+        R_left, s, t_left = decompose_similarity_from_T(T_right.T, enforce_positive_scale=True)
 
-        T_inv = invert_similarity(R, s, t)
+        # scale_safe = s.clamp(min=1e-8)
 
-        # FIXME: need to check the depth scaling not matched problem
+        T_clean_left_inv = invert_similarity(R_left, s, t_left)
+
         for cam in transformed_list:
-            cam.world2camera = cam.world2camera @ T_inv
+            # =========================================================
+            # Step A: 乘以带有 1/s 缩放的纯净逆矩阵
+            # =========================================================
+            # p_cam = W2C_old @ (T_clean_left^-1) @ p_world_new_col
+            cam.world2camera = cam.world2camera @ T_clean_left_inv
 
-            cam.updateCCM()
+            # =========================================================
+            # Step B: 【核心刚体补偿】
+            # 将前三行乘以 scale_safe，消除齐次逆矩阵带来的 1/s 缩放污染。
+            # 这一步将 W2C 完美复原为正交的 SE(3) 刚体位姿，
+            # 并在物理空间中将相机的物理位置等比例地精确推远 s 倍！
+            # =========================================================
+            cam.world2camera[:3, :] = cam.world2camera[:3, :] * s
+
+            # =========================================================
+            # Step C: 更新深度与点云重投影
+            # =========================================================
+            if getattr(cam, "depth", None) is not None:
+                # 场景放大 s 倍，相机观察同视角的物理深度同步放大 s 倍
+                cam.depth = cam.depth * s
+                cam.updateCCM()
+
+            # =========================================================
+            # Step D: 法线旋转更新
+            # =========================================================
+            if getattr(cam, "normal", None) is not None:
+                # 你的 normal 约定为行向量右乘；
+                # SVD 提取出的 R_left 是左乘旋转矩阵，其等价的右乘旋转矩阵正是它的转置 R_left.T
+                cam.normal = (cam.normal @ R_left.T).clone()
+                cam.normal = cam.normal / (torch.linalg.norm(cam.normal, dim=-1, keepdim=True) + 1e-8)
 
         return transformed_list
 
