@@ -26,7 +26,7 @@ def test():
         device=device,
     )
 
-    mvp = camera.getWorld2NVDiffRast(bbox_length=[2, 2, 2])
+    mvp = camera.getWorld2NVDiffRast()
 
     pos_clip = torch.matmul(pos, mvp.T).contiguous()  # [1, V, 4]
 

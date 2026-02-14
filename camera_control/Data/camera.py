@@ -621,7 +621,9 @@ class CameraData(object):
 
     def getWorld2NVDiffRast(
         self,
-        bbox_length: Union[torch.Tensor, np.ndarray, list]=[2, 2, 2],
+        near: float=0.01,
+        far: float=100.0,
+        # bbox_length: Union[torch.Tensor, np.ndarray, list]=[2, 2, 2],
     ) -> torch.Tensor:
         """
         构建 nvdiffrast 的 world -> clip(MVP) 变换矩阵，利用 camera 的所有参数（包括外参和内参）
@@ -632,9 +634,9 @@ class CameraData(object):
         """
 
         # 计算合适的 near/far
-        bbox_size = torch.linalg.norm(toTensor(bbox_length, self.dtype, self.device))
-        near = bbox_size * 0.1
-        far = bbox_size * 10.0
+        # bbox_size = torch.linalg.norm(toTensor(bbox_length, self.dtype, self.device))
+        # near = bbox_size * 0.1
+        # far = bbox_size * 10.0
 
         # Step 1: 计算 OpenGL 投影矩阵（右手，左下原点 Y 向上）
         proj = torch.zeros((4, 4), dtype=torch.float32, device=self.device)
@@ -642,7 +644,8 @@ class CameraData(object):
         proj[0, 0] = 2 * self.fx / self.width
         proj[1, 1] = 2 * self.fy / self.height
         proj[0, 2] = 1 - 2 * self.cx / self.width
-        proj[1, 2] = 2 * self.cy / self.height - 1
+        #proj[1, 2] = 2 * self.cy / self.height - 1
+        proj[1, 2] = 1 - 2 * self.cy / self.height
         proj[2, 2] = (far + near) / (near - far)
         proj[2, 3] = 2 * far * near / (near - far)
         proj[3, 2] = -1.0

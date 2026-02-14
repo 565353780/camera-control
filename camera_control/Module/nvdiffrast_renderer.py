@@ -127,8 +127,8 @@ class NVDiffRastRenderer(object):
             torch.ones((vertices.shape[0], 1), dtype=torch.float32, device=camera.device)
         ], dim=1)  # [V, 4]
 
-        bbox_length = torch.max(vertices, dim=0)[0] - torch.min(vertices, dim=0)[0]
-        mvp = camera.getWorld2NVDiffRast(bbox_length)
+        # bbox_length = torch.max(vertices, dim=0)[0] - torch.min(vertices, dim=0)[0]
+        mvp = camera.getWorld2NVDiffRast()
         vertices_clip = torch.matmul(vertices_homo, mvp.T).unsqueeze(0).contiguous()  # [1, V, 4]
 
         glctx = NVDiffRastRenderer.getGlctx(camera.device)
