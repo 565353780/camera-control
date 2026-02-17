@@ -102,9 +102,24 @@ class DepthChannel(object):
             print('\t depth_file_path:', depth_file_path)
             return False
 
-        depth = np.load(depth_file_path)
+        data = np.load(depth_file_path)
 
-        return self.loadDepth(depth)
+        if data.ndim > 2:
+            if data.shape[2] > 2:
+                print('[ERROR][DepthChannel::loadDepthFile]')
+                print('\t depth file shape valid!')
+                print('\t data.shape:', data.shape)
+                return False
+
+            if data.shape[2] == 2:
+                depth = data[..., 0]
+                conf = data[..., 1]
+
+                return self.loadDepth(depth, conf)
+
+            data = data.unsqueeze(-1)
+
+        return self.loadDepth(data)
 
     def queryPixelPoints(
         self,
