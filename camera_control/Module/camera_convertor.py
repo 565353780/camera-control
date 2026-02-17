@@ -388,6 +388,7 @@ class CameraConvertor(object):
         colmap_data_folder_path: str,
         image_folder_name: str='images',
         mask_folder_name: str='masks',
+        depth_folder_name: str='depths',
     ) -> List[Camera]:
         """
         从 COLMAP 数据目录加载相机列表。
@@ -398,6 +399,7 @@ class CameraConvertor(object):
             colmap_data_folder_path += '/'
         image_folder_path = colmap_data_folder_path + image_folder_name + '/'
         mask_folder_path = colmap_data_folder_path + mask_folder_name + '/'
+        depth_folder_path = colmap_data_folder_path + depth_folder_name + '/'
         camera_intrinsic_file_path = colmap_data_folder_path + 'sparse/0/cameras.txt'
         camera_extrinsic_file_path = colmap_data_folder_path + 'sparse/0/images.txt'
 
@@ -459,8 +461,12 @@ class CameraConvertor(object):
         def _process_one_record(rec):
             """处理单条图像记录，返回 Camera 或 None（失败时）。"""
             camera_id = rec['camera_id']
+            image_filename = rec['name']
+            format = '.' + image_filename.split('.')[-1]
+            image_basename = image_filename.split(format)[0]
+
             if camera_id not in cameras_dict:
-                print('[WARN][CameraConvertor::loadColmapDataFolder] unknown camera_id:', camera_id, 'skip image', rec['name'])
+                print('[WARN][CameraConvertor::loadColmapDataFolder] unknown camera_id:', camera_id, 'skip image', image_filename)
                 return None
             cam_info = cameras_dict[camera_id]
             intrinsic = np.array([
@@ -470,21 +476,29 @@ class CameraConvertor(object):
             ], dtype=np.float64)
             pose = rec['pose']
             camera = Camera.fromColmapPose(pose, intrinsic)
-            image_file_path = os.path.join(image_folder_path, rec['name'])
+
+            image_file_path = image_folder_path + image_filename
             if not camera.loadImageFile(image_file_path):
                 print('[WARN][CameraConvertor::loadColmapDataFolder]')
                 print('\t loadImageFile failed!')
                 print('\t image file path:', image_file_path)
                 return None
 
-            mask_file_path = os.path.join(mask_folder_path, rec['name'])
+            mask_file_path = mask_folder_path + image_filename
             if os.path.exists(mask_file_path):
                 if not camera.loadMaskFile(mask_file_path):
                     print('[WARN][CameraConvertor::loadColmapDataFolder]')
                     print('\t loadMaskFile failed!')
                     print('\t mask file path:', mask_file_path)
 
-            camera.image_id = rec['name']
+            depth_file_path = depth_folder_path + image_basename + '.npy'
+            if os.path.exists(depth_file_path):
+                if not camera.loadDepthFile(depth_file_path):
+                    print('[WARN][CameraConvertor::loadColmapDataFolder]')
+                    print('\t loadDepthFile failed!')
+                    print('\t depth file path:', depth_file_path)
+
+            camera.image_id = image_filename
             return camera
 
         print('[INFO][CameraConvertor::loadColmapDataFolder]')
