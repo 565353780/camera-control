@@ -187,6 +187,10 @@ class DepthChannel(object):
 
         return points, confs, valid_mask
 
+    @property
+    def depth_with_conf(self) -> torch.Tensor:
+        return torch.stack([self.depth, self.conf], dim=-1)  # HxW -> HxWx2
+
     def toDepthVis(
         self,
         depth_min: Optional[float]=None,

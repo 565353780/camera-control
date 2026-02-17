@@ -310,12 +310,25 @@ class CameraConvertor(object):
             rmtree(save_data_folder_path)
 
         image_folder_path = save_data_folder_path + 'images/'
+
         mask_folder_path = save_data_folder_path + 'masks/'
         masked_image_folder_path = save_data_folder_path + 'masked_images/'
+
+        depth_folder_path = save_data_folder_path + 'depths/'
+        depth_vis_folder_path = save_data_folder_path + 'depths_vis/'
+        masked_depth_vis_folder_path = save_data_folder_path + 'masked_depths_vis/'
+
         sparse_folder_path = save_data_folder_path + 'sparse/0/'
+
         os.makedirs(image_folder_path, exist_ok=True)
+
         os.makedirs(mask_folder_path, exist_ok=True)
         os.makedirs(masked_image_folder_path, exist_ok=True)
+
+        os.makedirs(depth_folder_path, exist_ok=True)
+        os.makedirs(depth_vis_folder_path, exist_ok=True)
+        os.makedirs(masked_depth_vis_folder_path, exist_ok=True)
+
         os.makedirs(sparse_folder_path, exist_ok=True)
 
         # 准备cameras.txt内容
@@ -338,30 +351,34 @@ class CameraConvertor(object):
             f"# Number of images: {camera_num}\n",
         ]
 
-        def _process_one_camera(args):
-            i, cam, img_dir, msk_dir, msk_img_dir = args
-            colmap_pose = cam.toColmapPose().cpu().numpy()
-            image_name = f"{i:06d}.png"
-            image_id = i + 1
-            cv2.imwrite(img_dir + image_name, cam.image_cv)
-            cv2.imwrite(msk_dir + image_name, cam.mask_cv)
-            cv2.imwrite(msk_img_dir + image_name, cam.toMaskedImageCV())
-            return (image_id, image_name, colmap_pose)
+        def _process_one_camera(camera_idx):
+            camera = cameras[camera_idx]
+            image_filename = camera.image_id
+            format = '.' + image_filename.split('.')[-1]
+            image_basename = image_filename.split(format)[0]
+
+            colmap_pose = camera.toColmapPose().cpu().numpy()
+
+            cv2.imwrite(image_folder_path + image_filename, camera.image_cv)
+
+            cv2.imwrite(mask_folder_path + image_filename, camera.mask_cv)
+            cv2.imwrite(masked_image_folder_path + image_filename, camera.toMaskedImageCV())
+
+            np.save(depth_folder_path + image_basename + '.npy', camera.depth_with_conf)
+            cv2.imwrite(depth_vis_folder_path + image_filename, camera.toDepthVisCV())
+            cv2.imwrite(masked_depth_vis_folder_path + image_filename, camera.toMaskedDepthVisCV())
+            return (camera_idx, image_filename, colmap_pose)
 
         print('[INFO][MeshRenderer::createColmapDataFolder]')
         print('\t start create colmap data folder...')
-        task_args = [
-            (i, cameras[i], image_folder_path, mask_folder_path, masked_image_folder_path)
-            for i in range(camera_num)
-        ]
         max_workers = min(32, (os.cpu_count() or 4) + 4)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            results = list(tqdm(executor.map(_process_one_camera, task_args), total=camera_num, desc='colmap data'))
+            results = list(tqdm(executor.map(_process_one_camera, range(camera_num)), total=camera_num, desc='colmap data'))
 
-        for (image_id, image_name, colmap_pose) in results:
+        for (camera_idx, image_filename, colmap_pose) in results:
             images_txt_lines.append(
-                f"{image_id} {colmap_pose[0]:.10f} {colmap_pose[1]:.10f} {colmap_pose[2]:.10f} {colmap_pose[3]:.10f} "
-                f"{colmap_pose[4]:.10f} {colmap_pose[5]:.10f} {colmap_pose[6]:.10f} 1 {image_name}\n"
+                f"{camera_idx + 1} {colmap_pose[0]:.10f} {colmap_pose[1]:.10f} {colmap_pose[2]:.10f} {colmap_pose[3]:.10f} "
+                f"{colmap_pose[4]:.10f} {colmap_pose[5]:.10f} {colmap_pose[6]:.10f} 1 {image_filename}\n"
             )
             images_txt_lines.append("\n")
 
