@@ -32,14 +32,6 @@ class DepthChannel(object):
             self.ccm = self.ccm.to(dtype=self.dtype, device=self.device)
         return True
 
-    @property
-    def depth_cv(self) -> np.ndarray:
-        return self.toDepthVisCV()
-
-    @property
-    def masked_depth_cv(self) -> np.ndarray:
-        return self.toMaskedDepthVisCV()
-
     def toDepthUV(self) -> torch.Tensor:
         """
         生成 self.depth 每个像素的归一化 UV 坐标 [0,1]，与 camera 的 UV 约定一致。
@@ -191,10 +183,28 @@ class DepthChannel(object):
     def depth_with_conf(self) -> torch.Tensor:
         return torch.stack([self.depth, self.conf], dim=-1)  # HxW -> HxWx2
 
+    def toDepthMask(
+        self,
+        conf_thresh: Optional[float] = None,
+        use_mask: bool=True,
+    ) -> torch.Tensor:
+        if not use_mask or self.mask is None:
+            mask_t = self.valid_depth_mask
+        else:
+            uv = self.toDepthUV()  # (H, W, 2)
+            mask_t = self.sampleMaskAtUV(uv) & self.valid_depth_mask  # (H, W)
+
+        if conf_thresh is not None and self.conf is not None:
+            if self.conf.numel() > 0:
+                thresh_value = torch.quantile(self.conf.float(), conf_thresh, interpolation="lower")
+                mask_t = mask_t & (self.conf >= thresh_value)
+        return mask_t
+
     def toDepthVis(
         self,
         depth_min: Optional[float]=None,
         depth_max: Optional[float]=None,
+        use_mask: bool=True,
     ) -> torch.Tensor:
         """
         将self.depth转换为可视化的RGB格式tensor图像
@@ -205,7 +215,7 @@ class DepthChannel(object):
         assert self.depth is not None
 
         # 获取有效深度值
-        mask = self.valid_depth_mask
+        mask = self.toDepthMask(use_mask=use_mask)
         valid_depth = self.depth[mask]
 
         # 归一化深度值
@@ -224,91 +234,20 @@ class DepthChannel(object):
 
         # 转换为RGB格式（灰度图，三个通道相同）
         depth_vis = torch.stack([depth_normalized] * 3, dim=-1)  # [H, W, 3]
-
         return depth_vis
 
     def toDepthVisCV(
         self,
         depth_min: Optional[float]=None,
         depth_max: Optional[float]=None,
+        use_mask: bool=True,
     ) -> np.ndarray:
-        return toNumpy(self.toDepthVis(depth_min, depth_max) * 255.0, np.uint8)[..., ::-1]
+        return toNumpy(self.toDepthVis(depth_min, depth_max, use_mask) * 255.0, np.uint8)[..., ::-1]
 
-    def toValidDepthMask(
+    def toDepthPoints(
         self,
         conf_thresh: Optional[float] = None,
-    ) -> torch.Tensor:
-        mask_t = self.valid_depth_mask
-
-        if conf_thresh is not None and self.conf is not None:
-            if self.conf.numel() > 0:
-                thresh_value = torch.quantile(self.conf.float(), conf_thresh, interpolation="lower")
-                mask_t = mask_t & (self.conf >= thresh_value)
-        return mask_t
-
-    def toMaskedValidDepthMask(
-        self,
-        conf_thresh: Optional[float] = None,
-    ) -> torch.Tensor:
-        if self.mask is None:
-            mask_t = self.valid_depth_mask
-        else:
-            uv = self.toDepthUV()  # (H, W, 2)
-            mask_t = self.sampleMaskAtUV(uv) & self.valid_depth_mask  # (H, W)
-
-        if conf_thresh is not None and self.conf is not None:
-            if self.conf.numel() > 0:
-                thresh_value = torch.quantile(self.conf.float(), conf_thresh, interpolation="lower")
-                mask_t = mask_t & (self.conf >= thresh_value)
-        return mask_t
-
-    def toMaskedDepth(
-        self,
-    ) -> torch.Tensor:
-        """
-        self.mask 不存在时等价于 toDepthVis；存在时按 depth 每个像素的 UV 在 mask 上
-        最近邻采样得到遮罩，True 处保留深度可视化，False 处填 background_color。
-        同时与 valid_depth_mask 取与：无效深度处仍为背景。
-        background_color: [R, G, B]，默认 0–255，内部会除以 255；输出 tensor 为 [0, 1]。
-        返回: (depth_height, depth_width, 3) tensor
-        """
-        mask_t = self.toMaskedValidDepthMask().unsqueeze(-1)  # (H, W, 1)
-        bg = torch.zeros([1, 1, 3], dtype=self.dtype, device=self.device)
-        out = torch.where(mask_t, self.depth, bg)
-        return out
-
-    def toMaskedDepthVis(
-        self,
-        depth_min: Optional[float] = None,
-        depth_max: Optional[float] = None,
-    ) -> torch.Tensor:
-        """
-        self.mask 不存在时等价于 toDepthVis；存在时按 depth 每个像素的 UV 在 mask 上
-        最近邻采样得到遮罩，True 处保留深度可视化，False 处填 background_color。
-        同时与 valid_depth_mask 取与：无效深度处仍为背景。
-        background_color: [R, G, B]，默认 0–255，内部会除以 255；输出 tensor 为 [0, 1]。
-        返回: (depth_height, depth_width, 3) tensor
-        """
-        depth_vis = self.toDepthVis(depth_min, depth_max)
-        mask_t = self.toMaskedValidDepthMask().unsqueeze(-1)  # (H, W, 1)
-        bg = torch.zeros([1, 1, 3], dtype=self.dtype, device=self.device)
-        out = torch.where(mask_t, depth_vis, bg)
-        return out
-
-    def toMaskedDepthVisCV(
-        self,
-        depth_min: Optional[float] = None,
-        depth_max: Optional[float] = None,
-    ) -> np.ndarray:
-        """toMaskedDepth 的 OpenCV BGR uint8 版本。无 mask 时等价于 toDepthVisCV。"""
-        return toNumpy(
-            self.toMaskedDepthVis(depth_min, depth_max) * 255.0,
-            np.uint8,
-        )[..., ::-1]
-
-    def toMaskedPoints(
-        self,
-        conf_thresh: Optional[float] = None,
+        use_mask: bool=True,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         先从 valid_depth 中按 conf 分位数 conf_thresh 得到置信度阈值并筛选；
@@ -317,7 +256,7 @@ class DepthChannel(object):
         conf_thresh=None 表示不做置信度筛选；conf_thresh=0.8 表示保留 conf 处于 80% 分位及以上的点。
         """
         assert self.ccm is not None
-        mask_t = self.toMaskedValidDepthMask(conf_thresh)
+        mask_t = self.toDepthMask(conf_thresh, use_mask)
         points = self.ccm[mask_t]  # (N, 3)
         confs = (
             self.conf[mask_t]
