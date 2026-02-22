@@ -208,13 +208,10 @@ class CameraConvertor(object):
 
     @staticmethod
     def _process_camera_for_pcd(camera: Camera, conf_thresh: float, use_mask: bool):
-        if use_mask:
-            mask = camera.toMaskedValidDepthMask(conf_thresh)
-        else:
-            mask = camera.toValidDepthMask(conf_thresh)
+        mask = camera.toDepthMask(conf_thresh, use_mask)
         image_colors = camera.sampleRGBAtUV(camera.toDepthUV())
         colors = image_colors[mask]
-        points, _ = camera.toMaskedPoints(conf_thresh)
+        points, _ = camera.toDepthPoints(conf_thresh, use_mask)
         return points, colors
 
     @staticmethod
@@ -369,8 +366,8 @@ class CameraConvertor(object):
             cv2.imwrite(masked_image_folder_path + image_filename, camera.toMaskedImageCV())
 
             np.save(depth_folder_path + image_basename + '.npy', camera.depth_with_conf)
-            cv2.imwrite(depth_vis_folder_path + image_filename, camera.toDepthVisCV())
-            cv2.imwrite(masked_depth_vis_folder_path + image_filename, camera.toMaskedDepthVisCV())
+            cv2.imwrite(depth_vis_folder_path + image_filename, camera.toDepthVisCV(use_mask=False))
+            cv2.imwrite(masked_depth_vis_folder_path + image_filename, camera.toDepthVisCV(use_mask=True))
             return (camera_idx, image_filename, colmap_pose)
 
         print('[INFO][MeshRenderer::createColmapDataFolder]')
