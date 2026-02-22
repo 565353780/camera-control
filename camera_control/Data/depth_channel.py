@@ -234,6 +234,18 @@ class DepthChannel(object):
     ) -> np.ndarray:
         return toNumpy(self.toDepthVis(depth_min, depth_max) * 255.0, np.uint8)[..., ::-1]
 
+    def toValidDepthMask(
+        self,
+        conf_thresh: Optional[float] = None,
+    ) -> torch.Tensor:
+        mask_t = self.valid_depth_mask
+
+        if conf_thresh is not None and self.conf is not None:
+            if self.conf.numel() > 0:
+                thresh_value = torch.quantile(self.conf.float(), conf_thresh, interpolation="lower")
+                mask_t = mask_t & (self.conf >= thresh_value)
+        return mask_t
+
     def toMaskedValidDepthMask(
         self,
         conf_thresh: Optional[float] = None,
