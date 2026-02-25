@@ -23,9 +23,9 @@ class CameraConvertor(object):
 
     @staticmethod
     def transformCameras(
-        camera_list: List["Camera"],
+        camera_list: List[Camera],
         world_transform: Union[torch.Tensor, np.ndarray, list],
-    ) -> List["Camera"]:
+    ) -> List[Camera]:
         """
         用给定的 4x4 世界变换矩阵对所有相机的世界位姿进行变换。
 
