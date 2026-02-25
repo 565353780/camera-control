@@ -407,6 +407,7 @@ class CameraConvertor(object):
         image_folder_name: str='images',
         mask_folder_name: str='masks',
         depth_folder_name: str='depths',
+        normal_folder_name: str='normals',
     ) -> List[Camera]:
         """
         从 COLMAP 数据目录加载相机列表。
@@ -418,6 +419,8 @@ class CameraConvertor(object):
         image_folder_path = colmap_data_folder_path + image_folder_name + '/'
         mask_folder_path = colmap_data_folder_path + mask_folder_name + '/'
         depth_folder_path = colmap_data_folder_path + depth_folder_name + '/'
+        normal_folder_path = colmap_data_folder_path + normal_folder_name + '/'
+
         camera_intrinsic_file_path = colmap_data_folder_path + 'sparse/0/cameras.txt'
         camera_extrinsic_file_path = colmap_data_folder_path + 'sparse/0/images.txt'
 
@@ -515,6 +518,13 @@ class CameraConvertor(object):
                     print('[WARN][CameraConvertor::loadColmapDataFolder]')
                     print('\t loadDepthFile failed!')
                     print('\t depth file path:', depth_file_path)
+
+            normal_file_path = normal_folder_path + image_filename
+            if os.path.exists(normal_file_path):
+                if not camera.loadNormalFile(normal_file_path):
+                    print('[WARN][CameraConvertor::loadColmapDataFolder]')
+                    print('\t loadNormalFile failed!')
+                    print('\t normal file path:', normal_file_path)
 
             camera.image_id = image_filename
             return camera
