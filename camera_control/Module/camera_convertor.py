@@ -374,6 +374,9 @@ class CameraConvertor(object):
 
         print('[INFO][MeshRenderer::createColmapDataFolder]')
         print('\t start create colmap data folder...')
+        # 预热 torch.linalg，避免多线程并发触发懒加载导致
+        # "lazy wrapper should be called at most once" 错误
+        torch.linalg.eigh(torch.zeros((1, 1), dtype=cameras[0].dtype, device=cameras[0].device))
         max_workers = min(32, (os.cpu_count() or 4) + 4)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             results = list(tqdm(executor.map(_process_one_camera, range(camera_num)), total=camera_num, desc='colmap data'))
