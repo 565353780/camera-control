@@ -367,7 +367,7 @@ class CameraConvertor(object):
                 cv2.imwrite(masked_image_folder_path + image_filename, camera.toMaskedImageCV())
 
             if camera.depth is not None:
-                np.save(depth_folder_path + image_basename + '.npy', camera.depth_with_conf)
+                np.save(depth_folder_path + image_basename + '.npy', camera.depth_with_conf.cpu().numpy())
                 cv2.imwrite(depth_vis_folder_path + image_filename, camera.toDepthVisCV(use_mask=False))
                 cv2.imwrite(masked_depth_vis_folder_path + image_filename, camera.toDepthVisCV(use_mask=True))
             return (camera_idx, image_filename, colmap_pose)

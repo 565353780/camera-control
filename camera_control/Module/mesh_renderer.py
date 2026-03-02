@@ -72,9 +72,11 @@ class MeshRenderer(object):
                 vertices_tensor=vertices_tensor,
             )
 
-            camera.loadImage(render_image_dict['image'])
+            camera.image_id = f'{i:06d}.png'
 
-            camera.loadNormal(render_normal_dict['normal_camera'])
+            camera.loadImage(render_image_dict['rgb'])
+
+            camera.loadNormal(render_normal_dict['camera'])
 
             camera.loadDepth(render_depth_dict['depth'])
 
@@ -173,7 +175,7 @@ class MeshRenderer(object):
             camera = camera_list[i]
             rgb = camera.image_cv
             depth = camera.depth
-            depth_vis = camera.depth_vis_cv
+            depth_vis = camera.toDepthVisCV()
 
             camera2world = toNumpy(camera.camera2worldCV, np.float32) @ world2cameraCV_global
             intrinsic = toNumpy(camera.intrinsic, np.float32)
