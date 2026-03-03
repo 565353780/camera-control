@@ -1,3 +1,4 @@
+import io
 import os
 import cv2
 import trimesh
@@ -20,6 +21,42 @@ def loadImage(
         return None
 
     return image_data
+
+def loadMeshStream(
+    mesh_stream: io.BytesIO,
+) -> Optional[trimesh.Trimesh]:
+    """
+    从字节流加载三角网格，支持多种格式（包括glb、obj等）
+
+    Args:
+        mesh_stream: 网格数据的 BytesIO 流
+
+    Returns:
+        trimesh.Trimesh对象，如果失败则返回None
+    """
+    try:
+        # trimesh.load 支持 file-like 对象，需将指针复位到开头
+        mesh_stream.seek(0)
+        mesh = trimesh.load(mesh_stream, file_type=None)
+    except Exception as e:
+        print('[ERROR][io::loadMeshStream]')
+        print('\t Failed to load mesh from stream:', e)
+        return None
+
+    if isinstance(mesh, trimesh.Scene):
+        mesh = mesh.to_geometry()
+
+    # 确保是Trimesh类型
+    if not isinstance(mesh, trimesh.Trimesh):
+        print('[ERROR][io::loadMeshStream]')
+        print(f'\t Loaded object is not a Trimesh, got type: {type(mesh)}')
+        return None
+
+    # 计算顶点法线（如果不存在）
+    if not hasattr(mesh, 'vertex_normals') or mesh.vertex_normals is None:
+        mesh.vertex_normals = mesh.vertex_normals  # 这会触发自动计算
+
+    return mesh
 
 def loadMeshFile(
     mesh_file_path: str,
