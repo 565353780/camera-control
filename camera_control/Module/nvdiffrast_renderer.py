@@ -51,9 +51,10 @@ class NVDiffRastRenderer(object):
 
         face_normals = torch.cross(v1 - v0, v2 - v0, dim=1)  # [F, 3]
 
-        # 合并三次 index_add 为一次：将 faces 展平为 [3F]，face_normals 重复 3 次
+        # faces.reshape(-1) = [f0_v0, f0_v1, f0_v2, f1_v0, ...] 按行交错
+        # 因此 face_normals 也需按行交错：每个 face_normal 重复 3 次，与同一面的 3 个顶点对应
         faces_flat = faces.reshape(-1)  # [3F]
-        face_normals_rep = face_normals.repeat(3, 1)  # [3F, 3]
+        face_normals_rep = face_normals.unsqueeze(1).expand(-1, 3, -1).reshape(-1, 3)  # [3F, 3]
         vertex_normals = torch.zeros_like(vertices)
         vertex_normals.index_add_(0, faces_flat, face_normals_rep)
 
@@ -302,9 +303,11 @@ class NVDiffRastRenderer(object):
 
         vertices_interp, _ = dr.interpolate(vertices.unsqueeze(0), rast_out, faces)
 
-        # 变换到相机坐标系并提取深度，仅对 z 分量操作避免完整矩阵乘法
-        R_col2 = camera.R[:, 2]  # R 的第三列 = R.T 的第三行
-        depth = -(torch.matmul(vertices_interp[0], R_col2) + camera.t[2])  # [H, W]
+        # depth = -(vertices_interp[0] @ R.T + t)[:,:,2]
+        #       = -(vertices_interp[0] @ R.T[:, 2] + t[2])
+        #       = -(vertices_interp[0] @ R[2, :] + t[2])
+        R_row2 = camera.R[2, :]
+        depth = -(torch.matmul(vertices_interp[0], R_row2) + camera.t[2])  # [H, W]
 
         mask = rast_out[0, :, :, 3] > 0
         depth = torch.where(mask, depth, torch.zeros_like(depth))
