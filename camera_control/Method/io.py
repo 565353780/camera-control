@@ -24,6 +24,7 @@ def loadImage(
 
 def loadMeshStream(
     mesh_stream: io.BytesIO,
+    file_type: str,
 ) -> Optional[trimesh.Trimesh]:
     """
     从字节流加载三角网格，支持多种格式（包括glb、obj等）
@@ -37,7 +38,7 @@ def loadMeshStream(
     try:
         # trimesh.load 支持 file-like 对象，需将指针复位到开头
         mesh_stream.seek(0)
-        mesh = trimesh.load(mesh_stream, file_type=None)
+        mesh = trimesh.load(mesh_stream, file_type=file_type)
     except Exception as e:
         print('[ERROR][io::loadMeshStream]')
         print('\t Failed to load mesh from stream:', e)
