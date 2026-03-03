@@ -127,7 +127,7 @@ def sampleCamera(
             height=height,
             fx=fx,
             fy=fy,
-            pos=camera_positions[i],
+            pos=bbox_center + camera_positions[i],
             look_at=bbox_center,
             up=[0, 1, 0],
             dtype=dtype,
