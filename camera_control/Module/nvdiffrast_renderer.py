@@ -142,6 +142,47 @@ class NVDiffRastRenderer(object):
         return vertices, faces, vertex_normals, rast_out, rast_out_db, glctx, vertices_clip
 
     @staticmethod
+    def renderMask(
+        mesh: Union[trimesh.Trimesh, trimesh.Scene],
+        camera: Camera,
+        vertices_tensor: Optional[torch.Tensor] = None,
+        enable_antialias: bool = True,
+    ) -> dict:
+        """
+        渲染二值mask图
+
+        Args:
+            mesh: trimesh.Trimesh或trimesh.Scene对象
+            camera: Camera对象
+            vertices_tensor: 可选的顶点tensor；若提供则作为渲染用顶点参与梯度传播
+            enable_antialias: 是否启用抗锯齿（对梯度流至关重要），默认True
+
+        Returns:
+            dict包含:
+                - mask: [H, W] 二值mask (float32, 物体区域为1, 背景为0)
+                - rgb: [H, W, 3] mask可视化图像 (RGB格式, float32 tensor, 物体白色背景黑色)
+                - rasterize_output: [H, W, 4] rasterize输出
+                - bary_derivs: [H, W, 4] 重心坐标导数
+        """
+        vertices, faces, vertex_normals, rast_out, rast_out_db, glctx, vertices_clip = NVDiffRastRenderer._rasterize(
+            mesh, camera, vertices_tensor
+        )
+
+        mask = (rast_out[0, :, :, 3] > 0).float()  # [H, W]
+
+        image = mask.unsqueeze(0).unsqueeze(-1).expand(1, -1, -1, 3)  # [1, H, W, 3]
+
+        if enable_antialias:
+            image = dr.antialias(image.contiguous(), rast_out, vertices_clip, faces)
+
+        return {
+            'mask': image[0, :, :, 0],  # [H, W] float32
+            'rgb': image[0],  # [H, W, 3] RGB tensor
+            'rasterize_output': rast_out[0],  # [H, W, 4]
+            'bary_derivs': rast_out_db[0] if rast_out_db is not None else torch.zeros_like(rast_out[0]),
+        }
+
+    @staticmethod
     def renderVertexColor(
         mesh: Union[trimesh.Trimesh, trimesh.Scene],
         camera: Camera,
