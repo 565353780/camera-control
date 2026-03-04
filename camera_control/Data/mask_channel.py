@@ -72,6 +72,6 @@ class MaskChannel(object):
         Mh, Mw = self.mask.shape[0], self.mask.shape[1]
         u = uv_grid[..., 0]
         v = uv_grid[..., 1]
-        idx_w = (u * (Mw - 1)).round().long().clamp(0, Mw - 1)
-        idx_h = ((1.0 - v) * (Mh - 1)).round().long().clamp(0, Mh - 1)
+        idx_w = (u * Mw - 0.5).round().long().clamp(0, Mw - 1)
+        idx_h = ((1.0 - v) * Mh - 0.5).round().long().clamp(0, Mh - 1)
         return self.mask[idx_h, idx_w]

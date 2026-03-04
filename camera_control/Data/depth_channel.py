@@ -27,21 +27,21 @@ class DepthChannel(object):
         if self.conf is not None:
             self.conf = self.conf.to(dtype=self.dtype, device=self.device)
         if self.valid_depth_mask is not None:
-            self.valid_depth_mask = self.valid_depth_mask.to(dtype=self.dtype, device=self.device)
+            self.valid_depth_mask = self.valid_depth_mask.to(dtype=torch.bool, device=self.device)
         if self.ccm is not None:
             self.ccm = self.ccm.to(dtype=self.dtype, device=self.device)
         return True
 
     def toDepthUV(self) -> torch.Tensor:
         """
-        生成 self.depth 每个像素的归一化 UV 坐标 [0,1]，与 camera 的 UV 约定一致。
+        生成 self.depth 每个像素中心的归一化 UV 坐标 [0,1]，与 camera 的 UV 约定一致。
         不依赖 camera 的 width/height，仅用 depth 的宽高生成网格。
         返回: (depth_height, depth_width, 2)
         """
         w = max(self.depth_width, 1)
         h = max(self.depth_height, 1)
-        u = torch.arange(w, dtype=self.dtype, device=self.device) / max(w - 1, 1)
-        v = torch.arange(h, dtype=self.dtype, device=self.device) / max(h - 1, 1)
+        u = (torch.arange(w, dtype=self.dtype, device=self.device) + 0.5) / w
+        v = (torch.arange(h, dtype=self.dtype, device=self.device) + 0.5) / h
         uu, vv = torch.meshgrid(u, v, indexing='xy')  # [depth_height, depth_width]
         vv_new = 1.0 - vv  # 左下角为 (0,0)，v 向上增大，与 camera UV 一致
         uv = torch.stack([uu, vv_new], dim=-1)  # (depth_height, depth_width, 2)
@@ -156,11 +156,9 @@ class DepthChannel(object):
         query_uv_flat = query_uv_tensor.reshape(-1, 2)  # (N, 2)
 
         # 在 depth 网格上由归一化 UV 得到最近像素（UV 与 camera 一致，v=0 左下）
-        u_pixel = query_uv_flat[:, 0] * (self.depth_width - 1) if self.depth_width > 1 else torch.zeros_like(query_uv_flat[:, 0])
-        v_pixel = (1.0 - query_uv_flat[:, 1]) * (self.depth_height - 1) if self.depth_height > 1 else torch.zeros_like(query_uv_flat[:, 1])  # UV v 向上，grid 行向下
-
-        u_nearest = u_pixel.round().long().clamp(0, self.depth_width - 1)
-        v_nearest = v_pixel.round().long().clamp(0, self.depth_height - 1)
+        # 像素中心约定: uv = (pixel + 0.5) / N, 反向: pixel = floor(uv * N)
+        u_nearest = (query_uv_flat[:, 0] * self.depth_width - 0.5).round().long().clamp(0, self.depth_width - 1)
+        v_nearest = ((1.0 - query_uv_flat[:, 1]) * self.depth_height - 0.5).round().long().clamp(0, self.depth_height - 1)
 
         # 从depth map获取最近像素的depth值
         depth_values = self.depth[v_nearest, u_nearest]  # (N,)
@@ -188,7 +186,7 @@ class DepthChannel(object):
         conf_thresh: Optional[float] = None,
         use_mask: bool=True,
     ) -> torch.Tensor:
-        if not use_mask or self.mask is None:
+        if not use_mask or getattr(self, "mask", None) is None:
             mask_t = self.valid_depth_mask
         else:
             uv = self.toDepthUV()  # (H, W, 2)

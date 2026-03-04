@@ -90,7 +90,7 @@ class Camera(
 
         uv[:, 1] = 1.0 - uv[:, 1]
 
-        pixels = uv * np.array([width, height], dtype=np.float64)
+        pixels = uv * np.array([width, height], dtype=np.float64) - 0.5
 
         R, t, K = solve_and_refine(
             points,
@@ -183,9 +183,9 @@ class Camera(
         u_pixel = self.fx * x / (-z_safe) + self.cx
         v_pixel = self.fy * y / (-z_safe) + self.cy
 
-        # UV坐标归一化：原点在(0, 0)左下角
-        u = u_pixel / self.width
-        v = v_pixel / self.height
+        # UV坐标归一化：原点在(0, 0)左下角，像素中心约定 uv = (pixel + 0.5) / N
+        u = (u_pixel + 0.5) / self.width
+        v = (v_pixel + 0.5) / self.height
 
         # 将无效点标记为NaN
         u = torch.where(invalid_mask, torch.full_like(u, float('nan')), u)
@@ -270,9 +270,9 @@ class Camera(
             print('\t depth has more dimensions than uv (excluding last dim)!')
             return torch.empty(0, 3, dtype=self.dtype, device=self.device)
 
-        # 将UV坐标（范围[0,1]）转换为像素坐标
-        u_pixel = uv[..., 0] * self.width
-        v_pixel = uv[..., 1] * self.height
+        # 将UV坐标（范围[0,1]）转换为像素坐标，像素中心约定 pixel = uv * N - 0.5
+        u_pixel = uv[..., 0] * self.width - 0.5
+        v_pixel = uv[..., 1] * self.height - 0.5
 
         # 反投影到相机坐标系
         # 投影公式：u_pixel = fx * X / (-Z) + cx

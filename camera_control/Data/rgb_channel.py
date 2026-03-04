@@ -58,11 +58,13 @@ class RGBChannel(object):
 
     def toImageUV(self) -> torch.Tensor:
         """
-        生成每个像素的归一化UV坐标，原点在左下角，u向右，v向上。
+        生成每个像素中心的归一化UV坐标，原点在左下角，u向右，v向上。
         返回: torch.Tensor, shape (height, width, 2), dtype为self.dtype, device为self.device
         """
-        u = torch.arange(self.width, dtype=self.dtype, device=self.device) / (self.width - 1.0)
-        v = torch.arange(self.height, dtype=self.dtype, device=self.device) / (self.height - 1.0)
+        w = max(self.width, 1)
+        h = max(self.height, 1)
+        u = (torch.arange(w, dtype=self.dtype, device=self.device) + 0.5) / w
+        v = (torch.arange(h, dtype=self.dtype, device=self.device) + 0.5) / h
 
         uu, vv = torch.meshgrid(u, v, indexing='xy')  # uu/vv shape: [height, width]
         vv_new = 1.0 - vv  # [height, width], 左下角为0,0，v向上增大
@@ -109,6 +111,6 @@ class RGBChannel(object):
         Mh, Mw = self.image.shape[0], self.image.shape[1]
         u = uv_grid[..., 0]
         v = uv_grid[..., 1]
-        idx_w = (u * (Mw - 1)).round().long().clamp(0, Mw - 1)
-        idx_h = ((1.0 - v) * (Mh - 1)).round().long().clamp(0, Mh - 1)
+        idx_w = (u * Mw - 0.5).round().long().clamp(0, Mw - 1)
+        idx_h = ((1.0 - v) * Mh - 0.5).round().long().clamp(0, Mh - 1)
         return self.image[idx_h, idx_w]

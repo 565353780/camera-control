@@ -44,13 +44,13 @@ class NormalChannel(object):
 
     def toNormalUV(self) -> torch.Tensor:
         """
-        生成 self.normal 每个像素的归一化 UV [0,1]，与 camera 的 UV 约定一致。
+        生成 self.normal 每个像素中心的归一化 UV [0,1]，与 camera 的 UV 约定一致。
         返回: (H, W, 2) tensor，H/W 来自 self.normal.shape[:2]。
         """
         assert self.normal is not None
         h, w = self.normal.shape[0], self.normal.shape[1]
-        u = torch.arange(w, dtype=self.dtype, device=self.device) / max(w - 1, 1)
-        v = torch.arange(h, dtype=self.dtype, device=self.device) / max(h - 1, 1)
+        u = (torch.arange(w, dtype=self.dtype, device=self.device) + 0.5) / max(w, 1)
+        v = (torch.arange(h, dtype=self.dtype, device=self.device) + 0.5) / max(h, 1)
         uu, vv = torch.meshgrid(u, v, indexing='xy')
         vv_new = 1.0 - vv  # 左下角为 (0,0)，v 向上
         uv = torch.stack([uu, vv_new], dim=-1)
