@@ -339,7 +339,7 @@ class NVDiffRastRenderer(object):
         }
 
     @staticmethod
-    def renderNormal(
+    def renderVertexNormal(
         mesh: Union[trimesh.Trimesh, trimesh.Scene],
         camera: Camera,
         bg_color: list = [255, 255, 255],
@@ -347,7 +347,7 @@ class NVDiffRastRenderer(object):
         enable_antialias: bool = True,
     ) -> dict:
         """
-        渲染法向图
+        渲染顶点法向图（平滑着色），法线在面内通过重心插值平滑过渡。
 
         Returns:
             dict: world [H,W,3], camera [H,W,3], rgb_world [H,W,3], rgb_camera [H,W,3],
@@ -371,7 +371,6 @@ class NVDiffRastRenderer(object):
         normals_world_vis = torch.where(mask_4d, normals_world_mapped, bg.expand_as(normals_world_mapped))
         normals_camera_vis = torch.where(mask_4d, normals_camera_mapped, bg.expand_as(normals_camera_mapped))
 
-        # 合并两次 antialias 为一次（6 通道），减少一次 kernel launch
         if enable_antialias:
             combined = torch.cat([normals_world_vis, normals_camera_vis], dim=-1)  # [1, H, W, 6]
             combined = dr.antialias(combined.contiguous(), rast_out, vertices_clip, faces)
@@ -386,3 +385,99 @@ class NVDiffRastRenderer(object):
             'rasterize_output': rast_out[0],
             'bary_derivs': rast_out_db[0] if rast_out_db is not None else torch.zeros_like(rast_out[0]),
         }
+
+    @staticmethod
+    def renderFaceNormal(
+        mesh: Union[trimesh.Trimesh, trimesh.Scene],
+        camera: Camera,
+        bg_color: list = [255, 255, 255],
+        vertices_tensor: Optional[torch.Tensor] = None,
+        enable_antialias: bool = True,
+    ) -> dict:
+        """
+        渲染面法向图（flat 着色），每个三角面内法线恒定，面与面之间有明显棱角。
+
+        通过将面法线复制到每个顶点并重建索引，使 nvdiffrast 插值后仍保持面内法线一致。
+
+        Returns:
+            dict: world [H,W,3], camera [H,W,3], rgb_world [H,W,3], rgb_camera [H,W,3],
+                  rasterize_output [H,W,4], bary_derivs [H,W,4]
+        """
+        if vertices_tensor is not None:
+            vertices = vertices_tensor
+        else:
+            vertices = toTensor(mesh.vertices, torch.float32, camera.device)
+
+        faces = toTensor(mesh.faces, torch.int32, camera.device)
+
+        v0 = vertices[faces[:, 0]]  # [F, 3]
+        v1 = vertices[faces[:, 1]]
+        v2 = vertices[faces[:, 2]]
+
+        face_normals = torch.cross(v1 - v0, v2 - v0, dim=1)  # [F, 3]
+        face_normals = torch.nn.functional.normalize(face_normals, dim=1, eps=1e-8)
+
+        # 每个面的法线复制 3 份给该面的 3 个顶点，构造 flat 属性数组 [F*3, 3]
+        flat_normals = face_normals.unsqueeze(1).expand(-1, 3, -1).reshape(-1, 3)
+        flat_pos_idx = torch.arange(
+            faces.shape[0] * 3, device=faces.device, dtype=torch.int32
+        ).reshape(-1, 3)
+
+        # 同样需要将顶点坐标按面展开，使 clip 坐标与 flat_pos_idx 对齐
+        flat_vertices = torch.cat([v0, v1, v2], dim=1).reshape(-1, 3)  # [F*3, 3]
+
+        vertices_homo = torch.cat([
+            flat_vertices,
+            torch.ones((flat_vertices.shape[0], 1), dtype=torch.float32, device=camera.device),
+        ], dim=1)
+
+        mvp = camera.getWorld2NVDiffRast()
+        vertices_clip = torch.matmul(vertices_homo, mvp.T).unsqueeze(0).contiguous()
+
+        glctx = NVDiffRastRenderer.getGlctx(camera.device)
+        rast_out, rast_out_db = dr.rasterize(
+            glctx, vertices_clip, flat_pos_idx,
+            resolution=[camera.height, camera.width],
+        )
+
+        normals_interp, _ = dr.interpolate(flat_normals.unsqueeze(0), rast_out, flat_pos_idx)
+        normals_world = torch.nn.functional.normalize(normals_interp, dim=-1, eps=1e-8)
+
+        normals_camera = torch.matmul(normals_world, camera.R.T)
+
+        normals_world_mapped = normals_world * 0.5 + 0.5
+        normals_camera_mapped = normals_camera * 0.5 + 0.5
+
+        mask_4d = rast_out[:, :, :, 3:4] > 0  # [1, H, W, 1]
+        bg = toTensor(bg_color[:3], torch.float32, camera.device) / 255.0
+        bg = bg.view(1, 1, 1, 3)
+        normals_world_vis = torch.where(mask_4d, normals_world_mapped, bg.expand_as(normals_world_mapped))
+        normals_camera_vis = torch.where(mask_4d, normals_camera_mapped, bg.expand_as(normals_camera_mapped))
+
+        if enable_antialias:
+            combined = torch.cat([normals_world_vis, normals_camera_vis], dim=-1)  # [1, H, W, 6]
+            combined = dr.antialias(combined.contiguous(), rast_out, vertices_clip, flat_pos_idx)
+            normals_world_vis = combined[:, :, :, :3]
+            normals_camera_vis = combined[:, :, :, 3:]
+
+        return {
+            'world': normals_world[0],
+            'camera': normals_camera[0],
+            'rgb_world': normals_world_vis[0],
+            'rgb_camera': normals_camera_vis[0],
+            'rasterize_output': rast_out[0],
+            'bary_derivs': rast_out_db[0] if rast_out_db is not None else torch.zeros_like(rast_out[0]),
+        }
+
+    @staticmethod
+    def renderNormal(
+        mesh: Union[trimesh.Trimesh, trimesh.Scene],
+        camera: Camera,
+        bg_color: list = [255, 255, 255],
+        vertices_tensor: Optional[torch.Tensor] = None,
+        enable_antialias: bool = True,
+    ) -> dict:
+        """向后兼容别名，等价于 renderVertexNormal。"""
+        return NVDiffRastRenderer.renderVertexNormal(
+            mesh, camera, bg_color, vertices_tensor, enable_antialias,
+        )
