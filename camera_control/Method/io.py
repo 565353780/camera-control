@@ -3,7 +3,8 @@ import os
 import cv2
 import trimesh
 import numpy as np
-from typing import Optional
+
+from typing import Optional, Union
 
 
 def loadImage(
@@ -22,74 +23,54 @@ def loadImage(
 
     return image_data
 
+def postProcessMesh(mesh: Union[trimesh.Trimesh, trimesh.Scene],
+) -> Optional[trimesh.Trimesh]:
+    if isinstance(mesh, trimesh.Scene):
+        mesh = mesh.to_geometry()
+
+    if not isinstance(mesh, trimesh.Trimesh):
+        print('[ERROR][io::postProcessMesh]')
+        print(f'\t Loaded object is not a Trimesh, got type: {type(mesh)}')
+        return None
+
+    if not hasattr(mesh, 'vertex_normals') or mesh.vertex_normals is None:
+        mesh.vertex_normals = mesh.vertex_normals
+
+    return mesh
+
 def loadMeshStream(
     mesh_stream: io.BytesIO,
     file_type: str,
 ) -> Optional[trimesh.Trimesh]:
-    """
-    从字节流加载三角网格，支持多种格式（包括glb、obj等）
-
-    Args:
-        mesh_stream: 网格数据的 BytesIO 流
-
-    Returns:
-        trimesh.Trimesh对象，如果失败则返回None
-    """
     try:
-        # trimesh.load 支持 file-like 对象，需将指针复位到开头
         mesh_stream.seek(0)
-        mesh = trimesh.load(mesh_stream, file_type=file_type)
+        mesh = trimesh.load(mesh_stream, file_type=file_type, process=False)
     except Exception as e:
         print('[ERROR][io::loadMeshStream]')
         print('\t Failed to load mesh from stream:', e)
         return None
 
-    if isinstance(mesh, trimesh.Scene):
-        mesh = mesh.to_geometry()
-
-    # 确保是Trimesh类型
-    if not isinstance(mesh, trimesh.Trimesh):
+    mesh = postProcessMesh(mesh)
+    if mesh is None:
         print('[ERROR][io::loadMeshStream]')
-        print(f'\t Loaded object is not a Trimesh, got type: {type(mesh)}')
-        return None
-
-    # 计算顶点法线（如果不存在）
-    if not hasattr(mesh, 'vertex_normals') or mesh.vertex_normals is None:
-        mesh.vertex_normals = mesh.vertex_normals  # 这会触发自动计算
+        print('\t postProcessMesh failed!')
 
     return mesh
 
 def loadMeshFile(
     mesh_file_path: str,
 ) -> Optional[trimesh.Trimesh]:
-    """
-    加载三角网格文件，支持多种格式（包括glb、obj等）
-
-    Args:
-        mesh_file_path: 网格文件路径
-        force_merge: 当加载的是Scene时，是否强制合并为单个Trimesh（默认True）
-
-    Returns:
-        trimesh.Trimesh对象，如果失败则返回None
-    """
     if not os.path.exists(mesh_file_path):
         print('[ERROR][io::loadMeshFile]')
         print('\t mesh file not exist!')
         print('\t mesh_file_path:', mesh_file_path)
         return None
 
-    mesh = trimesh.load(mesh_file_path)
-    if isinstance(mesh, trimesh.Scene):
-        mesh = mesh.to_geometry()
+    mesh = trimesh.load(mesh_file_path, process=False)
 
-    # 确保是Trimesh类型
-    if not isinstance(mesh, trimesh.Trimesh):
+    mesh = postProcessMesh(mesh)
+    if mesh is None:
         print('[ERROR][io::loadMeshFile]')
-        print(f'\t Loaded object is not a Trimesh, got type: {type(mesh)}')
-        return None
-
-    # 计算顶点法线（如果不存在）
-    if not hasattr(mesh, 'vertex_normals') or mesh.vertex_normals is None:
-        mesh.vertex_normals = mesh.vertex_normals  # 这会触发自动计算
+        print('\t postProcessMesh failed!')
 
     return mesh
