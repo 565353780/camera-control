@@ -60,47 +60,16 @@ class NVDiffRastRenderer(object):
         return vertex_normals
 
     @staticmethod
-    def _computeFaceNormalAttrs(
-        vertices: torch.Tensor,
-        faces: torch.Tensor,
-    ) -> tuple:
-        """
-        构造面法线的 flat 属性数组，使 nvdiffrast 插值后每个三角面内法线恒定。
-
-        Args:
-            vertices: [V, 3]
-            faces: [F, 3] int32
-        Returns:
-            flat_normals: [F*3, 3] 每个面的法线重复 3 次
-            flat_pos_idx: [F, 3] int32 重新编号的面索引 (0..F*3-1)
-            flat_vertices: [F*3, 3] 按面展开的顶点坐标
-        """
-        v0 = vertices[faces[:, 0]]
-        v1 = vertices[faces[:, 1]]
-        v2 = vertices[faces[:, 2]]
-
-        face_normals = torch.cross(v1 - v0, v2 - v0, dim=1)
-        face_normals = torch.nn.functional.normalize(face_normals, dim=1, eps=1e-8)
-
-        flat_normals = face_normals.unsqueeze(1).expand(-1, 3, -1).reshape(-1, 3)
-        flat_pos_idx = torch.arange(
-            faces.shape[0] * 3, device=faces.device, dtype=torch.int32
-        ).reshape(-1, 3)
-        flat_vertices = torch.cat([v0, v1, v2], dim=1).reshape(-1, 3)
-
-        return flat_normals, flat_pos_idx, flat_vertices
-
-    @staticmethod
     def _rasterize(
         mesh: Union[trimesh.Trimesh, trimesh.Scene],
         camera: Camera,
         vertices_tensor: Optional[torch.Tensor] = None,
-    ) -> tuple:
+    ) -> dict:
         """
-        执行基础光栅化。
+        执行基础光栅化，返回可复用的光栅化结果字典。
 
         Returns:
-            tuple: (vertices, faces, rast_out, rast_out_db, vertices_clip)
+            dict: {vertices, faces, rast_out, rast_out_db, vertices_clip}
         """
         if vertices_tensor is not None:
             vertices = vertices_tensor
@@ -123,7 +92,13 @@ class NVDiffRastRenderer(object):
             resolution=[camera.height, camera.width]
         )
 
-        return vertices, faces, rast_out, rast_out_db, vertices_clip
+        return {
+            'vertices': vertices,
+            'faces': faces,
+            'rast_out': rast_out,
+            'rast_out_db': rast_out_db,
+            'vertices_clip': vertices_clip,
+        }
 
     @staticmethod
     def _applyBackground(
@@ -145,6 +120,7 @@ class NVDiffRastRenderer(object):
         camera: Camera,
         vertices_tensor: Optional[torch.Tensor] = None,
         enable_antialias: bool = True,
+        rasterize_dict: Optional[dict] = None,
     ) -> dict:
         """
         渲染二值mask图
@@ -152,9 +128,14 @@ class NVDiffRastRenderer(object):
         Returns:
             dict: mask [H,W], rgb [H,W,3], rasterize_output [H,W,4], bary_derivs [H,W,4]
         """
-        vertices, faces, rast_out, rast_out_db, vertices_clip = NVDiffRastRenderer._rasterize(
-            mesh, camera, vertices_tensor
-        )
+        if rasterize_dict is None:
+            rasterize_dict = NVDiffRastRenderer._rasterize(mesh, camera, vertices_tensor)
+
+        vertices = rasterize_dict['vertices']
+        faces = rasterize_dict['faces']
+        rast_out = rasterize_dict['rast_out']
+        rast_out_db = rasterize_dict['rast_out_db']
+        vertices_clip = rasterize_dict['vertices_clip']
 
         mask_1ch = (rast_out[:, :, :, 3:4] > 0).float()  # [1, H, W, 1]
 
@@ -179,6 +160,7 @@ class NVDiffRastRenderer(object):
         bg_color: list = [255, 255, 255],
         vertices_tensor: Optional[torch.Tensor] = None,
         enable_antialias: bool = True,
+        rasterize_dict: Optional[dict] = None,
     ) -> dict:
         """
         渲染基于法向的 shading 图
@@ -186,9 +168,14 @@ class NVDiffRastRenderer(object):
         Returns:
             dict: rgb [H,W,3], rasterize_output [H,W,4], bary_derivs [H,W,4]
         """
-        vertices, faces, rast_out, rast_out_db, vertices_clip = NVDiffRastRenderer._rasterize(
-            mesh, camera, vertices_tensor
-        )
+        if rasterize_dict is None:
+            rasterize_dict = NVDiffRastRenderer._rasterize(mesh, camera, vertices_tensor)
+
+        vertices = rasterize_dict['vertices']
+        faces = rasterize_dict['faces']
+        rast_out = rasterize_dict['rast_out']
+        rast_out_db = rasterize_dict['rast_out_db']
+        vertices_clip = rasterize_dict['vertices_clip']
 
         if paint_color is not None:
             paint_color_tensor = toTensor(paint_color, torch.float32, camera.device)[:3]
@@ -242,6 +229,7 @@ class NVDiffRastRenderer(object):
         bg_color: list = [255, 255, 255],
         vertices_tensor: Optional[torch.Tensor] = None,
         enable_antialias: bool = True,
+        rasterize_dict: Optional[dict] = None,
     ) -> dict:
         """
         渲染网格纹理颜色（无光照）。无纹理时 fallback 到 renderVertexColor。
@@ -249,7 +237,6 @@ class NVDiffRastRenderer(object):
         Returns:
             dict: rgb [H,W,3], rasterize_output [H,W,4], bary_derivs [H,W,4]
         """
-        # 先检查纹理再决定是否需要光栅化，避免 fallback 时重复光栅化
         use_texture = False
         texture = None
         uvs = None
@@ -283,11 +270,17 @@ class NVDiffRastRenderer(object):
                 mesh=mesh, camera=camera, light_direction=[1, 1, 1],
                 paint_color=paint_color, bg_color=bg_color,
                 vertices_tensor=vertices_tensor, enable_antialias=enable_antialias,
+                rasterize_dict=rasterize_dict,
             )
 
-        vertices, faces, rast_out, rast_out_db, vertices_clip = NVDiffRastRenderer._rasterize(
-            mesh, camera, vertices_tensor
-        )
+        if rasterize_dict is None:
+            rasterize_dict = NVDiffRastRenderer._rasterize(mesh, camera, vertices_tensor)
+
+        vertices = rasterize_dict['vertices']
+        faces = rasterize_dict['faces']
+        rast_out = rasterize_dict['rast_out']
+        rast_out_db = rasterize_dict['rast_out_db']
+        vertices_clip = rasterize_dict['vertices_clip']
 
         uvs_tensor = toTensor(uvs, torch.float32, camera.device)
         texture = texture.unsqueeze(0).to(camera.device)
@@ -319,6 +312,7 @@ class NVDiffRastRenderer(object):
         bg_color: list = [255, 255, 255],
         vertices_tensor: Optional[torch.Tensor] = None,
         enable_antialias: bool = True,
+        rasterize_dict: Optional[dict] = None,
     ) -> dict:
         """
         渲染深度图
@@ -326,9 +320,14 @@ class NVDiffRastRenderer(object):
         Returns:
             dict: depth [H,W], rgb [H,W,3], rasterize_output [H,W,4], bary_derivs [H,W,4]
         """
-        vertices, faces, rast_out, rast_out_db, vertices_clip = NVDiffRastRenderer._rasterize(
-            mesh, camera, vertices_tensor
-        )
+        if rasterize_dict is None:
+            rasterize_dict = NVDiffRastRenderer._rasterize(mesh, camera, vertices_tensor)
+
+        vertices = rasterize_dict['vertices']
+        faces = rasterize_dict['faces']
+        rast_out = rasterize_dict['rast_out']
+        rast_out_db = rasterize_dict['rast_out_db']
+        vertices_clip = rasterize_dict['vertices_clip']
 
         vertices_interp, _ = dr.interpolate(vertices.unsqueeze(0), rast_out, faces)
 
@@ -371,57 +370,59 @@ class NVDiffRastRenderer(object):
         bg_color: list = [255, 255, 255],
         vertices_tensor: Optional[torch.Tensor] = None,
         enable_antialias: bool = True,
+        rasterize_dict: Optional[dict] = None,
     ) -> dict:
         """
         渲染面法向图（flat 着色），每个三角面内法线恒定。
+        使用 rast_out 中的 triangle_id 直接查表面法线，无需重新光栅化。
 
         Returns:
             dict: world [H,W,3], camera [H,W,3], rgb_world [H,W,3], rgb_camera [H,W,3],
                   rasterize_output [H,W,4], bary_derivs [H,W,4]
         """
-        if vertices_tensor is not None:
-            vertices = vertices_tensor
-        else:
-            vertices = toTensor(mesh.vertices, torch.float32, camera.device)
+        if rasterize_dict is None:
+            rasterize_dict = NVDiffRastRenderer._rasterize(mesh, camera, vertices_tensor)
 
-        faces = toTensor(mesh.faces, torch.int32, camera.device)
+        vertices = rasterize_dict['vertices']
+        faces = rasterize_dict['faces']
+        rast_out = rasterize_dict['rast_out']
+        rast_out_db = rasterize_dict['rast_out_db']
+        vertices_clip = rasterize_dict['vertices_clip']
 
-        flat_normals, flat_pos_idx, flat_vertices = NVDiffRastRenderer._computeFaceNormalAttrs(vertices, faces)
+        v0 = vertices[faces[:, 0]]
+        v1 = vertices[faces[:, 1]]
+        v2 = vertices[faces[:, 2]]
+        face_normals = torch.cross(v1 - v0, v2 - v0, dim=1)
+        face_normals = torch.nn.functional.normalize(face_normals, dim=1, eps=1e-8)
 
-        vertices_homo = torch.cat([
-            flat_vertices,
-            torch.ones((flat_vertices.shape[0], 1), dtype=torch.float32, device=camera.device),
-        ], dim=1)
+        # rast_out[..., 3] 是 1-based triangle_id，0 表示背景
+        tri_id = rast_out[0, :, :, 3].long()  # [H, W]
+        mask = tri_id > 0
 
-        mvp = camera.getWorld2NVDiffRast()
-        vertices_clip = torch.matmul(vertices_homo, mvp.T).unsqueeze(0).contiguous()
+        # 添加一行零向量作为背景占位，使 0-index 映射到零法线
+        face_normals_padded = torch.cat([
+            torch.zeros(1, 3, device=face_normals.device, dtype=face_normals.dtype),
+            face_normals,
+        ], dim=0)
 
-        glctx = NVDiffRastRenderer.getGlctx(camera.device)
-        rast_out, rast_out_db = dr.rasterize(
-            glctx, vertices_clip, flat_pos_idx,
-            resolution=[camera.height, camera.width],
-        )
-
-        normals_interp, _ = dr.interpolate(flat_normals.unsqueeze(0), rast_out, flat_pos_idx)
-        normals_world = torch.nn.functional.normalize(normals_interp, dim=-1, eps=1e-8)
-
+        normals_world = face_normals_padded[tri_id]  # [H, W, 3]
         normals_camera = torch.matmul(normals_world, camera.R.T)
 
-        normals_world_mapped = normals_world * 0.5 + 0.5
-        normals_camera_mapped = normals_camera * 0.5 + 0.5
+        normals_world_mapped = (normals_world * 0.5 + 0.5).unsqueeze(0)  # [1, H, W, 3]
+        normals_camera_mapped = (normals_camera * 0.5 + 0.5).unsqueeze(0)
 
         normals_world_vis = NVDiffRastRenderer._applyBackground(normals_world_mapped, rast_out, bg_color, camera.device)
         normals_camera_vis = NVDiffRastRenderer._applyBackground(normals_camera_mapped, rast_out, bg_color, camera.device)
 
         if enable_antialias:
             combined = torch.cat([normals_world_vis, normals_camera_vis], dim=-1)
-            combined = dr.antialias(combined.contiguous(), rast_out, vertices_clip, flat_pos_idx)
+            combined = dr.antialias(combined.contiguous(), rast_out, vertices_clip, faces)
             normals_world_vis = combined[:, :, :, :3]
             normals_camera_vis = combined[:, :, :, 3:]
 
         return {
-            'world': normals_world[0],
-            'camera': normals_camera[0],
+            'world': normals_world,
+            'camera': normals_camera,
             'rgb_world': normals_world_vis[0],
             'rgb_camera': normals_camera_vis[0],
             'rasterize_output': rast_out[0],
