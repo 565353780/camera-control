@@ -66,9 +66,11 @@ class MeshRenderer(object):
 
             camera.loadImage(render_dict['rgb'])
 
-            camera.loadNormal(render_dict['normal_world'])
-
             camera.loadDepth(render_dict['depth'])
+
+            camera.loadNormalWorld(render_dict['normal_world'])
+
+            camera.loadNormalCamera(render_dict['normal_camera'])
 
         return camera_list
 
@@ -99,7 +101,27 @@ class MeshRenderer(object):
             device=device,
         )
 
-        pcd = toPcd(mesh.vertices, mesh.visual.vertex_colors[:, :3])
+        # 处理有/无顶点颜色、纹理等多种情况
+        visual = mesh.visual
+        vertex_colors = None
+
+        # 1. 直接存在 vertex_colors 的情况（ColorVisuals）
+        if hasattr(visual, 'vertex_colors') and visual.vertex_colors is not None:
+            vertex_colors = visual.vertex_colors[:, :3]
+        else:
+            # 2. 纹理可视化（TextureVisuals），尝试烘焙为顶点颜色
+            try:
+                visual_color = visual.to_color()
+                if hasattr(visual_color, 'vertex_colors') and visual_color.vertex_colors is not None:
+                    vertex_colors = visual_color.vertex_colors[:, :3]
+            except Exception:
+                vertex_colors = None
+
+        # 3. 仍然拿不到颜色时，使用白色占位
+        if vertex_colors is None:
+            vertex_colors = np.ones((len(mesh.vertices), 3), dtype=np.uint8) * 255
+
+        pcd = toPcd(mesh.vertices, vertex_colors)
 
         return CameraConvertor.createColmapDataFolder(
             cameras=camera_list,

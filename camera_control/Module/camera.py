@@ -5,7 +5,8 @@ from typing import Union, Optional
 from camera_control.Data.camera import CameraData
 from camera_control.Data.mask_channel import MaskChannel
 from camera_control.Data.rgb_channel import RGBChannel
-from camera_control.Data.normal_channel import NormalChannel
+from camera_control.Data.normal_world_channel import NormalWorldChannel
+from camera_control.Data.normal_camera_channel import NormalCameraChannel
 from camera_control.Data.depth_channel import DepthChannel
 from camera_control.Method.data import toNumpy, toTensor
 from camera_control.Module.camera_refiner import solve_and_refine
@@ -14,8 +15,9 @@ class Camera(
     CameraData,
     MaskChannel,
     RGBChannel,
-    NormalChannel,
     DepthChannel,
+    NormalWorldChannel,
+    NormalCameraChannel,
 ):
     def __init__(
         self,
@@ -49,8 +51,9 @@ class Camera(
         )
         MaskChannel.__init__(self)
         RGBChannel.__init__(self)
-        NormalChannel.__init__(self)
         DepthChannel.__init__(self)
+        NormalWorldChannel.__init__(self)
+        NormalCameraChannel.__init__(self)
         return
 
     @classmethod
@@ -136,7 +139,8 @@ class Camera(
 
         MaskChannel.update(self)
         RGBChannel.update(self)
-        NormalChannel.update(self)
+        NormalWorldChannel.update(self)
+        NormalCameraChannel.update(self)
         DepthChannel.update(self)
         return True
 

@@ -24,9 +24,11 @@ def demo() -> bool:
             save_data_folder_path + 'colmap/',
             camera_num=camera_num,
             camera_dist=0.5,
-            width=518,
-            height=518,
-            bg_color=[0, 0, 0],
+            width=1024,
+            height=1024,
+            fx=1407,
+            fy=1407,
+            bg_color=[255, 255, 255],
             device=device,
         )
  

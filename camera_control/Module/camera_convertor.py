@@ -78,11 +78,9 @@ class CameraConvertor(object):
             # =========================================================
             # Step D: 法线旋转更新
             # =========================================================
-            if getattr(cam, "normal", None) is not None:
-                # 你的 normal 约定为行向量右乘；
-                # SVD 提取出的 R_left 是左乘旋转矩阵，其等价的右乘旋转矩阵正是它的转置 R_left.T
-                cam.normal = (cam.normal @ R_left.T).clone()
-                cam.normal = cam.normal / (torch.linalg.norm(cam.normal, dim=-1, keepdim=True) + 1e-8)
+            if getattr(cam, "normal_world", None) is not None:
+                cam.normal_world = (cam.normal_world @ R_left.T).clone()
+                cam.normal_world = cam.normal_world / (torch.linalg.norm(cam.normal_world, dim=-1, keepdim=True) + 1e-8)
 
         return transformed_list
 
@@ -319,6 +317,14 @@ class CameraConvertor(object):
         depth_vis_folder_path = save_data_folder_path + 'depths_vis/'
         masked_depth_vis_folder_path = save_data_folder_path + 'masked_depths_vis/'
 
+        normal_world_folder_path = save_data_folder_path + 'normal_worlds/'
+        normal_world_vis_folder_path = save_data_folder_path + 'normal_worlds_vis/'
+        masked_normal_world_vis_folder_path = save_data_folder_path + 'masked_normal_worlds_vis/'
+
+        normal_camera_folder_path = save_data_folder_path + 'normal_cameras/'
+        normal_camera_vis_folder_path = save_data_folder_path + 'normal_cameras_vis/'
+        masked_normal_camera_vis_folder_path = save_data_folder_path + 'masked_normal_cameras_vis/'
+
         sparse_folder_path = save_data_folder_path + 'sparse/0/'
 
         os.makedirs(image_folder_path, exist_ok=True)
@@ -329,6 +335,14 @@ class CameraConvertor(object):
         os.makedirs(depth_folder_path, exist_ok=True)
         os.makedirs(depth_vis_folder_path, exist_ok=True)
         os.makedirs(masked_depth_vis_folder_path, exist_ok=True)
+
+        os.makedirs(normal_world_folder_path, exist_ok=True)
+        os.makedirs(normal_world_vis_folder_path, exist_ok=True)
+        os.makedirs(masked_normal_world_vis_folder_path, exist_ok=True)
+
+        os.makedirs(normal_camera_folder_path, exist_ok=True)
+        os.makedirs(normal_camera_vis_folder_path, exist_ok=True)
+        os.makedirs(masked_normal_camera_vis_folder_path, exist_ok=True)
 
         os.makedirs(sparse_folder_path, exist_ok=True)
 
@@ -370,6 +384,17 @@ class CameraConvertor(object):
                 np.save(depth_folder_path + image_basename + '.npy', camera.depth_with_conf.cpu().numpy())
                 cv2.imwrite(depth_vis_folder_path + image_filename, camera.toDepthVisCV(use_mask=False))
                 cv2.imwrite(masked_depth_vis_folder_path + image_filename, camera.toDepthVisCV(use_mask=True))
+
+            if camera.normal_world is not None:
+                np.save(normal_world_folder_path + image_basename + '.npy', camera.normal_world.cpu().numpy())
+                cv2.imwrite(normal_world_vis_folder_path + image_filename, camera.normal_world_cv)
+                cv2.imwrite(masked_normal_world_vis_folder_path + image_filename, camera.toMaskedNormalWorldCV())
+
+            if camera.normal_camera is not None:
+                np.save(normal_camera_folder_path + image_basename + '.npy', camera.normal_camera.cpu().numpy())
+                cv2.imwrite(normal_camera_vis_folder_path + image_filename, camera.normal_camera_cv)
+                cv2.imwrite(masked_normal_camera_vis_folder_path + image_filename, camera.toMaskedNormalCameraCV())
+
             return (camera_idx, image_filename, colmap_pose)
 
         print('[INFO][MeshRenderer::createColmapDataFolder]')
@@ -526,9 +551,9 @@ class CameraConvertor(object):
 
             normal_file_path = normal_folder_path + image_filename
             if os.path.exists(normal_file_path):
-                if not camera.loadNormalFile(normal_file_path):
+                if not camera.loadNormalWorldFile(normal_file_path):
                     print('[WARN][CameraConvertor::loadColmapDataFolder]')
-                    print('\t loadNormalFile failed!')
+                    print('\t loadNormalWorldFile failed!')
                     print('\t normal file path:', normal_file_path)
 
             camera.image_id = image_filename
