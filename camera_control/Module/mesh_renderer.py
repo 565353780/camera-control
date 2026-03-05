@@ -51,32 +51,10 @@ class MeshRenderer(object):
         for i in trange(len(camera_list)):
             camera = camera_list[i]
 
-            render_mask_dict = NVDiffRastRenderer.renderMask(
+            render_dict = NVDiffRastRenderer.render(
                 mesh=mesh,
                 camera=camera,
-                vertices_tensor=vertices_tensor,
-                enable_antialias=True,
-            )
-
-            render_image_dict = NVDiffRastRenderer.renderTexture(
-                mesh=mesh,
-                camera=camera,
-                bg_color=bg_color,
-                vertices_tensor=vertices_tensor,
-                enable_antialias=True,
-            )
-
-            render_normal_dict = NVDiffRastRenderer.renderNormal(
-                mesh=mesh,
-                camera=camera,
-                bg_color=bg_color,
-                vertices_tensor=vertices_tensor,
-                enable_antialias=True,
-            )
-
-            render_depth_dict = NVDiffRastRenderer.renderDepth(
-                mesh=mesh,
-                camera=camera,
+                render_types=['mask', 'rgb', 'depth', 'normal'],
                 bg_color=bg_color,
                 vertices_tensor=vertices_tensor,
                 enable_antialias=True,
@@ -84,13 +62,13 @@ class MeshRenderer(object):
 
             camera.image_id = f'{i:06d}.png'
 
-            camera.loadMask(render_mask_dict['mask'])
+            camera.loadMask(render_dict['mask'])
 
-            camera.loadImage(render_image_dict['rgb'])
+            camera.loadImage(render_dict['rgb'])
 
-            camera.loadNormal(render_normal_dict['camera'])
+            camera.loadNormal(render_dict['normal_world'])
 
-            camera.loadDepth(render_depth_dict['depth'])
+            camera.loadDepth(render_dict['depth'])
 
         return camera_list
 
