@@ -72,8 +72,7 @@ def _sanitize_mesh(
         return mesh
 
     if faces.shape[0] == 0:
-        if print_progress:
-            print('[ERROR][io::_sanitize_mesh] 0 faces remaining after cleanup')
+        print('[ERROR][io::_sanitize_mesh] 0 faces remaining after cleanup')
         return mesh
 
     # --- 4. Compact: remove unreferenced vertices & remap face indices ---
