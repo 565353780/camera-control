@@ -23,7 +23,10 @@ def loadImage(
 
     return image_data
 
-def _sanitize_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+def _sanitize_mesh(
+    mesh: trimesh.Trimesh,
+    print_progress: bool=False,
+) -> trimesh.Trimesh:
     """Remove degenerate faces, non-finite vertices, and unreferenced vertices
     so that downstream CUDA renderers (nvdiffrast) never receive bad geometry.
 
@@ -40,7 +43,8 @@ def _sanitize_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
     # --- 1. Mark non-finite vertices and remove faces that reference them ---
     vert_valid = np.isfinite(verts).all(axis=1)
     if not vert_valid.all():
-        print(f'[WARN][io::_sanitize_mesh] {(~vert_valid).sum()} non-finite vertices')
+        if print_progress:
+            print(f'[WARN][io::_sanitize_mesh] {(~vert_valid).sum()} non-finite vertices')
         face_ok = vert_valid[faces].all(axis=1)
         faces = faces[face_ok]
 
@@ -48,7 +52,8 @@ def _sanitize_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
     oob = (faces < 0) | (faces >= verts.shape[0])
     if oob.any():
         bad = oob.any(axis=1)
-        print(f'[WARN][io::_sanitize_mesh] {bad.sum()} faces with out-of-bound indices')
+        if print_progress:
+            print(f'[WARN][io::_sanitize_mesh] {bad.sum()} faces with out-of-bound indices')
         faces = faces[~bad]
 
     # --- 3. Remove degenerate faces (any two vertex indices equal) ---
@@ -58,7 +63,8 @@ def _sanitize_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
         | (faces[:, 0] == faces[:, 2])
     )
     if degen.any():
-        print(f'[WARN][io::_sanitize_mesh] {degen.sum()} degenerate faces')
+        if print_progress:
+            print(f'[WARN][io::_sanitize_mesh] {degen.sum()} degenerate faces')
         faces = faces[~degen]
 
     # --- fast path: nothing was removed ---
@@ -66,7 +72,8 @@ def _sanitize_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
         return mesh
 
     if faces.shape[0] == 0:
-        print('[ERROR][io::_sanitize_mesh] 0 faces remaining after cleanup')
+        if print_progress:
+            print('[ERROR][io::_sanitize_mesh] 0 faces remaining after cleanup')
         return mesh
 
     # --- 4. Compact: remove unreferenced vertices & remap face indices ---
@@ -110,11 +117,12 @@ def _sanitize_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
                     new_visual_kwargs['material'] = mesh.visual.material
                 new_mesh.visual = trimesh.visual.TextureVisuals(**new_visual_kwargs)
             else:
-                print(
-                    f'[WARN][io::_sanitize_mesh] UV count ({uv.shape[0]}) != '
-                    f'vertex count ({n_verts_orig}), cannot remap UV. '
-                    f'Texture will be lost.'
-                )
+                if print_progress:
+                    print(
+                        f'[WARN][io::_sanitize_mesh] UV count ({uv.shape[0]}) != '
+                        f'vertex count ({n_verts_orig}), cannot remap UV. '
+                        f'Texture will be lost.'
+                    )
                 if hasattr(mesh.visual, 'material') and mesh.visual.material is not None:
                     try:
                         new_mesh.visual = trimesh.visual.TextureVisuals(
@@ -126,16 +134,19 @@ def _sanitize_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
 
     n_removed = n_faces_orig - faces.shape[0]
     if n_removed > 0:
-        print(
-            f'[INFO][io::_sanitize_mesh] Cleaned: '
-            f'{n_verts_orig}v/{n_faces_orig}f -> {verts.shape[0]}v/{faces.shape[0]}f '
-            f'({n_removed} faces removed)'
-        )
+        if print_progress:
+            print(
+                f'[INFO][io::_sanitize_mesh] Cleaned: '
+                f'{n_verts_orig}v/{n_faces_orig}f -> {verts.shape[0]}v/{faces.shape[0]}f '
+                f'({n_removed} faces removed)'
+            )
 
     return new_mesh
 
 
-def postProcessMesh(mesh: Union[trimesh.Trimesh, trimesh.Scene],
+def postProcessMesh(
+    mesh: Union[trimesh.Trimesh, trimesh.Scene],
+    print_progress: bool=False,
 ) -> Optional[trimesh.Trimesh]:
     if isinstance(mesh, trimesh.Scene):
         mesh = mesh.to_geometry()
@@ -145,7 +156,7 @@ def postProcessMesh(mesh: Union[trimesh.Trimesh, trimesh.Scene],
         print(f'\t Loaded object is not a Trimesh, got type: {type(mesh)}')
         return None
 
-    mesh = _sanitize_mesh(mesh)
+    mesh = _sanitize_mesh(mesh, print_progress)
 
     # Access vertex_normals to trigger lazy computation if not already cached.
     _ = mesh.vertex_normals
@@ -155,6 +166,7 @@ def postProcessMesh(mesh: Union[trimesh.Trimesh, trimesh.Scene],
 def loadMeshStream(
     mesh_stream: io.BytesIO,
     file_type: str,
+    print_progress: bool=False,
 ) -> Optional[trimesh.Trimesh]:
     try:
         mesh_stream.seek(0)
@@ -164,7 +176,7 @@ def loadMeshStream(
         print('\t Failed to load mesh from stream:', e)
         return None
 
-    mesh = postProcessMesh(mesh)
+    mesh = postProcessMesh(mesh, print_progress)
     if mesh is None:
         print('[ERROR][io::loadMeshStream]')
         print('\t postProcessMesh failed!')
@@ -173,6 +185,7 @@ def loadMeshStream(
 
 def loadMeshFile(
     mesh_file_path: str,
+    print_progress: bool=False,
 ) -> Optional[trimesh.Trimesh]:
     if not os.path.exists(mesh_file_path):
         print('[ERROR][io::loadMeshFile]')
@@ -182,7 +195,7 @@ def loadMeshFile(
 
     mesh = trimesh.load(mesh_file_path, process=False)
 
-    mesh = postProcessMesh(mesh)
+    mesh = postProcessMesh(mesh, print_progress)
     if mesh is None:
         print('[ERROR][io::loadMeshFile]')
         print('\t postProcessMesh failed!')
