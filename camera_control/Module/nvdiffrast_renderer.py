@@ -1,5 +1,6 @@
 import torch
 import trimesh
+import threading
 import numpy as np
 import nvdiffrast.torch as dr
 from typing import Union, Optional, List
@@ -10,15 +11,17 @@ from camera_control.Module.camera import Camera
 
 class NVDiffRastRenderer(object):
     _glctx_cache: dict = {}
+    _glctx_lock = threading.Lock()
 
     def __init__(self) -> None:
         return
 
     @staticmethod
     def getGlctx(device: str) -> dr.RasterizeCudaContext:
-        if device not in NVDiffRastRenderer._glctx_cache:
-            NVDiffRastRenderer._glctx_cache[device] = dr.RasterizeCudaContext(device=device)
-        return NVDiffRastRenderer._glctx_cache[device]
+        with NVDiffRastRenderer._glctx_lock:
+            if device not in NVDiffRastRenderer._glctx_cache:
+                NVDiffRastRenderer._glctx_cache[device] = dr.RasterizeCudaContext(device=device)
+            return NVDiffRastRenderer._glctx_cache[device]
 
     @staticmethod
     def isTextureExist(mesh: Union[trimesh.Trimesh, trimesh.Scene]) -> bool:
@@ -92,13 +95,30 @@ class NVDiffRastRenderer(object):
 
         faces = toTensor(mesh.faces, torch.int32, camera.device)
 
+        n_verts = vertices.shape[0]
+        if faces.numel() > 0 and (faces.max() >= n_verts or faces.min() < 0):
+            bad = (faces < 0) | (faces >= n_verts)
+            faces[bad] = 0
+            print(
+                f'[WARN][NVDiffRastRenderer::rasterize] '
+                f'Clamped {bad.sum().item()} out-of-bound face indices'
+            )
+
+        if not torch.isfinite(vertices).all():
+            vertices = torch.nan_to_num(vertices, nan=0.0, posinf=0.0, neginf=0.0)
+
         vertices_homo = torch.cat([
             vertices,
-            torch.ones((vertices.shape[0], 1), dtype=torch.float32, device=camera.device)
+            torch.ones((n_verts, 1), dtype=torch.float32, device=camera.device)
         ], dim=1)
 
         mvp = camera.getWorld2NVDiffRast()
         vertices_clip = torch.matmul(vertices_homo, mvp.T).unsqueeze(0).contiguous()
+
+        if not torch.isfinite(vertices_clip).all():
+            vertices_clip = torch.nan_to_num(
+                vertices_clip, nan=0.0, posinf=1e4, neginf=-1e4
+            )
 
         glctx = NVDiffRastRenderer.getGlctx(camera.device)
         rast_out, rast_out_db = dr.rasterize(
@@ -183,14 +203,22 @@ class NVDiffRastRenderer(object):
                 paint_color_tensor = paint_color_tensor / 255.0
             vertex_colors = paint_color_tensor.unsqueeze(0).expand(vertices.shape[0], -1)
         elif hasattr(mesh.visual, 'vertex_colors') and mesh.visual.vertex_colors is not None:
-            vertex_colors = toTensor(mesh.visual.vertex_colors[:, :3], torch.float32, camera.device) / 255.0
+            vc = np.asarray(mesh.visual.vertex_colors)
+            if vc.shape[0] == vertices.shape[0]:
+                vertex_colors = toTensor(vc[:, :3], torch.float32, camera.device) / 255.0
+            else:
+                vertex_colors = torch.ones((vertices.shape[0], 3), dtype=torch.float32, device=camera.device)
         else:
             vertex_colors = torch.ones((vertices.shape[0], 3), dtype=torch.float32, device=camera.device)
 
         if vertices_tensor is not None:
             vertex_normals = NVDiffRastRenderer._computeVertexNormals(vertices, faces)
         else:
-            vertex_normals = toTensor(mesh.vertex_normals, torch.float32, camera.device)
+            mesh_normals = np.asarray(mesh.vertex_normals)
+            if mesh_normals.shape[0] == vertices.shape[0]:
+                vertex_normals = toTensor(mesh_normals, torch.float32, camera.device)
+            else:
+                vertex_normals = NVDiffRastRenderer._computeVertexNormals(vertices, faces)
 
         normals_interp, _ = dr.interpolate(vertex_normals.unsqueeze(0), rast_out, faces)
         normals_interp = torch.nn.functional.normalize(normals_interp, dim=-1, eps=1e-8)
@@ -407,6 +435,7 @@ class NVDiffRastRenderer(object):
             face_normals,
         ], dim=0)
 
+        tri_id = tri_id.clamp(0, face_normals_padded.shape[0] - 1)
         normals_world = face_normals_padded[tri_id]  # [H, W, 3]
         normals_camera = torch.matmul(normals_world, camera.R.T)
 
