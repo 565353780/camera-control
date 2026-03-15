@@ -3,7 +3,7 @@ import trimesh
 import threading
 import numpy as np
 import nvdiffrast.torch as dr
-from typing import Union, Optional, List
+from typing import Union, Optional, List, Tuple
 
 from camera_control.Method.data import toTensor
 from camera_control.Module.camera import Camera
@@ -35,6 +35,71 @@ class NVDiffRastRenderer(object):
                 return True
 
         return False
+
+    @staticmethod
+    def _hasVisiblePixels(rast_out: torch.Tensor) -> bool:
+        return bool((rast_out[:, :, :, 3] > 0).any().item())
+
+    @staticmethod
+    def _sanitizeTextureInputs(
+        mesh: Union[trimesh.Trimesh, trimesh.Scene],
+        vertex_count: int,
+    ) -> Tuple[bool, Optional[np.ndarray], Optional[np.ndarray]]:
+        """Validate and extract UV + texture image from *mesh*.
+
+        Returns (use_texture, uvs, tex_img).  When *use_texture* is False the
+        caller should fall back to vertex-color rendering.
+        """
+        if not NVDiffRastRenderer.isTextureExist(mesh):
+            return False, None, None
+
+        uvs = getattr(mesh.visual, 'uv', None)
+        if uvs is None:
+            return False, None, None
+
+        uvs = np.asarray(uvs)
+        if uvs.ndim != 2 or uvs.shape[1] < 2:
+            print(
+                f'[WARN][NVDiffRastRenderer] Invalid UV shape {uvs.shape}, '
+                'falling back to vertex colors'
+            )
+            return False, None, None
+
+        uvs = uvs[:, :2].copy()
+
+        if uvs.shape[0] != vertex_count:
+            print(
+                f'[WARN][NVDiffRastRenderer] UV count ({uvs.shape[0]}) != '
+                f'vertex count ({vertex_count}), falling back to vertex colors'
+            )
+            return False, None, None
+
+        if not np.isfinite(uvs).all():
+            print(
+                '[WARN][NVDiffRastRenderer] Non-finite UV values, '
+                'falling back to vertex colors'
+            )
+            return False, None, None
+
+        mat = getattr(mesh.visual, 'material', None)
+        tex_img = None
+        if mat is not None:
+            if hasattr(mat, 'baseColorTexture') and mat.baseColorTexture is not None:
+                tex_img = np.asarray(mat.baseColorTexture)
+            elif hasattr(mat, 'image') and mat.image is not None:
+                tex_img = np.asarray(mat.image)
+
+        if tex_img is None or tex_img.size == 0:
+            return False, None, None
+
+        if tex_img.ndim < 2 or not np.isfinite(tex_img).all():
+            print(
+                '[WARN][NVDiffRastRenderer] Invalid or non-finite texture, '
+                'falling back to vertex colors'
+            )
+            return False, None, None
+
+        return True, uvs, tex_img
 
     @staticmethod
     def _computeVertexNormals(
@@ -94,14 +159,23 @@ class NVDiffRastRenderer(object):
             vertices = toTensor(mesh.vertices, torch.float32, camera.device)
 
         faces = toTensor(mesh.faces, torch.int32, camera.device)
+        vertices = vertices.contiguous()
+        faces = faces.contiguous()
 
         n_verts = vertices.shape[0]
-        if faces.numel() > 0 and (faces.max() >= n_verts or faces.min() < 0):
+        n_faces = faces.shape[0]
+        if n_verts == 0 or n_faces == 0:
+            raise ValueError(
+                f'rasterize received empty mesh (V={n_verts}, F={n_faces})'
+            )
+
+        if faces.max() >= n_verts or faces.min() < 0:
             bad = (faces < 0) | (faces >= n_verts)
+            n_bad = bad.sum().item()
             faces[bad] = 0
             print(
                 f'[WARN][NVDiffRastRenderer::rasterize] '
-                f'Clamped {bad.sum().item()} out-of-bound face indices'
+                f'Clamped {n_bad} out-of-bound face indices'
             )
 
         if not torch.isfinite(vertices).all():
@@ -159,7 +233,7 @@ class NVDiffRastRenderer(object):
 
         mask_1ch = (rast_out[:, :, :, 3:4] > 0).float()  # [1, H, W, 1]
 
-        if enable_antialias:
+        if enable_antialias and NVDiffRastRenderer._hasVisiblePixels(rast_out):
             mask_1ch = dr.antialias(mask_1ch.contiguous(), rast_out, vertices_clip, faces)
 
         mask_hw = mask_1ch[0, :, :, 0]  # [H, W]
@@ -240,7 +314,7 @@ class NVDiffRastRenderer(object):
 
         image = NVDiffRastRenderer._applyBackground(image, rast_out, bg_color, camera.device)
 
-        if enable_antialias:
+        if enable_antialias and NVDiffRastRenderer._hasVisiblePixels(rast_out):
             image = dr.antialias(image.contiguous(), rast_out, vertices_clip, faces)
 
         return {
@@ -268,33 +342,8 @@ class NVDiffRastRenderer(object):
         Returns:
             dict: rgb [H,W,3], rasterize_output [H,W,4], bary_derivs [H,W,4]
         """
-        use_texture = False
-        texture = None
-        uvs = None
-
-        if NVDiffRastRenderer.isTextureExist(mesh):
-            uvs_np = mesh.visual.uv
-            vertices_count = len(mesh.vertices) if vertices_tensor is None else vertices_tensor.shape[0]
-            if uvs_np.shape[0] != vertices_count:
-                print(f'[WARN][NVDiffRastRenderer::renderTexture] UV count ({uvs_np.shape[0]}) != vertex count ({vertices_count}), falling back to vertex colors')
-            else:
-                tex_img = None
-                mat = mesh.visual.material
-                if hasattr(mat, 'baseColorTexture') and mat.baseColorTexture is not None:
-                    tex_img = np.array(mat.baseColorTexture)
-                elif hasattr(mat, 'image') and mat.image is not None:
-                    tex_img = np.array(mat.image)
-
-                if tex_img is not None:
-                    if len(tex_img.shape) == 2:
-                        tex_img = np.stack([tex_img] * 3, axis=-1)
-                    elif tex_img.shape[-1] == 4:
-                        tex_img = tex_img[:, :, :3]
-
-                    texture = toTensor(tex_img, torch.float32, 'cpu') / 255.0
-                    texture = texture.flip(0)
-                    uvs = uvs_np
-                    use_texture = True
+        vertex_count = vertices_tensor.shape[0] if vertices_tensor is not None else len(mesh.vertices)
+        use_texture, uvs_np, tex_img = NVDiffRastRenderer._sanitizeTextureInputs(mesh, vertex_count)
 
         if not use_texture:
             return NVDiffRastRenderer.renderVertexColor(
@@ -303,6 +352,14 @@ class NVDiffRastRenderer(object):
                 vertices_tensor=vertices_tensor, enable_antialias=enable_antialias,
                 rasterize_dict=rasterize_dict,
             )
+
+        if len(tex_img.shape) == 2:
+            tex_img = np.stack([tex_img] * 3, axis=-1)
+        elif tex_img.shape[-1] == 4:
+            tex_img = tex_img[:, :, :3]
+
+        texture = toTensor(tex_img, torch.float32, 'cpu') / 255.0
+        texture = texture.flip(0).contiguous()
 
         if rasterize_dict is None:
             rasterize_dict = NVDiffRastRenderer.rasterize(mesh, camera, vertices_tensor)
@@ -313,7 +370,7 @@ class NVDiffRastRenderer(object):
         rast_out_db = rasterize_dict['rast_out_db']
         vertices_clip = rasterize_dict['vertices_clip']
 
-        uvs_tensor = toTensor(uvs, torch.float32, camera.device)
+        uvs_tensor = toTensor(uvs_np, torch.float32, camera.device)
         texture = texture.unsqueeze(0).to(camera.device)
 
         uv_interp, _ = dr.interpolate(uvs_tensor.unsqueeze(0), rast_out, faces)
@@ -327,7 +384,7 @@ class NVDiffRastRenderer(object):
 
         image = NVDiffRastRenderer._applyBackground(image, rast_out, bg_color, camera.device)
 
-        if enable_antialias:
+        if enable_antialias and NVDiffRastRenderer._hasVisiblePixels(rast_out):
             image = dr.antialias(image.contiguous(), rast_out, vertices_clip, faces)
 
         return {
@@ -381,7 +438,7 @@ class NVDiffRastRenderer(object):
         # 单通道 antialias 后再扩展到 3 通道
         depth_1ch = depth_normalized.unsqueeze(0).unsqueeze(-1)  # [1, H, W, 1]
 
-        if enable_antialias:
+        if enable_antialias and NVDiffRastRenderer._hasVisiblePixels(rast_out):
             depth_1ch = dr.antialias(depth_1ch.contiguous(), rast_out, vertices_clip, faces)
 
         depth_vis = depth_1ch.expand(-1, -1, -1, 3)  # [1, H, W, 3]
@@ -445,7 +502,7 @@ class NVDiffRastRenderer(object):
         normals_world_vis = NVDiffRastRenderer._applyBackground(normals_world_mapped, rast_out, bg_color, camera.device)
         normals_camera_vis = NVDiffRastRenderer._applyBackground(normals_camera_mapped, rast_out, bg_color, camera.device)
 
-        if enable_antialias:
+        if enable_antialias and NVDiffRastRenderer._hasVisiblePixels(rast_out):
             combined = torch.cat([normals_world_vis, normals_camera_vis], dim=-1)
             combined = dr.antialias(combined.contiguous(), rast_out, vertices_clip, faces)
             normals_world_vis = combined[:, :, :, :3]

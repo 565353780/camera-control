@@ -3,6 +3,7 @@ import os
 import cv2
 import trimesh
 import numpy as np
+from PIL import Image
 
 from typing import Optional, Union
 
@@ -23,10 +24,64 @@ def loadImage(
 
     return image_data
 
+_TEX_MAX_SIZE = 65536  # nvdiffrast TEX_MAX_MIP_LEVEL=16 → 2^16
+_MAX_FACES = 1_000_000
+_VERTEX_COORD_CLAMP = 1e4
+
+
+def _clamp_texture(mesh: trimesh.Trimesh, max_size: int, print_progress: bool) -> trimesh.Trimesh:
+    """Resize texture images that exceed nvdiffrast's maximum dimension."""
+    try:
+        mat = getattr(mesh.visual, 'material', None)
+        if mat is None:
+            return mesh
+
+        for attr in ('baseColorTexture', 'image'):
+            img = getattr(mat, attr, None)
+            if img is None:
+                continue
+            arr = np.asarray(img)
+            h, w = arr.shape[:2]
+            if h <= max_size and w <= max_size:
+                continue
+            scale = max_size / max(h, w)
+            new_h, new_w = int(h * scale), int(w * scale)
+            if print_progress:
+                print(
+                    f'[WARN][io::_clamp_texture] Resizing texture '
+                    f'{w}x{h} -> {new_w}x{new_h} (max {max_size})'
+                )
+            resized = Image.fromarray(arr).resize((new_w, new_h), Image.LANCZOS)
+            setattr(mat, attr, resized)
+    except Exception:
+        pass
+    return mesh
+
+
+def _decimate_mesh(
+    mesh: trimesh.Trimesh, max_faces: int, print_progress: bool,
+) -> trimesh.Trimesh:
+    """Reduce face count when it exceeds *max_faces* to stay within
+    nvdiffrast's subtriangle budget and keep CUDA rasterization safe."""
+    n_faces = len(mesh.faces)
+    if n_faces <= max_faces:
+        return mesh
+    if print_progress:
+        print(
+            f'[WARN][io::_decimate_mesh] Face count {n_faces} exceeds '
+            f'{max_faces}, decimating'
+        )
+    try:
+        mesh = mesh.simplify_quadric_decimation(max_faces)
+    except Exception:
+        pass
+    return mesh
+
+
 def _sanitize_mesh(
     mesh: trimesh.Trimesh,
     print_progress: bool=False,
-) -> trimesh.Trimesh:
+) -> Optional[trimesh.Trimesh]:
     """Remove degenerate faces, non-finite vertices, and unreferenced vertices
     so that downstream CUDA renderers (nvdiffrast) never receive bad geometry.
 
@@ -38,7 +93,8 @@ def _sanitize_mesh(
     n_verts_orig, n_faces_orig = verts.shape[0], faces.shape[0]
 
     if n_verts_orig == 0 or n_faces_orig == 0:
-        return mesh
+        print('[ERROR][io::_sanitize_mesh] Input mesh has 0 vertices or 0 faces')
+        return None
 
     # --- 1. Mark non-finite vertices and remove faces that reference them ---
     vert_valid = np.isfinite(verts).all(axis=1)
@@ -48,7 +104,15 @@ def _sanitize_mesh(
         face_ok = vert_valid[faces].all(axis=1)
         faces = faces[face_ok]
 
-    # --- 2. Remove faces with out-of-bound indices ---
+    # --- 2. Clamp extreme vertex coordinates ---
+    extreme = np.abs(verts) > _VERTEX_COORD_CLAMP
+    if extreme.any():
+        n_clamped = extreme.any(axis=1).sum()
+        if print_progress:
+            print(f'[WARN][io::_sanitize_mesh] Clamping {n_clamped} vertices with |coord| > {_VERTEX_COORD_CLAMP}')
+        verts = np.clip(verts, -_VERTEX_COORD_CLAMP, _VERTEX_COORD_CLAMP)
+
+    # --- 3. Remove faces with out-of-bound indices ---
     oob = (faces < 0) | (faces >= verts.shape[0])
     if oob.any():
         bad = oob.any(axis=1)
@@ -56,7 +120,7 @@ def _sanitize_mesh(
             print(f'[WARN][io::_sanitize_mesh] {bad.sum()} faces with out-of-bound indices')
         faces = faces[~bad]
 
-    # --- 3. Remove degenerate faces (any two vertex indices equal) ---
+    # --- 4. Remove degenerate faces (any two vertex indices equal) ---
     degen = (
         (faces[:, 0] == faces[:, 1])
         | (faces[:, 1] == faces[:, 2])
@@ -67,15 +131,33 @@ def _sanitize_mesh(
             print(f'[WARN][io::_sanitize_mesh] {degen.sum()} degenerate faces')
         faces = faces[~degen]
 
-    # --- fast path: nothing was removed ---
-    if faces.shape[0] == n_faces_orig and vert_valid.all():
+    # --- 5. Remove zero-area faces ---
+    if faces.shape[0] > 0:
+        v0 = verts[faces[:, 0]]
+        v1 = verts[faces[:, 1]]
+        v2 = verts[faces[:, 2]]
+        cross = np.cross(v1 - v0, v2 - v0)
+        area_sq = (cross * cross).sum(axis=1)
+        zero_area = area_sq < 1e-20
+        if zero_area.any():
+            if print_progress:
+                print(f'[WARN][io::_sanitize_mesh] {zero_area.sum()} zero-area faces')
+            faces = faces[~zero_area]
+
+    # --- fast path: nothing was removed and no clamp happened ---
+    no_changes = (
+        faces.shape[0] == n_faces_orig
+        and vert_valid.all()
+        and not extreme.any()
+    )
+    if no_changes:
         return mesh
 
     if faces.shape[0] == 0:
         print('[ERROR][io::_sanitize_mesh] 0 faces remaining after cleanup')
-        return mesh
+        return None
 
-    # --- 4. Compact: remove unreferenced vertices & remap face indices ---
+    # --- 6. Compact: remove unreferenced vertices & remap face indices ---
     referenced = np.zeros(verts.shape[0], dtype=bool)
     referenced[faces.ravel()] = True
     old_to_new = np.full(verts.shape[0], -1, dtype=np.int64)
@@ -84,10 +166,10 @@ def _sanitize_mesh(
     verts = verts[new_ids]
     faces = old_to_new[faces]
 
-    # --- 5. Rebuild mesh, preserving per-vertex attributes when possible ---
+    # --- 7. Rebuild mesh, preserving per-vertex attributes when possible ---
     new_mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
 
-    # --- 5a. Migrate vertex_normals ---
+    # --- 7a. Migrate vertex_normals ---
     try:
         normals = mesh._cache.get('vertex_normals')
         if normals is not None:
@@ -97,7 +179,7 @@ def _sanitize_mesh(
     except Exception:
         pass
 
-    # --- 5b. Migrate vertex_colors ---
+    # --- 7b. Migrate vertex_colors ---
     try:
         if hasattr(mesh.visual, 'vertex_colors') and mesh.visual.vertex_colors is not None:
             colors = np.asarray(mesh.visual.vertex_colors)
@@ -106,12 +188,15 @@ def _sanitize_mesh(
     except Exception:
         pass
 
-    # --- 5c. Migrate UV + material (texture) ---
+    # --- 7c. Migrate UV + material (texture) ---
     try:
         if hasattr(mesh.visual, 'uv') and mesh.visual.uv is not None:
             uv = np.asarray(mesh.visual.uv)
             if uv.shape[0] == n_verts_orig:
-                new_visual_kwargs = {'uv': uv[new_ids]}
+                new_uv = uv[new_ids]
+                if not np.isfinite(new_uv).all():
+                    new_uv = np.nan_to_num(new_uv, nan=0.0, posinf=1.0, neginf=0.0)
+                new_visual_kwargs = {'uv': new_uv}
                 if hasattr(mesh.visual, 'material') and mesh.visual.material is not None:
                     new_visual_kwargs['material'] = mesh.visual.material
                 new_mesh.visual = trimesh.visual.TextureVisuals(**new_visual_kwargs)
@@ -146,6 +231,8 @@ def _sanitize_mesh(
 def postProcessMesh(
     mesh: Union[trimesh.Trimesh, trimesh.Scene],
     print_progress: bool=False,
+    max_texture_size: int=_TEX_MAX_SIZE,
+    max_faces: int=_MAX_FACES,
 ) -> Optional[trimesh.Trimesh]:
     if isinstance(mesh, trimesh.Scene):
         mesh = mesh.to_geometry()
@@ -155,7 +242,11 @@ def postProcessMesh(
         print(f'\t Loaded object is not a Trimesh, got type: {type(mesh)}')
         return None
 
+    mesh = _clamp_texture(mesh, max_texture_size, print_progress)
     mesh = _sanitize_mesh(mesh, print_progress)
+    if mesh is None:
+        return None
+    mesh = _decimate_mesh(mesh, max_faces, print_progress)
 
     # Access vertex_normals to trigger lazy computation if not already cached.
     _ = mesh.vertex_normals
