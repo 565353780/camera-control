@@ -249,7 +249,22 @@ def postProcessMesh(
     mesh = _decimate_mesh(mesh, max_faces, print_progress)
 
     # Access vertex_normals to trigger lazy computation if not already cached.
-    _ = mesh.vertex_normals
+    # Some near-degenerate faces may produce NaN/Inf normals (cross product
+    # divided by zero norm inside trimesh); replace those with random unit vectors
+    # so downstream renderers never see bad geometry.
+    normals = np.array(mesh.vertex_normals, copy=True)
+    bad_mask = ~np.isfinite(normals).all(axis=1)
+    norm_len = np.linalg.norm(normals, axis=1)
+    bad_mask |= norm_len < 1e-12
+    if bad_mask.any():
+        n_bad = bad_mask.sum()
+        if print_progress:
+            print(f'[WARN][io::postProcessMesh] {n_bad} invalid vertex normals, replacing with random unit vectors')
+        rng = np.random.default_rng(0)
+        rand_normals = rng.standard_normal((n_bad, 3))
+        rand_normals /= np.linalg.norm(rand_normals, axis=1, keepdims=True)
+        normals[bad_mask] = rand_normals
+        mesh.vertex_normals = normals
 
     return mesh
 
