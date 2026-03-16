@@ -1,3 +1,4 @@
+import os
 import torch
 import trimesh
 import threading
@@ -7,6 +8,16 @@ from typing import Union, Optional, List, Tuple
 
 from camera_control.Method.data import toTensor
 from camera_control.Module.camera import Camera
+
+_NVDR_DEBUG_SYNC = os.environ.get('NVDR_DEBUG_SYNC', '0') == '1'
+_NVDR_NO_GLCTX_CACHE = os.environ.get('NVDR_NO_GLCTX_CACHE', '1') == '1'
+
+
+def _debug_sync(device, tag: str = ''):
+    if _NVDR_DEBUG_SYNC:
+        torch.cuda.synchronize(device)
+        if tag:
+            print(f'[DEBUG][NVDiffRastRenderer] sync OK after {tag}')
 
 
 class NVDiffRastRenderer(object):
@@ -18,6 +29,8 @@ class NVDiffRastRenderer(object):
 
     @staticmethod
     def getGlctx(device: str) -> dr.RasterizeCudaContext:
+        if _NVDR_NO_GLCTX_CACHE:
+            return dr.RasterizeCudaContext(device=device)
         with NVDiffRastRenderer._glctx_lock:
             if device not in NVDiffRastRenderer._glctx_cache:
                 NVDiffRastRenderer._glctx_cache[device] = dr.RasterizeCudaContext(device=device)
@@ -199,6 +212,7 @@ class NVDiffRastRenderer(object):
             glctx, vertices_clip, faces,
             resolution=[camera.height, camera.width]
         )
+        _debug_sync(camera.device, 'dr.rasterize')
 
         return {
             'vertices': vertices,
@@ -235,6 +249,7 @@ class NVDiffRastRenderer(object):
 
         if enable_antialias and NVDiffRastRenderer._hasVisiblePixels(rast_out):
             mask_1ch = dr.antialias(mask_1ch.contiguous(), rast_out, vertices_clip, faces)
+            _debug_sync(camera.device, 'dr.antialias[mask]')
 
         mask_hw = mask_1ch[0, :, :, 0]  # [H, W]
 
@@ -295,9 +310,11 @@ class NVDiffRastRenderer(object):
                 vertex_normals = NVDiffRastRenderer._computeVertexNormals(vertices, faces)
 
         normals_interp, _ = dr.interpolate(vertex_normals.unsqueeze(0), rast_out, faces)
+        _debug_sync(camera.device, 'dr.interpolate[normals]')
         normals_interp = torch.nn.functional.normalize(normals_interp, dim=-1, eps=1e-8)
 
         colors_interp, _ = dr.interpolate(vertex_colors.unsqueeze(0).contiguous(), rast_out, faces)
+        _debug_sync(camera.device, 'dr.interpolate[colors]')
         colors_interp = torch.clamp(colors_interp, 0.0, 1.0)
 
         light_dir_cam = toTensor(light_direction, torch.float32, camera.device)
@@ -316,6 +333,7 @@ class NVDiffRastRenderer(object):
 
         if enable_antialias and NVDiffRastRenderer._hasVisiblePixels(rast_out):
             image = dr.antialias(image.contiguous(), rast_out, vertices_clip, faces)
+            _debug_sync(camera.device, 'dr.antialias[vertexColor]')
 
         return {
             'rgb': image[0],
@@ -374,7 +392,9 @@ class NVDiffRastRenderer(object):
         texture = texture.unsqueeze(0).to(camera.device)
 
         uv_interp, _ = dr.interpolate(uvs_tensor.unsqueeze(0), rast_out, faces)
+        _debug_sync(camera.device, 'dr.interpolate[uv]')
         image = dr.texture(texture, uv_interp, filter_mode='linear')
+        _debug_sync(camera.device, 'dr.texture')
 
         c = image.shape[-1]
         if c < 3:
@@ -386,6 +406,7 @@ class NVDiffRastRenderer(object):
 
         if enable_antialias and NVDiffRastRenderer._hasVisiblePixels(rast_out):
             image = dr.antialias(image.contiguous(), rast_out, vertices_clip, faces)
+            _debug_sync(camera.device, 'dr.antialias[texture]')
 
         return {
             'rgb': image[0],
@@ -418,6 +439,7 @@ class NVDiffRastRenderer(object):
         vertices_clip = rasterize_dict['vertices_clip']
 
         vertices_interp, _ = dr.interpolate(vertices.unsqueeze(0), rast_out, faces)
+        _debug_sync(camera.device, 'dr.interpolate[depth_verts]')
 
         R_row2 = camera.R[2, :]
         depth = -(torch.matmul(vertices_interp[0], R_row2) + camera.t[2])  # [H, W]
@@ -440,6 +462,7 @@ class NVDiffRastRenderer(object):
 
         if enable_antialias and NVDiffRastRenderer._hasVisiblePixels(rast_out):
             depth_1ch = dr.antialias(depth_1ch.contiguous(), rast_out, vertices_clip, faces)
+            _debug_sync(camera.device, 'dr.antialias[depth]')
 
         depth_vis = depth_1ch.expand(-1, -1, -1, 3)  # [1, H, W, 3]
         image = NVDiffRastRenderer._applyBackground(depth_vis, rast_out, bg_color, camera.device)
@@ -505,6 +528,7 @@ class NVDiffRastRenderer(object):
         if enable_antialias and NVDiffRastRenderer._hasVisiblePixels(rast_out):
             combined = torch.cat([normals_world_vis, normals_camera_vis], dim=-1)
             combined = dr.antialias(combined.contiguous(), rast_out, vertices_clip, faces)
+            _debug_sync(camera.device, 'dr.antialias[normal]')
             normals_world_vis = combined[:, :, :, :3]
             normals_camera_vis = combined[:, :, :, 3:]
 
