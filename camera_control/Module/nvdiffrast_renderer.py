@@ -10,7 +10,7 @@ from camera_control.Method.data import toTensor
 from camera_control.Module.camera import Camera
 
 _NVDR_DEBUG_SYNC = os.environ.get('NVDR_DEBUG_SYNC', '0') == '1'
-_NVDR_NO_GLCTX_CACHE = os.environ.get('NVDR_NO_GLCTX_CACHE', '1') == '1'
+_NVDR_NO_GLCTX_CACHE = os.environ.get('NVDR_NO_GLCTX_CACHE', '0') == '1'
 
 
 def _debug_sync(device, tag: str = ''):
