@@ -9,7 +9,7 @@ from typing import Optional, List
 
 from camera_control.Method.pcd import toPcd
 from camera_control.Method.data import toNumpy
-from camera_control.Method.sample import sampleCamera
+from camera_control.Method.sample import sampleCameras
 from camera_control.Method.path import createFileFolder
 from camera_control.Module.camera import Camera
 from camera_control.Module.nvdiffrast_renderer import NVDiffRastRenderer
@@ -34,7 +34,7 @@ class MeshRenderer(object):
         device: str = 'cuda:0',
         vertices_tensor: Optional[torch.Tensor] = None,
     ) -> List[Camera]:
-        camera_list = sampleCamera(
+        camera_list = sampleCameras(
             mesh=mesh,
             camera_num=camera_num,
             camera_dist=camera_dist,

@@ -84,7 +84,7 @@ def sampleFibonacciSpherePoints(
     points = np.stack([x, y, z], axis=1) * radius + center
     return points
 
-def sampleCamera(
+def sampleCameras(
     mesh: trimesh.Trimesh,
     camera_num: int = 12,
     camera_dist: float = 2.5,
