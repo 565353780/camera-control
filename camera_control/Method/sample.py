@@ -147,11 +147,14 @@ def sampleFarCameraIdxs(
     selected_indices = [0]  # 第一个视角默认会选中
     selected = [0]
 
+    if sample_camera_num == 1:
+        return selected_indices
+
     poses = [camera.pos for camera in camera_list]  # list of torch.Tensor([x, y, z])
     poses_np = torch.stack(poses).cpu().numpy()  # shape (N,3)
 
     available = list(range(1, len(poses)))
-    for _ in range(sample_camera_num):
+    for _ in range(sample_camera_num-1):
         dists = []
         for i in available:
             min_dist = min(np.linalg.norm(poses_np[i] - poses_np[j]) for j in selected)
