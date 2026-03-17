@@ -162,3 +162,10 @@ def sampleFarCameraIdxs(
     selected_indices = selected
 
     return selected_indices
+
+def sampleFarCameras(
+    camera_list: List[Camera],
+    sample_camera_num: int,
+) -> List[Camera]:
+    far_camera_idxs = sampleFarCameraIdxs(camera_list, sample_camera_num)
+    return [camera_list[idx] for idx in far_camera_idxs]
