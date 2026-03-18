@@ -37,6 +37,21 @@ class NVDiffRastRenderer(object):
             return NVDiffRastRenderer._glctx_cache[device]
 
     @staticmethod
+    def resetGlctx(device: Optional[str] = None) -> None:
+        """Evict cached RasterizeCudaContext after a CUDA error.
+
+        If *device* is given only that device's context is removed; otherwise
+        the entire cache is cleared.  This is a best-effort measure — once the
+        CUDA context is truly poisoned even a fresh glctx will not help, but
+        it prevents a definitely-bad object from being reused.
+        """
+        with NVDiffRastRenderer._glctx_lock:
+            if device is not None:
+                NVDiffRastRenderer._glctx_cache.pop(device, None)
+            else:
+                NVDiffRastRenderer._glctx_cache.clear()
+
+    @staticmethod
     def isTextureExist(mesh: Union[trimesh.Trimesh, trimesh.Scene]) -> bool:
         if not hasattr(mesh.visual, 'uv') or mesh.visual.uv is None or len(mesh.visual.uv) == 0:
             return False
