@@ -25,9 +25,6 @@ def loadImage(
     return image_data
 
 _TEX_MAX_SIZE = 65536  # nvdiffrast TEX_MAX_MIP_LEVEL=16 → 2^16
-_MAX_FACES = 1_000_000
-_VERTEX_COORD_CLAMP = 1e4
-
 
 def _clamp_texture(mesh: trimesh.Trimesh, max_size: int, print_progress: bool) -> trimesh.Trimesh:
     """Resize texture images that exceed nvdiffrast's maximum dimension."""
@@ -57,27 +54,6 @@ def _clamp_texture(mesh: trimesh.Trimesh, max_size: int, print_progress: bool) -
         pass
     return mesh
 
-
-def _decimate_mesh(
-    mesh: trimesh.Trimesh, max_faces: int, print_progress: bool,
-) -> trimesh.Trimesh:
-    """Reduce face count when it exceeds *max_faces* to stay within
-    nvdiffrast's subtriangle budget and keep CUDA rasterization safe."""
-    n_faces = len(mesh.faces)
-    if n_faces <= max_faces:
-        return mesh
-    if print_progress:
-        print(
-            f'[WARN][io::_decimate_mesh] Face count {n_faces} exceeds '
-            f'{max_faces}, decimating'
-        )
-    try:
-        mesh = mesh.simplify_quadric_decimation(max_faces)
-    except Exception:
-        pass
-    return mesh
-
-
 def _sanitize_mesh(
     mesh: trimesh.Trimesh,
     print_progress: bool=False,
@@ -103,14 +79,6 @@ def _sanitize_mesh(
             print(f'[WARN][io::_sanitize_mesh] {(~vert_valid).sum()} non-finite vertices')
         face_ok = vert_valid[faces].all(axis=1)
         faces = faces[face_ok]
-
-    # --- 2. Clamp extreme vertex coordinates ---
-    extreme = np.abs(verts) > _VERTEX_COORD_CLAMP
-    if extreme.any():
-        n_clamped = extreme.any(axis=1).sum()
-        if print_progress:
-            print(f'[WARN][io::_sanitize_mesh] Clamping {n_clamped} vertices with |coord| > {_VERTEX_COORD_CLAMP}')
-        verts = np.clip(verts, -_VERTEX_COORD_CLAMP, _VERTEX_COORD_CLAMP)
 
     # --- 3. Remove faces with out-of-bound indices ---
     oob = (faces < 0) | (faces >= verts.shape[0])
@@ -148,7 +116,6 @@ def _sanitize_mesh(
     no_changes = (
         faces.shape[0] == n_faces_orig
         and vert_valid.all()
-        and not extreme.any()
     )
     if no_changes:
         return mesh
@@ -232,7 +199,6 @@ def postProcessMesh(
     mesh: Union[trimesh.Trimesh, trimesh.Scene],
     print_progress: bool=False,
     max_texture_size: int=_TEX_MAX_SIZE,
-    max_faces: int=_MAX_FACES,
 ) -> Optional[trimesh.Trimesh]:
     if isinstance(mesh, trimesh.Scene):
         mesh = mesh.to_geometry()
@@ -246,7 +212,6 @@ def postProcessMesh(
     mesh = _sanitize_mesh(mesh, print_progress)
     if mesh is None:
         return None
-    mesh = _decimate_mesh(mesh, max_faces, print_progress)
 
     # Access vertex_normals to trigger lazy computation if not already cached.
     # Some near-degenerate faces may produce NaN/Inf normals (cross product
