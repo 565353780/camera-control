@@ -5,7 +5,6 @@ import threading
 import numpy as np
 import nvdiffrast.torch as dr
 from typing import Union, Optional, List, Tuple
-
 from camera_control.Method.data import toTensor
 from camera_control.Module.camera import Camera
 
@@ -357,6 +356,29 @@ class NVDiffRastRenderer(object):
         }
 
     @staticmethod
+    def _wrapUV(uv: torch.Tensor, wrap_s: str, wrap_t: str) -> torch.Tensor:
+        """Apply GL wrap modes to interpolated UV coordinates.
+
+        Args:
+            uv: [B, H, W, 2] interpolated UV from dr.interpolate.
+            wrap_s: 'repeat' | 'mirrored_repeat' | 'clamp' for U axis.
+            wrap_t: 'repeat' | 'mirrored_repeat' | 'clamp' for V axis.
+
+        Returns:
+            UV tensor with all values in [0, 1].
+        """
+        out = uv.clone()
+        for ch, mode in enumerate([wrap_s, wrap_t]):
+            if mode == 'repeat':
+                out[..., ch] = out[..., ch] % 1.0
+            elif mode == 'mirrored_repeat':
+                t = out[..., ch] % 2.0
+                out[..., ch] = torch.where(t > 1.0, 2.0 - t, t)
+            else:
+                out[..., ch] = out[..., ch].clamp(0.0, 1.0)
+        return out
+
+    @staticmethod
     def renderTexture(
         mesh: Union[trimesh.Trimesh, trimesh.Scene],
         camera: Camera,
@@ -408,6 +430,12 @@ class NVDiffRastRenderer(object):
 
         uv_interp, _ = dr.interpolate(uvs_tensor.unsqueeze(0), rast_out, faces)
         _debug_sync(camera.device, 'dr.interpolate[uv]')
+
+        wrap_s, wrap_t = 'clamp', 'clamp'
+        if hasattr(mesh, 'metadata') and 'uv_wrap_mode' in mesh.metadata:
+            wrap_s, wrap_t = mesh.metadata['uv_wrap_mode']
+        uv_interp = NVDiffRastRenderer._wrapUV(uv_interp, wrap_s, wrap_t)
+
         image = dr.texture(texture, uv_interp, filter_mode='linear')
         _debug_sync(camera.device, 'dr.texture')
 

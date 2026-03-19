@@ -1,11 +1,72 @@
 import io
 import os
 import cv2
+import json
+import struct
 import trimesh
 import numpy as np
 from PIL import Image
 
-from typing import Optional, Union
+from typing import Optional, Tuple, Union
+
+
+_GL_CLAMP_TO_EDGE = 33071
+_GL_MIRRORED_REPEAT = 33648
+_GL_REPEAT = 10497
+
+_WRAP_MODE_MAP = {
+    _GL_CLAMP_TO_EDGE: 'clamp',
+    _GL_MIRRORED_REPEAT: 'mirrored_repeat',
+    _GL_REPEAT: 'repeat',
+}
+
+
+def _parseGlbJson(data: bytes) -> Optional[dict]:
+    """Extract the JSON chunk from a GLB (glTF 2.0 binary) payload."""
+    if len(data) < 12:
+        return None
+    magic, version, length = struct.unpack_from('<III', data, 0)
+    if magic != 0x46546C67:  # 'glTF'
+        return None
+    if len(data) < 20:
+        return None
+    chunk_length, chunk_type = struct.unpack_from('<II', data, 12)
+    if chunk_type != 0x4E4F534A:  # 'JSON'
+        return None
+    json_bytes = data[20:20 + chunk_length]
+    try:
+        return json.loads(json_bytes)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+
+def _extractGlbUVWrapMode(
+    data: bytes,
+    print_progress: bool = False,
+) -> Tuple[str, str]:
+    """Return (wrap_s, wrap_t) as string mode names from GLB sampler metadata.
+
+    Falls back to 'clamp' when the GLB cannot be parsed or contains no sampler.
+    """
+    gltf = _parseGlbJson(data)
+    if gltf is None:
+        return 'clamp', 'clamp'
+
+    samplers = gltf.get('samplers', [])
+    if not samplers:
+        return 'clamp', 'clamp'
+
+    sampler = samplers[0]
+    wrap_s_val = sampler.get('wrapS', _GL_REPEAT)
+    wrap_t_val = sampler.get('wrapT', _GL_REPEAT)
+
+    wrap_s = _WRAP_MODE_MAP.get(wrap_s_val, 'clamp')
+    wrap_t = _WRAP_MODE_MAP.get(wrap_t_val, 'clamp')
+
+    if print_progress:
+        print(f'[INFO][io::_extractGlbUVWrapMode] wrapS={wrap_s_val}({wrap_s}), wrapT={wrap_t_val}({wrap_t})')
+
+    return wrap_s, wrap_t
 
 
 def loadImage(
@@ -199,6 +260,7 @@ def postProcessMesh(
     mesh: Union[trimesh.Trimesh, trimesh.Scene],
     print_progress: bool=False,
     max_texture_size: int=_TEX_MAX_SIZE,
+    uv_wrap_mode: Optional[Tuple[str, str]]=None,
 ) -> Optional[trimesh.Trimesh]:
     if isinstance(mesh, trimesh.Scene):
         mesh = mesh.to_geometry()
@@ -213,10 +275,9 @@ def postProcessMesh(
     if mesh is None:
         return None
 
-    # Access vertex_normals to trigger lazy computation if not already cached.
-    # Some near-degenerate faces may produce NaN/Inf normals (cross product
-    # divided by zero norm inside trimesh); replace those with random unit vectors
-    # so downstream renderers never see bad geometry.
+    if uv_wrap_mode is not None:
+        mesh.metadata['uv_wrap_mode'] = uv_wrap_mode
+
     normals = np.array(mesh.vertex_normals, copy=True)
     bad_mask = ~np.isfinite(normals).all(axis=1)
     norm_len = np.linalg.norm(normals, axis=1)
@@ -238,6 +299,13 @@ def loadMeshStream(
     file_type: str,
     print_progress: bool=False,
 ) -> Optional[trimesh.Trimesh]:
+    uv_wrap_mode = None
+    if file_type.lower() in ('glb', 'gltf'):
+        mesh_stream.seek(0)
+        raw = mesh_stream.read()
+        uv_wrap_mode = _extractGlbUVWrapMode(raw, print_progress)
+        mesh_stream.seek(0)
+
     try:
         mesh_stream.seek(0)
         mesh = trimesh.load(mesh_stream, file_type=file_type, process=False)
@@ -246,7 +314,7 @@ def loadMeshStream(
         print('\t Failed to load mesh from stream:', e)
         return None
 
-    mesh = postProcessMesh(mesh, print_progress)
+    mesh = postProcessMesh(mesh, print_progress, uv_wrap_mode=uv_wrap_mode)
     if mesh is None:
         print('[ERROR][io::loadMeshStream]')
         print('\t postProcessMesh failed!')
@@ -263,9 +331,19 @@ def loadMeshFile(
         print('\t mesh_file_path:', mesh_file_path)
         return None
 
+    uv_wrap_mode = None
+    ext = os.path.splitext(mesh_file_path)[1].lower()
+    if ext in ('.glb', '.gltf'):
+        try:
+            with open(mesh_file_path, 'rb') as f:
+                raw = f.read()
+            uv_wrap_mode = _extractGlbUVWrapMode(raw, print_progress)
+        except Exception:
+            pass
+
     mesh = trimesh.load(mesh_file_path, process=False)
 
-    mesh = postProcessMesh(mesh, print_progress)
+    mesh = postProcessMesh(mesh, print_progress, uv_wrap_mode=uv_wrap_mode)
     if mesh is None:
         print('[ERROR][io::loadMeshFile]')
         print('\t postProcessMesh failed!')
