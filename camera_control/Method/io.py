@@ -269,6 +269,33 @@ def _sanitize_mesh(
     return new_mesh
 
 
+def _extract_trimeshes_from_scene(
+    scene: trimesh.Scene,
+    print_progress: bool = False,
+) -> Optional[trimesh.Trimesh]:
+    """Extract and concatenate only Trimesh geometries from a Scene,
+    silently discarding non-renderable data (Path3D, PointCloud, etc.)."""
+    meshes = []
+    for name, geom in scene.geometry.items():
+        if isinstance(geom, trimesh.Trimesh):
+            meshes.append(geom)
+        elif print_progress:
+            print(
+                f'[WARN][io::_extract_trimeshes_from_scene] '
+                f'Skipping non-Trimesh geometry "{name}": {type(geom).__name__}'
+            )
+
+    if len(meshes) == 0:
+        if print_progress:
+            print('[ERROR][io::_extract_trimeshes_from_scene] No Trimesh geometry found in scene')
+        return None
+
+    if len(meshes) == 1:
+        return meshes[0]
+
+    return trimesh.util.concatenate(meshes)
+
+
 def postProcessMesh(
     mesh: Union[trimesh.Trimesh, trimesh.Scene],
     print_progress: bool=False,
@@ -276,7 +303,9 @@ def postProcessMesh(
     uv_wrap_mode: Optional[Tuple[str, str]]=None,
 ) -> Optional[trimesh.Trimesh]:
     if isinstance(mesh, trimesh.Scene):
-        mesh = mesh.to_geometry()
+        mesh = _extract_trimeshes_from_scene(mesh, print_progress)
+        if mesh is None:
+            return None
 
     if not isinstance(mesh, trimesh.Trimesh):
         print('[ERROR][io::postProcessMesh]')
