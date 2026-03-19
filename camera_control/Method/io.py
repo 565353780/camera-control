@@ -128,6 +128,8 @@ def _sanitize_mesh(
     verts = np.asarray(mesh.vertices).copy()
     faces = np.asarray(mesh.faces).copy()
     n_verts_orig, n_faces_orig = verts.shape[0], faces.shape[0]
+    if print_progress:
+        print(f'[INFO][io::_sanitize_mesh] source face num: {faces.shape[0]} faces')
 
     if n_verts_orig == 0 or n_faces_orig == 0:
         print('[ERROR][io::_sanitize_mesh] Input mesh has 0 vertices or 0 faces')
@@ -140,6 +142,8 @@ def _sanitize_mesh(
             print(f'[WARN][io::_sanitize_mesh] {(~vert_valid).sum()} non-finite vertices')
         face_ok = vert_valid[faces].all(axis=1)
         faces = faces[face_ok]
+        if print_progress:
+            print(f'[INFO][io::_sanitize_mesh] After removing non-finite vertices: {faces.shape[0]} faces')
 
     # --- 3. Remove faces with out-of-bound indices ---
     oob = (faces < 0) | (faces >= verts.shape[0])
@@ -148,6 +152,8 @@ def _sanitize_mesh(
         if print_progress:
             print(f'[WARN][io::_sanitize_mesh] {bad.sum()} faces with out-of-bound indices')
         faces = faces[~bad]
+        if print_progress:
+            print(f'[INFO][io::_sanitize_mesh] After removing out-of-bound faces: {faces.shape[0]} faces')
 
     # --- 4. Remove degenerate faces (any two vertex indices equal) ---
     degen = (
@@ -159,19 +165,24 @@ def _sanitize_mesh(
         if print_progress:
             print(f'[WARN][io::_sanitize_mesh] {degen.sum()} degenerate faces')
         faces = faces[~degen]
+        if print_progress:
+            print(f'[INFO][io::_sanitize_mesh] After removing degenerate faces: {faces.shape[0]} faces')
 
     # --- 5. Remove zero-area faces ---
     if faces.shape[0] > 0:
+        bbox_max_edge = (verts.max(axis=0) - verts.min(axis=0)).max()
         v0 = verts[faces[:, 0]]
         v1 = verts[faces[:, 1]]
         v2 = verts[faces[:, 2]]
         cross = np.cross(v1 - v0, v2 - v0)
         area_sq = (cross * cross).sum(axis=1)
-        zero_area = area_sq < 1e-20
+        zero_area = area_sq < bbox_max_edge * 1e-20
         if zero_area.any():
             if print_progress:
                 print(f'[WARN][io::_sanitize_mesh] {zero_area.sum()} zero-area faces')
             faces = faces[~zero_area]
+            if print_progress:
+                print(f'[INFO][io::_sanitize_mesh] After removing zero-area faces: {faces.shape[0]} faces')
 
     # --- fast path: nothing was removed and no clamp happened ---
     no_changes = (
@@ -193,6 +204,8 @@ def _sanitize_mesh(
     old_to_new[new_ids] = np.arange(new_ids.shape[0])
     verts = verts[new_ids]
     faces = old_to_new[faces]
+    if print_progress:
+        print(f'[INFO][io::_sanitize_mesh] After compacting unreferenced vertices: {faces.shape[0]} faces')
 
     # --- 7. Rebuild mesh, preserving per-vertex attributes when possible ---
     new_mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
