@@ -161,8 +161,8 @@ class NVDiffRastRenderer(object):
         rast_out: torch.Tensor,
         faces: torch.Tensor,
         vertices: torch.Tensor,
-        vertices_tensor: Optional[torch.Tensor],
-        light_direction: Union[torch.Tensor, np.ndarray, list],
+        vertices_tensor: Optional[torch.Tensor]=None,
+        light_direction: Union[torch.Tensor, np.ndarray, list]=[1, 1, 1],
         ambient_weight: float = 0.3,
         diffuse_weight: float = 0.7,
     ) -> torch.Tensor:
