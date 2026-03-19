@@ -155,6 +155,57 @@ class NVDiffRastRenderer(object):
         return vertex_normals
 
     @staticmethod
+    def _computeShading(
+        mesh: Union[trimesh.Trimesh, trimesh.Scene],
+        camera: 'Camera',
+        rast_out: torch.Tensor,
+        faces: torch.Tensor,
+        vertices: torch.Tensor,
+        vertices_tensor: Optional[torch.Tensor],
+        light_direction: Union[torch.Tensor, np.ndarray, list],
+        ambient_weight: float = 0.3,
+        diffuse_weight: float = 0.7,
+    ) -> torch.Tensor:
+        """计算 Lambertian shading 系数。
+
+        Args:
+            mesh: 原始网格，用于读取预计算的 vertex_normals。
+            camera: 当前相机。
+            rast_out: nvdiffrast 光栅化输出 [1, H, W, 4]。
+            faces: [F, 3] 面索引。
+            vertices: [V, 3] 顶点坐标。
+            vertices_tensor: 若非 None，表示顶点来自外部张量，需重新计算法线。
+            light_direction: 相机空间中的光照方向。
+            ambient_weight: 环境光强度 (0~1)。
+            diffuse_weight: 漫反射光强度 (0~1)。
+
+        Returns:
+            shading: [1, H, W] 每像素亮度系数。
+        """
+        if vertices_tensor is not None:
+            vertex_normals = NVDiffRastRenderer._computeVertexNormals(vertices, faces)
+        else:
+            mesh_normals = np.asarray(mesh.vertex_normals)
+            if mesh_normals.shape[0] == vertices.shape[0]:
+                vertex_normals = toTensor(mesh_normals, torch.float32, camera.device)
+            else:
+                vertex_normals = NVDiffRastRenderer._computeVertexNormals(vertices, faces)
+
+        normals_interp, _ = dr.interpolate(vertex_normals.unsqueeze(0), rast_out, faces)
+        _debug_sync(camera.device, 'dr.interpolate[normals]')
+        normals_interp = torch.nn.functional.normalize(normals_interp, dim=-1, eps=1e-8)
+
+        light_dir = toTensor(light_direction, torch.float32, camera.device)
+        light_dir = torch.nn.functional.normalize(light_dir, dim=0, eps=1e-8)
+
+        normals_cam = torch.matmul(normals_interp, camera.R.T)
+        diffuse = torch.clamp(
+            torch.sum(normals_cam * light_dir, dim=-1), min=0.0, max=1.0
+        )
+        shading = ambient_weight + diffuse_weight * diffuse
+        return torch.clamp(shading, 0.0, 1.0)
+
+    @staticmethod
     def _applyBackground(
         image: torch.Tensor,
         rast_out: torch.Tensor,
@@ -283,6 +334,9 @@ class NVDiffRastRenderer(object):
         bg_color: list = [255, 255, 255],
         vertices_tensor: Optional[torch.Tensor] = None,
         enable_antialias: bool = True,
+        enable_lighting: bool = True,
+        ambient_weight: float = 0.3,
+        diffuse_weight: float = 0.7,
         rasterize_dict: Optional[dict] = None,
     ) -> dict:
         """
@@ -314,34 +368,17 @@ class NVDiffRastRenderer(object):
         else:
             vertex_colors = torch.ones((vertices.shape[0], 3), dtype=torch.float32, device=camera.device)
 
-        if vertices_tensor is not None:
-            vertex_normals = NVDiffRastRenderer._computeVertexNormals(vertices, faces)
-        else:
-            mesh_normals = np.asarray(mesh.vertex_normals)
-            if mesh_normals.shape[0] == vertices.shape[0]:
-                vertex_normals = toTensor(mesh_normals, torch.float32, camera.device)
-            else:
-                vertex_normals = NVDiffRastRenderer._computeVertexNormals(vertices, faces)
-
-        normals_interp, _ = dr.interpolate(vertex_normals.unsqueeze(0), rast_out, faces)
-        _debug_sync(camera.device, 'dr.interpolate[normals]')
-        normals_interp = torch.nn.functional.normalize(normals_interp, dim=-1, eps=1e-8)
-
         colors_interp, _ = dr.interpolate(vertex_colors.unsqueeze(0).contiguous(), rast_out, faces)
         _debug_sync(camera.device, 'dr.interpolate[colors]')
-        colors_interp = torch.clamp(colors_interp, 0.0, 1.0)
+        image = torch.clamp(colors_interp, 0.0, 1.0)
 
-        light_dir_cam = toTensor(light_direction, torch.float32, camera.device)
-        light_dir_cam = torch.nn.functional.normalize(light_dir_cam, dim=0, eps=1e-8)
-
-        normals_cam = torch.matmul(normals_interp, camera.R.T)
-
-        diffuse = torch.clamp(
-            torch.sum(normals_cam * light_dir_cam, dim=-1), min=0.0, max=1.0
-        )
-        shading = 0.3 + 0.7 * diffuse
-
-        image = colors_interp * shading.unsqueeze(-1)
+        if enable_lighting:
+            shading = NVDiffRastRenderer._computeShading(
+                mesh, camera, rast_out, faces, vertices,
+                vertices_tensor, light_direction,
+                ambient_weight, diffuse_weight,
+            )
+            image = image * shading.unsqueeze(-1)
 
         image = NVDiffRastRenderer._applyBackground(image, rast_out, bg_color, camera.device)
 
@@ -387,12 +424,18 @@ class NVDiffRastRenderer(object):
         bg_color: list = [255, 255, 255],
         vertices_tensor: Optional[torch.Tensor] = None,
         enable_antialias: bool = True,
+        enable_lighting: bool = True,
+        ambient_weight: float = 0.3,
+        diffuse_weight: float = 0.7,
         rasterize_dict: Optional[dict] = None,
     ) -> dict:
         """
-        渲染网格纹理颜色（无光照）。无纹理时 fallback 到 renderVertexColor。
+        渲染网格纹理颜色，可选光照。无纹理时 fallback 到 renderVertexColor。
 
-        仅在无纹理时支持light_direction
+        Args:
+            enable_lighting: 是否对纹理施加 Lambertian 光照，避免单色纹理看起来像 mask。
+            ambient_weight: 环境光强度 (0~1)。
+            diffuse_weight: 漫反射光强度 (0~1)。
 
         Returns:
             dict: rgb [H,W,3], rasterize_output [H,W,4], bary_derivs [H,W,4]
@@ -402,9 +445,16 @@ class NVDiffRastRenderer(object):
 
         if not use_texture:
             return NVDiffRastRenderer.renderVertexColor(
-                mesh=mesh, camera=camera, light_direction=light_direction,
-                paint_color=paint_color, bg_color=bg_color,
-                vertices_tensor=vertices_tensor, enable_antialias=enable_antialias,
+                mesh=mesh,
+                camera=camera,
+                light_direction=light_direction,
+                paint_color=paint_color,
+                bg_color=bg_color,
+                vertices_tensor=vertices_tensor,
+                enable_antialias=enable_antialias,
+                enable_lighting=enable_lighting,
+                ambient_weight=ambient_weight,
+                diffuse_weight=diffuse_weight,
                 rasterize_dict=rasterize_dict,
             )
 
@@ -419,7 +469,7 @@ class NVDiffRastRenderer(object):
         if rasterize_dict is None:
             rasterize_dict = NVDiffRastRenderer.rasterize(mesh, camera, vertices_tensor)
 
-        # vertices = rasterize_dict['vertices']
+        vertices = rasterize_dict['vertices']
         faces = rasterize_dict['faces']
         rast_out = rasterize_dict['rast_out']
         rast_out_db = rasterize_dict['rast_out_db']
@@ -444,6 +494,14 @@ class NVDiffRastRenderer(object):
             image = torch.cat([image, torch.zeros(*image.shape[:-1], 3 - c, device=image.device)], dim=-1)
         elif c > 3:
             image = image[..., :3]
+
+        if enable_lighting:
+            shading = NVDiffRastRenderer._computeShading(
+                mesh, camera, rast_out, faces, vertices,
+                vertices_tensor, light_direction,
+                ambient_weight, diffuse_weight,
+            )
+            image = image * shading.unsqueeze(-1)
 
         image = NVDiffRastRenderer._applyBackground(image, rast_out, bg_color, camera.device)
 
@@ -594,6 +652,9 @@ class NVDiffRastRenderer(object):
         bg_color: list = [255, 255, 255],
         vertices_tensor: Optional[torch.Tensor] = None,
         enable_antialias: bool = True,
+        enable_lighting: bool = True,
+        ambient_weight: float = 0.3,
+        diffuse_weight: float = 0.7,
         rasterize_dict: Optional[dict] = None,
     ) -> dict:
         """
@@ -638,6 +699,9 @@ class NVDiffRastRenderer(object):
                 bg_color=bg_color,
                 vertices_tensor=vertices_tensor,
                 enable_antialias=enable_antialias,
+                enable_lighting=enable_lighting,
+                ambient_weight=ambient_weight,
+                diffuse_weight=diffuse_weight,
                 rasterize_dict=rasterize_dict,
             )
             results['rgb'] = tex_out['rgb']
