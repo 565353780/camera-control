@@ -198,6 +198,40 @@ class DepthChannel(object):
                 mask_t = mask_t & (self.conf >= thresh_value)
         return mask_t
 
+    def toDepth(
+        self,
+        conf_thresh: Optional[float] = None,
+        use_mask: bool=True,
+    ) -> torch.Tensor:
+        depth_mask = self.toDepthMask(
+            conf_thresh=conf_thresh,
+            use_mask=use_mask,
+        )
+        # 仅在 depth_mask 为 True 的位置保留原始 depth，其他位置设为 0
+        valid_depth = torch.where(depth_mask, self.depth, torch.zeros_like(self.depth))
+        return valid_depth
+
+    def toCCM(
+        self,
+        conf_thresh: Optional[float] = None,
+        use_mask: bool=True,
+    ) -> torch.Tensor:
+        """
+        返回mask区域内的ccm，其他地方置零。
+
+        Returns:
+            valid_ccm: [H, W, 3]，mask为True的地方保留ccm，其余为0
+        """
+        depth_mask = self.toDepthMask(
+            conf_thresh=conf_thresh,
+            use_mask=use_mask,
+        )  # (H, W)
+
+        # torch.where对于多通道ccm的mask扩展
+        mask_expanded = depth_mask.unsqueeze(-1).expand_as(self.ccm)  # (H, W, 3)
+        valid_ccm = torch.where(mask_expanded, self.ccm, torch.zeros_like(self.ccm))
+        return valid_ccm
+
     def toDepthVis(
         self,
         depth_min: Optional[float]=None,
