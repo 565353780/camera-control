@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 
-from typing import List
+from typing import List, Union
 
 from camera_control.Module.camera import Camera
 
@@ -47,3 +47,46 @@ class CameraFilter(object):
     ) -> List[Camera]:
         far_camera_idxs = CameraFilter.sampleFarCameraIdxs(camera_list, sample_camera_num)
         return [camera_list[idx] for idx in far_camera_idxs]
+
+    @staticmethod
+    def samplePolarFarCameraIdxs(
+        camera_list: List[Camera],
+        target_position: Union[torch.Tensor, np.ndarray, list],
+        sample_camera_num: int,
+    ) -> List[int]:
+        n = len(camera_list)
+        if sample_camera_num >= n:
+            return list(range(n))
+
+        polars = np.array([cam.toPolar(target_position) for cam in camera_list])
+        phi = polars[:, 0]
+        theta = polars[:, 1]
+
+        sphere_points = np.stack([
+            np.sin(phi) * np.sin(theta),
+            np.sin(phi) * np.cos(theta),
+            np.cos(phi),
+        ], axis=1)
+
+        selected = [0]
+        available = list(range(1, n))
+        for _ in range(sample_camera_num - 1):
+            selected_pts = sphere_points[selected]
+            dists = []
+            for i in available:
+                min_dist = np.min(np.linalg.norm(sphere_points[i] - selected_pts, axis=1))
+                dists.append(min_dist)
+            max_idx = available[np.argmax(dists)]
+            selected.append(max_idx)
+            available.remove(max_idx)
+
+        return selected
+
+    @staticmethod
+    def samplePolarFarCameras(
+        camera_list: List[Camera],
+        target_position: Union[torch.Tensor, np.ndarray, list],
+        sample_camera_num: int,
+    ) -> List[Camera]:
+        idxs = CameraFilter.samplePolarFarCameraIdxs(camera_list, target_position, sample_camera_num)
+        return [camera_list[idx] for idx in idxs]

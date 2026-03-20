@@ -78,9 +78,9 @@ def sampleFibonacciSpherePoints(
     phi = polars[:, 0]
     theta = polars[:, 1]
     sin_phi = np.sin(phi)
-    x = sin_phi * np.cos(theta)
-    y = np.cos(phi)
-    z = sin_phi * np.sin(theta)
+    x = sin_phi * np.sin(theta)
+    y = sin_phi * np.cos(theta)
+    z = np.cos(phi)
     points = np.stack([x, y, z], axis=1) * radius + center
     return points
 
@@ -117,7 +117,7 @@ def sampleCameras(
     # 使用Fibonacci球面采样生成均匀分布的相机位置
     camera_positions = sampleFibonacciSpherePoints(
         camera_num, camera_dist, bbox_center
-    )[..., [2, 0, 1]]
+    )
 
     # 创建相机列表
     camera_list = []
@@ -127,9 +127,9 @@ def sampleCameras(
             height=height,
             fx=fx,
             fy=fy,
-            pos=bbox_center + camera_positions[i],
+            pos=camera_positions[i],
             look_at=bbox_center,
-            up=[0, 1, 0],
+            up=[0, 0, 1],
             dtype=dtype,
             device=device,
         )
