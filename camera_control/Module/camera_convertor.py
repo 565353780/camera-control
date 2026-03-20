@@ -88,21 +88,74 @@ class CameraConvertor(object):
     def normalizeCameras(
         camera_list: List[Camera],
     ) -> List[Camera]:
+        """
+        归一化相机阵列的世界坐标系：
+        1. 旋转使所有相机 Y 轴（图像朝上）的平均方向对齐世界 +Z
+        2. 绕 Z 轴旋转使第一个相机的视线方向对齐世界 -X
+        3. 平移使所有视线射线的最近公共交点位于世界原点
+        """
         normalized_camera_list = deepcopy(camera_list)
 
         device = normalized_camera_list[0].device
         dtype = normalized_camera_list[0].dtype
 
+        z_cam = torch.tensor([0., 0., 1.], dtype=dtype, device=device)
+        y_cam = torch.tensor([0., 1., 0.], dtype=dtype, device=device)
+        z_world = torch.tensor([0., 0., 1.], dtype=dtype, device=device)
+
+        def rot_from_a_to_b(a, b):
+            v = torch.cross(a, b)
+            c = torch.dot(a, b)
+            s = torch.linalg.norm(v)
+            if s < 1e-8:
+                return torch.eye(3, dtype=dtype, device=device)
+            vx = torch.tensor([
+                [0, -v[2], v[1]],
+                [v[2], 0, -v[0]],
+                [-v[1], v[0], 0]
+            ], dtype=dtype, device=device)
+            return torch.eye(3, dtype=dtype, device=device) + vx + vx @ vx * ((1 - c) / (s * s))
+
         # =====================================================
-        # Step 1: 主光轴最近公共点 -> 世界原点
+        # Step 1: 旋转 — 平均 image-Y 对齐世界 +Z
+        # =====================================================
+        y_avg = torch.stack([cam.R.T @ y_cam for cam in normalized_camera_list]).mean(dim=0)
+        y_avg = y_avg / (torch.linalg.norm(y_avg) + 1e-8)
+
+        Q_up = rot_from_a_to_b(y_avg, z_world)
+
+        for cam in normalized_camera_list:
+            cam.world2camera[:3, :3] = cam.R @ Q_up.T
+
+        # =====================================================
+        # Step 2: 旋转 — cam0 视线对齐世界 -X（仅绕 Z 轴）
+        # =====================================================
+        look0 = -(normalized_camera_list[0].R.T @ z_cam)
+
+        look0_xy = look0.clone()
+        look0_xy[2] = 0.0
+        look0_xy = look0_xy / (torch.linalg.norm(look0_xy) + 1e-8)
+
+        yaw = torch.atan2(look0_xy[1], look0_xy[0])
+        delta_yaw = torch.tensor(torch.pi, dtype=dtype, device=device) - yaw
+
+        cos_d, sin_d = torch.cos(delta_yaw), torch.sin(delta_yaw)
+        Q_yaw = torch.tensor([
+            [cos_d, -sin_d, 0.0],
+            [sin_d,  cos_d, 0.0],
+            [0.0,    0.0,   1.0]
+        ], dtype=dtype, device=device)
+
+        for cam in normalized_camera_list:
+            cam.world2camera[:3, :3] = cam.R @ Q_yaw.T
+
+        # =====================================================
+        # Step 3: 平移 — 视线最近公共交点移至原点
         # =====================================================
         origins, dirs = [], []
-        z_cam = torch.tensor([0., 0., 1.], dtype=dtype, device=device)
-
-        for cam in camera_list:
-            R, t = cam.R, cam.t
-            C = -R.T @ t
-            d = -R.T @ z_cam
+        for cam in normalized_camera_list:
+            C = -cam.R.T @ cam.t
+            d = -(cam.R.T @ z_cam)
             d = d / (torch.linalg.norm(d) + 1e-8)
             origins.append(C)
             dirs.append(d)
@@ -124,84 +177,6 @@ class CameraConvertor(object):
         for cam in normalized_camera_list:
             cam.world2camera[:3, 3] += cam.R @ focus
 
-        # =====================================================
-        # Step 2.1: 平均 image-Y -> 世界 +Z
-        # =====================================================
-        y_cam = torch.tensor([0., 1., 0.], dtype=dtype, device=device)
-        z_world = torch.tensor([0., 0., 1.], dtype=dtype, device=device)
-
-        y_world = torch.stack([cam.R.T @ y_cam for cam in normalized_camera_list]).mean(dim=0)
-        y_world = y_world / (torch.linalg.norm(y_world) + 1e-8)
-
-        def rot_from_a_to_b(a, b):
-            v = torch.cross(a, b)
-            c = torch.dot(a, b)
-            s = torch.linalg.norm(v)
-            if s < 1e-8:
-                return torch.eye(3, dtype=dtype, device=device)
-            vx = torch.tensor([
-                [0, -v[2], v[1]],
-                [v[2], 0, -v[0]],
-                [-v[1], v[0], 0]
-            ], dtype=dtype, device=device)
-            return torch.eye(3, dtype=dtype, device=device) + vx + vx @ vx * ((1 - c) / (s * s))
-
-        Q_y = rot_from_a_to_b(y_world, z_world)
-
-        for cam in normalized_camera_list:
-            cam.world2camera[:3, :3] = cam.R @ Q_y.T
-
-        # =====================================================
-        # Step 2.2: 仅绕世界 Z 轴，使 cam0.image-Z → +X
-        # =====================================================
-        cam0 = normalized_camera_list[0]
-        z0_world = cam0.R.T @ z_cam
-
-        # 投影到 XY 平面
-        z0_xy = z0_world.clone()
-        z0_xy[2] = 0.0
-        z0_xy = z0_xy / (torch.linalg.norm(z0_xy) + 1e-8)
-
-        # yaw 角
-        yaw = torch.atan2(z0_xy[1], z0_xy[0])
-
-        cos_y, sin_y = torch.cos(-yaw), torch.sin(-yaw)
-        Q_z = torch.tensor([
-            [cos_y, -sin_y, 0.0],
-            [sin_y,  cos_y, 0.0],
-            [0.0,    0.0,   1.0]
-        ], dtype=dtype, device=device)
-
-        for cam in normalized_camera_list:
-            cam.world2camera[:3, :3] = cam.R @ Q_z.T
-
-        # =====================================================
-        # Step 2.3: 方向一致性修正（避免整体翻转）
-        # =====================================================
-        x_cam = torch.tensor([1., 0., 0.], dtype=dtype, device=device)
-        x0_world = normalized_camera_list[0].R.T @ x_cam
-
-        if x0_world[1] < 0:  # image-X 不应指向 -Y
-            Q_flip = torch.tensor([
-                [-1.,  0., 0.],
-                [ 0., -1., 0.],
-                [ 0.,  0., 1.]
-            ], dtype=dtype, device=device)
-
-            for cam in normalized_camera_list:
-                cam.world2camera[:3, :3] = cam.R @ Q_flip.T
-
-        # ===============================
-        # Step 3: 世界坐标系轴置换 (ZXY -> XYZ)
-        # ===============================
-        P = torch.tensor([
-            [0., 1., 0.],
-            [0., 0., 1.],
-            [1., 0., 0.],
-        ], dtype=dtype, device=device)
-
-        for cam in normalized_camera_list:
-            cam.world2camera[:3, :3] = cam.world2camera[:3, :3] @ P.T
         return normalized_camera_list
 
     @staticmethod
