@@ -235,6 +235,17 @@ class CameraData(object):
         self.world2camera = self.world2camera.to(dtype=self.dtype, device=self.device)
         return True
 
+    def setImageSize(
+        self,
+        width: int,
+        height: int,
+    ) -> bool:
+        self.width = int(width)
+        self.height = int(height)
+        self.cx = 0.5 * self.width
+        self.cy = 0.5 * self.height
+        return True
+
     def setR(
         self,
         R: Union[torch.Tensor, np.ndarray, list],
@@ -305,6 +316,16 @@ class CameraData(object):
         # forward 叉乘 up 得到右方向
         up_normalized = up / (torch.linalg.norm(up) + 1e-8)
         x_axis_world = torch.linalg.cross(forward_world, up_normalized)
+        x_norm = torch.linalg.norm(x_axis_world)
+
+        if x_norm < 1e-6:
+            fallback_up = torch.tensor([0., 1., 0.], dtype=self.dtype, device=self.device)
+            x_axis_world = torch.linalg.cross(forward_world, fallback_up)
+            x_norm = torch.linalg.norm(x_axis_world)
+            if x_norm < 1e-6:
+                fallback_up = torch.tensor([1., 0., 0.], dtype=self.dtype, device=self.device)
+                x_axis_world = torch.linalg.cross(forward_world, fallback_up)
+
         x_axis_world = x_axis_world / (torch.linalg.norm(x_axis_world) + 1e-8)
 
         # 计算相机坐标系的 Y 轴（上方向）
@@ -570,6 +591,107 @@ class CameraData(object):
         new_pos = center - dist * look_at
 
         self.setWorldPose(center, self.R[1], new_pos)
+        return True
+
+    def toPolar(
+        self,
+        target_position: Union[torch.Tensor, np.ndarray, list],
+    ) -> np.ndarray:
+        """
+        获取相机相对于目标点的极坐标 (phi, theta, dist)。
+
+        极坐标定义在世界坐标系中：
+        - phi: 极角/天顶角 [0, pi]，与 z 轴正方向的夹角
+        - theta: 方位角，xy 平面上的角度
+        - dist: 相机到目标点的距离
+
+        笛卡尔坐标与极坐标的关系（与 sampleFibonacciSpherePoints 一致）：
+            x = sin(phi) * sin(theta)
+            y = sin(phi) * cos(theta)
+            z = cos(phi)
+
+        Args:
+            target_position: 目标点在世界坐标系中的位置
+
+        Returns:
+            polar: (phi, theta, dist)
+        """
+        target_position = toNumpy(target_position, np.float64).flatten()
+        cam_pos = toNumpy(self.pos, np.float64).flatten()
+
+        diff = cam_pos - target_position
+        dist = float(np.linalg.norm(diff))
+
+        if dist < 1e-12:
+            return np.array([0.0, 0.0, 0.0])
+
+        direction = diff / dist
+
+        phi = float(np.arccos(np.clip(direction[2], -1.0, 1.0)))
+        theta = float(np.arctan2(direction[0], direction[1]))
+
+        return np.array([phi, theta, dist])
+
+    def setPolarPosition(
+        self,
+        polar: Union[torch.Tensor, np.ndarray, list],
+        target_position: Union[torch.Tensor, np.ndarray, list],
+        camera_dist: Optional[float] = None,
+    ) -> bool:
+        """
+        通过极坐标设置相机位姿，相机看向目标点。
+
+        直接从 (phi, theta) 解析计算旋转矩阵，避免 setWorldPose 在极点处的
+        万向锁问题（forward 平行于 up 时 cross product 退化）。
+
+        解析公式等价于 setWorldPose(look_at, up=[0,0,1], pos) 在非退化情况下的结果，
+        并在极点（phi=0, phi=pi）处仍给出有效的正交旋转矩阵。
+
+        Args:
+            polar: (phi, theta[, dist])，极坐标参数
+            target_position: 目标点在世界坐标系中的位置
+            camera_dist: 若指定则覆盖 polar 中的 dist；若 polar 只有 2 个元素则必须指定
+
+        Returns:
+            是否设置成功
+        """
+        polar = toNumpy(polar, np.float64).flatten()
+        target_position = toNumpy(target_position, np.float64).flatten()
+
+        phi = polar[0]
+        theta = polar[1]
+
+        if camera_dist is not None:
+            dist = float(camera_dist)
+        elif polar.shape[0] >= 3:
+            dist = float(polar[2])
+        else:
+            print('[ERROR][CameraData::setPolarPosition]')
+            print('\t dist not provided in polar or camera_dist!')
+            return False
+
+        cos_phi = np.cos(phi)
+        sin_phi = np.sin(phi)
+        cos_theta = np.cos(theta)
+        sin_theta = np.sin(theta)
+
+        x = sin_phi * sin_theta
+        y = sin_phi * cos_theta
+        z = cos_phi
+
+        direction = np.array([x, y, z])
+        cam_pos = target_position + direction * dist
+
+        x_axis = np.array([-cos_theta, sin_theta, 0.0])
+        y_axis = np.array([-cos_phi * sin_theta, -cos_phi * cos_theta, sin_phi])
+        z_axis = np.array([sin_phi * sin_theta, sin_phi * cos_theta, cos_phi])
+
+        R = np.stack([x_axis, y_axis, z_axis])
+        t = -R @ cam_pos
+
+        self.world2camera = torch.eye(4, dtype=self.dtype, device=self.device)
+        self.setR(R)
+        self.setT(t)
         return True
 
     def toO3DMesh(

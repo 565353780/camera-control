@@ -210,6 +210,9 @@ def _sanitize_mesh(
     # --- 7. Rebuild mesh, preserving per-vertex attributes when possible ---
     new_mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
 
+    #TODO: need to check if this is necessary
+    trimesh.repair.fix_winding(new_mesh)
+
     # --- 7a. Migrate vertex_normals ---
     try:
         normals = mesh._cache.get('vertex_normals')

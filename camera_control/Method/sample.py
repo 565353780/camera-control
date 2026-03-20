@@ -30,7 +30,11 @@ def sampleFibonacciPolars(num_polars: int) -> np.ndarray:
 def sampleFibonacciRotations(num_rotations: int) -> np.ndarray:
     """
     基于 sampleFibonacciPolars 并行生成 num_rotations 个 3x3 旋转矩阵。
-    R = Rz(phi) @ Ry(theta)，phi 为方位角 (xy 平面)，theta 为极角 (与 z 轴夹角)。
+    R = Rz(phi) @ Ry(theta)，其中 phi 为极角/天顶角 [0, pi]（与 z 轴夹角），
+    theta 为方位角（由 Fibonacci 黄金角递增）。
+
+    注意：此处 phi/theta 的含义与 sampleFibonacciPolars 一致：
+    polars[:, 0] = phi（天顶角），polars[:, 1] = theta（方位角）。
 
     Args:
         num_rotations: 旋转数量
