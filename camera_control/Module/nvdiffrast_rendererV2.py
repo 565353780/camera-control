@@ -6,7 +6,7 @@ from typing import Union, Optional
 
 from camera_control.Method.data import toTensor
 from camera_control.Module.camera import Camera
-# from flexi_cubes.Module.sh_utils import RGB2SH, SH2RGB, eval_sh  
+from flexi_cubes.Module.sh_utils import RGB2SH, SH2RGB, eval_sh  
 
 
 
