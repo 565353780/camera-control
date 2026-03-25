@@ -119,16 +119,29 @@ class NVDiffRastRenderer(object):
         for renderType in return_types: 
             img = None 
             if renderType == "mask": 
-                img = dr.antialias((rast_out[..., -1:] > 0).float(), rast_out, vertices_clip, faces_int) 
-                # mask_hw = img[0, :, :, 0].clamp(0.0, 1.0)  # [H, W]
+                # rast_out: [1, H, W, 4]
+                rast_face_idx = rast_out[0, :, :, 3]   # triangle_id + 1, background = 0
+                rast_mask = rast_face_idx > 0          # [H, W], bool
+
+                img = dr.antialias(
+                    (rast_out[..., -1:] > 0).float(),
+                    rast_out,
+                    vertices_clip,
+                    faces_int
+                )
+
                 mask_hw = img[0, :, :, 0]  # [H, W]
-                # mask_binary = (mask_hw > 0.5).bool()
+
+                hit_face_ids = torch.unique(rast_face_idx[rast_mask].long() - 1)
+                hit_face_ids = hit_face_ids[hit_face_ids >= 0]
 
                 return_dict[renderType] = {
-                    "img": img[0], 
-                    # "mask": mask_binary
-                    "mask": mask_hw
-                } 
+                    "img": img[0],
+                    "mask": mask_hw,               # anti-aliased mask, for visualization/loss
+                    "rast_mask": rast_mask,        # hard rasterized visibility
+                    "rast_face_idx": rast_face_idx,
+                    "hit_face_ids": hit_face_ids,
+                }
                 
 
             elif renderType == "normal": 
