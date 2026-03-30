@@ -277,15 +277,18 @@ def _extract_trimeshes_from_scene(
     print_progress: bool = False,
 ) -> Optional[trimesh.Trimesh]:
     """Extract and concatenate only Trimesh geometries from a Scene,
-    silently discarding non-renderable data (Path3D, PointCloud, etc.)."""
+    applying each node's world transform from the scene graph so that
+    coordinate-system conversions (e.g. glTF Y-up) are not lost."""
     meshes = []
-    for name, geom in scene.geometry.items():
+    for node_name in scene.graph.nodes_geometry:
+        transform, geometry_name = scene.graph[node_name]
+        geom = scene.geometry[geometry_name]
         if isinstance(geom, trimesh.Trimesh):
-            meshes.append(geom)
+            meshes.append(geom.copy().apply_transform(transform))
         elif print_progress:
             print(
                 f'[WARN][io::_extract_trimeshes_from_scene] '
-                f'Skipping non-Trimesh geometry "{name}": {type(geom).__name__}'
+                f'Skipping non-Trimesh geometry "{geometry_name}": {type(geom).__name__}'
             )
 
     if len(meshes) == 0:
