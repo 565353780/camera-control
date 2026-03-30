@@ -388,8 +388,10 @@ def loadMeshFile(
             uv_wrap_mode = _extractGlbUVWrapMode(raw, print_progress)
         except Exception:
             pass
-
-    mesh = trimesh.load(mesh_file_path, process=False)
+    mesh = trimesh.load(mesh_file_path, process=False, force='mesh')
+    trimesh.repair.fix_winding(mesh)  
+    if isinstance(mesh, trimesh.Scene):
+        mesh = mesh.to_geometry()
 
     mesh = postProcessMesh(mesh, print_progress, uv_wrap_mode=uv_wrap_mode)
     if mesh is None:
