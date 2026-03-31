@@ -23,10 +23,9 @@ class Camera(
         self,
         width: int = 640,
         height: int = 480,
-        fx: float = 500.0,
-        fy: float = 500.0,
-        cx: Optional[float] = None,
-        cy: Optional[float] = None,
+        fovx_degree: float = 65.0,
+        cx: float = 0.0,
+        cy: float = 0.0,
         pos: Union[torch.Tensor, np.ndarray, list] = [0, 0, 0],
         look_at: Union[torch.Tensor, np.ndarray, list] = [1, 0, 0],
         up: Union[torch.Tensor, np.ndarray, list] = [0, 0, 1],
@@ -38,8 +37,7 @@ class Camera(
             self,
             width,
             height,
-            fx,
-            fy,
+            fovx_degree,
             cx,
             cy,
             pos,
@@ -66,9 +64,6 @@ class Camera(
         dtype=torch.float32,
         device: str = 'cpu',
     ):
-        fx = 500
-        fy = 500
-
         points = toNumpy(points)
 
         if points.shape[-1] != 3:
@@ -95,23 +90,26 @@ class Camera(
 
         pixels = uv * np.array([width, height], dtype=np.float64) - 0.5
 
+        fx_init = 500.0
         R, t, K = solve_and_refine(
             points,
             pixels,
             width=width,
             height=height,
-            fx_init=fx,
-            fy_init=fy,
+            fx_init=fx_init,
+            fy_init=fx_init,
             fix_principal_point=True,
         )
+
+        fx_solved = float(K[0, 0])
+        fovx_degree = CameraData.fxToFovxDegree(fx_solved, width)
 
         camera = cls(
             width,
             height,
-            fx=K[0, 0],
-            fy=K[1, 1],
-            cx=K[0, 2],
-            cy=K[1, 2],
+            fovx_degree=fovx_degree,
+            cx=float(K[0, 2]),
+            cy=float(K[1, 2]),
             dtype=dtype,
             device=device,
         )

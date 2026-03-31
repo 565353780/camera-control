@@ -1,4 +1,5 @@
 import os
+import math
 import torch
 import numpy as np
 import open3d as o3d
@@ -15,10 +16,9 @@ class CameraData(object):
         self,
         width: int = 640,
         height: int = 480,
-        fx: float = 500.0,
-        fy: float = 500.0,
-        cx: Optional[float] = None,
-        cy: Optional[float] = None,
+        fovx_degree: float = 65.0,
+        cx: float = 0.0,
+        cy: float = 0.0,
         pos: Union[torch.Tensor, np.ndarray, list] = [0, 0, 0],
         look_at: Union[torch.Tensor, np.ndarray, list] = [1, 0, 0],
         up: Union[torch.Tensor, np.ndarray, list] = [0, 0, 1],
@@ -40,16 +40,9 @@ class CameraData(object):
         """
         self.width = int(width)
         self.height = int(height)
-        self.fx = float(fx)
-        self.fy = float(fy)
-        if cx is None:
-            self.cx = 0.5 * self.width
-        else:
-            self.cx = float(cx)
-        if cy is None:
-            self.cy = 0.5 * self.height
-        else:
-            self.cy = float(cy)
+        self.fovx_degree = float(fovx_degree)
+        self.cx = float(cx)
+        self.cy = float(cy)
         self.dtype = dtype
         self.device = device
 
@@ -58,6 +51,50 @@ class CameraData(object):
         else:
             self.setWorldPose(look_at, up, pos)
         return
+
+    @property
+    def fx(self) -> float:
+        fovx_rad = math.radians(self.fovx_degree)
+        return self.width / (2.0 * math.tan(fovx_rad / 2.0))
+
+    @fx.setter
+    def fx(self, value: float) -> None:
+        self.fovx_degree = CameraData.fxToFovxDegree(float(value), self.width)
+
+    @property
+    def fovy_degree(self) -> float:
+        fovx_rad = math.radians(self.fovx_degree)
+        fovy_rad = 2.0 * math.atan(self.height / self.width * math.tan(fovx_rad / 2.0))
+        return math.degrees(fovy_rad)
+
+    @property
+    def fy(self) -> float:
+        return self.fx
+
+    @fy.setter
+    def fy(self, value: float) -> None:
+        self.fovx_degree = CameraData.fxToFovxDegree(float(value), self.width)
+
+    @staticmethod
+    def fxToFovxDegree(fx: float, width: int) -> float:
+        return math.degrees(2.0 * math.atan(width / (2.0 * fx)))
+
+    def setIntrinsic(
+        self,
+        fx: float,
+        cx: float,
+        cy: float,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+    ) -> bool:
+        if width is not None:
+            self.width = int(width)
+        if height is not None:
+            self.height = int(height)
+        self.fovx_degree = CameraData.fxToFovxDegree(fx, self.width)
+        self.cx = float(cx)
+        self.cy = float(cy)
+        return True
 
     @classmethod
     def fromDict(
@@ -69,8 +106,7 @@ class CameraData(object):
         camera = cls(
             width=data_dict['width'],
             height=data_dict['height'],
-            fx=data_dict['fx'],
-            fy=data_dict['fy'],
+            fovx_degree=data_dict['fovx_degree'],
             cx=data_dict['cx'],
             cy=data_dict['cy'],
             world2camera=data_dict['world2camera'],
@@ -476,12 +512,11 @@ class CameraData(object):
         extrinsic = toTensor(extrinsic, self.dtype, self.device).reshape(4, 4)
         intrinsic = toNumpy(intrinsic, np.float64).reshape(3, 3)
 
-        self.cx = float(intrinsic[0][2])
-        self.cy = float(intrinsic[1][2])
-        self.width = int(2.0 * self.cx)
-        self.height = int(2.0 * self.cy)
-        self.fx = float(intrinsic[0][0])
-        self.fy = float(intrinsic[1][1])
+        cx = float(intrinsic[0][2])
+        cy = float(intrinsic[1][2])
+        width = int(2.0 * cx)
+        height = int(2.0 * cy)
+        self.setIntrinsic(float(intrinsic[0][0]), cx, cy, width, height)
 
         # 定义坐标系转换矩阵
         C = torch.diag(torch.tensor([1, -1, -1, 1], dtype=self.dtype, device=self.device))
@@ -497,12 +532,11 @@ class CameraData(object):
         extrinsic = toTensor(extrinsic, self.dtype, self.device).reshape(4, 4)
         intrinsic = toNumpy(intrinsic, np.float64).reshape(3, 3)
 
-        self.cx = float(intrinsic[0][2])
-        self.cy = float(intrinsic[1][2])
-        self.width = int(2.0 * self.cx)
-        self.height = int(2.0 * self.cy)
-        self.fx = float(intrinsic[0][0])
-        self.fy = float(intrinsic[1][1])
+        cx = float(intrinsic[0][2])
+        cy = float(intrinsic[1][2])
+        width = int(2.0 * cx)
+        height = int(2.0 * cy)
+        self.setIntrinsic(float(intrinsic[0][0]), cx, cy, width, height)
 
         self.setWorld2CameraCV(extrinsic)
         return True
@@ -520,12 +554,11 @@ class CameraData(object):
         pose = toTensor(pose, self.dtype, self.device).reshape(7)
         intrinsic = toNumpy(intrinsic, np.float64).reshape(3, 3)
 
-        self.cx = float(intrinsic[0][2])
-        self.cy = float(intrinsic[1][2])
-        self.width = int(2.0 * self.cx)
-        self.height = int(2.0 * self.cy)
-        self.fx = float(intrinsic[0][0])
-        self.fy = float(intrinsic[1][1])
+        cx = float(intrinsic[0][2])
+        cy = float(intrinsic[1][2])
+        width = int(2.0 * cx)
+        height = int(2.0 * cy)
+        self.setIntrinsic(float(intrinsic[0][0]), cx, cy, width, height)
 
         quat = pose[:4]   # qw, qx, qy, qz
         t = pose[4:7]     # tx, ty, tz
@@ -560,8 +593,8 @@ class CameraData(object):
 
         self.setCamera2WorldCV(camera2world_cv)
 
-        self.fx, _, _ = [float(d) for d in lines[3].split()]
-        _, self.fy, _ = [float(d) for d in lines[4].split()]
+        fx, _, _ = [float(d) for d in lines[3].split()]
+        self.fovx_degree = CameraData.fxToFovxDegree(fx, self.width)
         return True
 
     def focusOnPoints(
@@ -785,8 +818,7 @@ class CameraData(object):
         data_dict = {
             'width': self.width,
             'height': self.height,
-            'fx': self.fx,
-            'fy': self.fy,
+            'fovx_degree': self.fovx_degree,
             'cx': self.cx,
             'cy': self.cy,
             'world2camera': toNumpy(self.world2camera, np.float64),
@@ -851,7 +883,8 @@ class CameraData(object):
 
         print(line_start + '[INFO][CameraData]')
         print(line_start + '\t image_size: [', self.width, ',', self.height, ']')
-        print(line_start + '\t focal: [', self.fx, ',', self.fy, ',', self.cx, ',', self.cy, ']')
+        print(line_start + '\t fovx_degree:', self.fovx_degree)
+        print(line_start + '\t cx, cy: [', self.cx, ',', self.cy, ']')
         print(line_start + '\t pos:', toNumpy(self.pos).tolist())
         print(line_start + '\t x_axis (right):', toNumpy(x_axis).tolist())
         print(line_start + '\t y_axis (up):', toNumpy(y_axis).tolist())
