@@ -105,6 +105,7 @@ def sampleCameras(
     fovx_degree_range: List[float] = [30.0, 90.0],
     dtype = torch.float32,
     device: str = 'cuda:0',
+    focus_center_ratio: float=1.0,
     is_random_up: bool = False,
 ) -> List[Camera]:
     """
@@ -136,12 +137,18 @@ def sampleCameras(
     # 创建相机列表
     camera_list = []
     for i in range(camera_num):
+        focus_center = np.random.rand() > focus_center_ratio
+        if focus_center:
+            look_at = bbox_center
+        else:
+            look_at = mesh.vertices[np.random.randint(0, mesh.vertices.shape[0])]
+
         camera_dist = np.random.uniform(camera_dist_range[0], camera_dist_range[1])
 
-        camera_position = bbox_center + camera_dist * sampled_camera_directions[i]
+        camera_position = look_at + camera_dist * sampled_camera_directions[i]
 
         if is_random_up:
-            up = sampleRandomUp(camera_position, bbox_center)
+            up = sampleRandomUp(camera_position, look_at)
         else:
             up = [0, 0, 1]
 
