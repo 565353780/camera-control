@@ -1,4 +1,5 @@
 import torch
+import random
 import trimesh
 import numpy as np
 from typing import List
@@ -62,42 +63,49 @@ def sampleFibonacciRotations(num_rotations: int) -> np.ndarray:
     Ry[:, 2, 2] = cth
     return np.matmul(Rz, Ry)
 
-def sampleFibonacciSpherePoints(
-    num_points: int,
-    radius: float,
-    center: np.ndarray,
+def sampleFibonacciDirections(
+    num_directions: int,
 ) -> np.ndarray:
-    """
-    使用Fibonacci球面采样生成均匀分布的点
-
-    Args:
-        num_points: 点的数量
-        radius: 球的半径
-        center: 球心位置
-
-    Returns:
-        points: shape (num_points, 3) 的点坐标数组
-    """
-    polars = sampleFibonacciPolars(num_points)  # (num_points, 2), (phi, theta)
+    polars = sampleFibonacciPolars(num_directions)  # (num_points, 2), (phi, theta)
     phi = polars[:, 0]
     theta = polars[:, 1]
     sin_phi = np.sin(phi)
     x = sin_phi * np.sin(theta)
     y = sin_phi * np.cos(theta)
     z = np.cos(phi)
-    points = np.stack([x, y, z], axis=1) * radius + center
-    return points
+    directions = np.stack([x, y, z], axis=1)
+    return directions
+
+def sampleRandomUp(pos: np.ndarray, look_at: np.ndarray) -> np.ndarray:
+    """
+    随机生成一个垂直于视线方向的单位向量作为up方向。
+
+    Args:
+        pos: 相机位置, shape (3,)
+        look_at: 注视点位置, shape (3,)
+
+    Returns:
+        up: 随机的up方向单位向量, shape (3,)
+    """
+    forward = look_at - pos
+    forward = forward / np.linalg.norm(forward)
+
+    rand_vec = np.random.randn(3)
+    rand_vec -= np.dot(rand_vec, forward) * forward
+    rand_vec = rand_vec / np.linalg.norm(rand_vec)
+    return rand_vec
 
 def sampleCameras(
     mesh: trimesh.Trimesh,
-    camera_num: int = 12,
-    camera_dist: float = 2.5,
+    candidate_camera_num: int=720,
+    camera_num: int = 4,
+    camera_dist_range: List[float] = [2.5, 2.5],
     width: int = 518,
     height: int = 518,
-    fx: float = 500.0,
-    fy: float = 500.0,
+    fovx_degree_range: List[float] = [30.0, 90.0],
     dtype = torch.float32,
     device: str = 'cuda:0',
+    is_random_up: bool = False,
 ) -> List[Camera]:
     """
     创建围绕mesh均匀分布的相机和深度数据
@@ -110,6 +118,7 @@ def sampleCameras(
         height: 图像高度
         fx: 焦距x
         fy: 焦距y
+        is_random_up: 是否随机生成垂直于视线方向的up向量
 
     Returns:
         camera_list: 相机列表
@@ -119,21 +128,32 @@ def sampleCameras(
     bbox_center = (bbox[0] + bbox[1]) / 2.0
 
     # 使用Fibonacci球面采样生成均匀分布的相机位置
-    camera_positions = sampleFibonacciSpherePoints(
-        camera_num, camera_dist, bbox_center
-    )
+    camera_directions = sampleFibonacciDirections(candidate_camera_num)
+
+    sampled_indices = random.sample(range(candidate_camera_num), camera_num)
+    sampled_camera_directions = camera_directions[sampled_indices]
 
     # 创建相机列表
     camera_list = []
     for i in range(camera_num):
+        camera_dist = np.random.uniform(camera_dist_range[0], camera_dist_range[1])
+
+        camera_position = bbox_center + camera_dist * sampled_camera_directions[i]
+
+        if is_random_up:
+            up = sampleRandomUp(camera_position, bbox_center)
+        else:
+            up = [0, 0, 1]
+
+        fovx_degree = np.random.uniform(*fovx_degree_range)
+
         camera = Camera(
             width=width,
             height=height,
-            fx=fx,
-            fy=fy,
-            pos=camera_positions[i],
+            fovx_degree=fovx_degree,
+            pos=camera_position,
             look_at=bbox_center,
-            up=[0, 0, 1],
+            up=up,
             dtype=dtype,
             device=device,
         )
