@@ -17,8 +17,8 @@ class CameraData(object):
         width: int = 640,
         height: int = 480,
         fovx_degree: float = 65.0,
-        cx: float = 0.0,
-        cy: float = 0.0,
+        cx: Optional[float] = None,
+        cy: Optional[float] = None,
         pos: Union[torch.Tensor, np.ndarray, list] = [0, 0, 0],
         look_at: Union[torch.Tensor, np.ndarray, list] = [1, 0, 0],
         up: Union[torch.Tensor, np.ndarray, list] = [0, 0, 1],
@@ -41,8 +41,14 @@ class CameraData(object):
         self.width = int(width)
         self.height = int(height)
         self.fovx_degree = float(fovx_degree)
-        self.cx = float(cx)
-        self.cy = float(cy)
+        if cx is not None:
+            self.cx = float(cx)
+        else:
+            self.cx = float(0.5 * self.width)
+        if cy is not None:
+            self.cy = float(cy)
+        else:
+            self.cy = float(0.5 * self.width)
         self.dtype = dtype
         self.device = device
 
