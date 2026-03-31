@@ -24,8 +24,8 @@ class Camera(
         width: int = 640,
         height: int = 480,
         fovx_degree: float = 65.0,
-        cx: float = 0.0,
-        cy: float = 0.0,
+        cx: Optional[float] = None,
+        cy: Optional[float] = None,
         pos: Union[torch.Tensor, np.ndarray, list] = [0, 0, 0],
         look_at: Union[torch.Tensor, np.ndarray, list] = [1, 0, 0],
         up: Union[torch.Tensor, np.ndarray, list] = [0, 0, 1],
@@ -33,19 +33,12 @@ class Camera(
         dtype=torch.float32,
         device: str = 'cpu',
     ) -> None:
-        CameraData.__init__(
-            self,
-            width,
-            height,
-            fovx_degree,
-            cx,
-            cy,
-            pos,
-            look_at,
-            up,
+        CameraData.__init__(self,
+            width, height, fovx_degree,
+            cx, cy,
+            pos, look_at, up,
             world2camera,
-            dtype,
-            device,
+            dtype, device,
         )
         MaskChannel.__init__(self)
         RGBChannel.__init__(self)
