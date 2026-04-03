@@ -85,6 +85,15 @@ class CameraData(object):
     def fxToFovxDegree(fx: float, width: int) -> float:
         return math.degrees(2.0 * math.atan(width / (2.0 * fx)))
 
+    def setFov(self, fovx_degree: float) -> bool:
+        if fovx_degree <= 0.0 or fovx_degree >= 180.0:
+            print("[ERROR][CameraData::setFov]")
+            print("\t fovx_degree must be in (0, 180), got", fovx_degree)
+            return False
+
+        self.fovx_degree = float(fovx_degree)
+        return True
+
     def setIntrinsic(
         self,
         fx: float,
