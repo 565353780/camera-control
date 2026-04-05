@@ -87,12 +87,23 @@ class CameraConvertor(object):
     @staticmethod
     def normalizeCameras(
         camera_list: List[Camera],
+        x_direction: list=[1, 0, 0],
+        y_direction: list=[0, 1, 0],
+        z_direction: list=[0, 0, 1],
     ) -> List[Camera]:
         """
-        归一化相机阵列的世界坐标系：
-        1. 旋转使所有相机 Y 轴（图像朝上）的平均方向对齐世界 +Z
-        2. 绕 Z 轴旋转使第一个相机的视线方向对齐世界 -X
+        归一化相机阵列的世界坐标系（支持任意目标坐标轴方向）：
+        1. 旋转使所有相机 Y 轴（图像朝上）的平均方向对齐 z_direction
+        2. 绕 z_direction 轴旋转使第一个相机的视线方向对齐 -x_direction
         3. 平移使所有视线射线的最近公共交点位于世界原点
+
+        相机坐标系约定：X 右、Y 上、Z 后，相机看向 -Z。
+
+        Args:
+            camera_list: 相机列表
+            x_direction: 目标坐标系 X 轴方向（cam0 视线将对齐 -x_direction）
+            y_direction: 目标坐标系 Y 轴方向（保留参数，实际由 cross(z_dir, x_dir) 确定）
+            z_direction: 目标坐标系 Z 轴方向（平均相机朝上方向将对齐此方向）
         """
         normalized_camera_list = deepcopy(camera_list)
 
@@ -101,14 +112,29 @@ class CameraConvertor(object):
 
         z_cam = torch.tensor([0., 0., 1.], dtype=dtype, device=device)
         y_cam = torch.tensor([0., 1., 0.], dtype=dtype, device=device)
-        z_world = torch.tensor([0., 0., 1.], dtype=dtype, device=device)
+
+        # Gram-Schmidt 正交归一化目标坐标轴
+        z_dir = torch.tensor(z_direction, dtype=dtype, device=device)
+        z_dir = z_dir / (torch.linalg.norm(z_dir) + 1e-8)
+
+        x_dir = torch.tensor(x_direction, dtype=dtype, device=device)
+        x_dir = x_dir - torch.dot(x_dir, z_dir) * z_dir
+        x_dir = x_dir / (torch.linalg.norm(x_dir) + 1e-8)
 
         def rot_from_a_to_b(a, b):
+            """Rodrigues 旋转：将单位向量 a 旋转到 b，含反平行处理。"""
             v = torch.cross(a, b)
             c = torch.dot(a, b)
             s = torch.linalg.norm(v)
             if s < 1e-8:
-                return torch.eye(3, dtype=dtype, device=device)
+                if c > 0:
+                    return torch.eye(3, dtype=dtype, device=device)
+                perp = torch.tensor([1., 0., 0.], dtype=dtype, device=device)
+                if torch.abs(torch.dot(a, perp)) > 0.9:
+                    perp = torch.tensor([0., 1., 0.], dtype=dtype, device=device)
+                n = torch.cross(a, perp)
+                n = n / torch.linalg.norm(n)
+                return 2.0 * n[:, None] @ n[None, :] - torch.eye(3, dtype=dtype, device=device)
             vx = torch.tensor([
                 [0, -v[2], v[1]],
                 [v[2], 0, -v[0]],
@@ -117,34 +143,25 @@ class CameraConvertor(object):
             return torch.eye(3, dtype=dtype, device=device) + vx + vx @ vx * ((1 - c) / (s * s))
 
         # =====================================================
-        # Step 1: 旋转 — 平均 image-Y 对齐世界 +Z
+        # Step 1: 旋转 — 平均 image-Y 对齐 z_direction
         # =====================================================
         y_avg = torch.stack([cam.R.T @ y_cam for cam in normalized_camera_list]).mean(dim=0)
         y_avg = y_avg / (torch.linalg.norm(y_avg) + 1e-8)
 
-        Q_up = rot_from_a_to_b(y_avg, z_world)
+        Q_up = rot_from_a_to_b(y_avg, z_dir)
 
         for cam in normalized_camera_list:
             cam.world2camera[:3, :3] = cam.R @ Q_up.T
 
         # =====================================================
-        # Step 2: 旋转 — cam0 视线对齐世界 -X（仅绕 Z 轴）
+        # Step 2: 旋转 — cam0 视线对齐 -x_direction（绕 z_direction 轴）
         # =====================================================
         look0 = -(normalized_camera_list[0].R.T @ z_cam)
 
-        look0_xy = look0.clone()
-        look0_xy[2] = 0.0
-        look0_xy = look0_xy / (torch.linalg.norm(look0_xy) + 1e-8)
+        look0_proj = look0 - torch.dot(look0, z_dir) * z_dir
+        look0_proj = look0_proj / (torch.linalg.norm(look0_proj) + 1e-8)
 
-        yaw = torch.atan2(look0_xy[1], look0_xy[0])
-        delta_yaw = torch.tensor(torch.pi, dtype=dtype, device=device) - yaw
-
-        cos_d, sin_d = torch.cos(delta_yaw), torch.sin(delta_yaw)
-        Q_yaw = torch.tensor([
-            [cos_d, -sin_d, 0.0],
-            [sin_d,  cos_d, 0.0],
-            [0.0,    0.0,   1.0]
-        ], dtype=dtype, device=device)
+        Q_yaw = rot_from_a_to_b(look0_proj, -x_dir)
 
         for cam in normalized_camera_list:
             cam.world2camera[:3, :3] = cam.R @ Q_yaw.T
