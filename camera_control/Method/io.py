@@ -346,6 +346,7 @@ def loadMeshStream(
     mesh_stream: io.BytesIO,
     file_type: str,
     print_progress: bool=False,
+    print_error: bool=True,
 ) -> Optional[trimesh.Trimesh]:
     uv_wrap_mode = None
     if file_type.lower() in ('glb', 'gltf'):
@@ -358,25 +359,29 @@ def loadMeshStream(
         mesh_stream.seek(0)
         mesh = trimesh.load(mesh_stream, file_type=file_type, process=False)
     except Exception as e:
-        print('[ERROR][io::loadMeshStream]')
-        print('\t Failed to load mesh from stream:', e)
+        if print_error:
+            print('[ERROR][io::loadMeshStream]')
+            print('\t Failed to load mesh from stream:', e)
         return None
 
     mesh = postProcessMesh(mesh, print_progress, uv_wrap_mode=uv_wrap_mode)
     if mesh is None:
-        print('[ERROR][io::loadMeshStream]')
-        print('\t postProcessMesh failed!')
+        if print_error:
+            print('[ERROR][io::loadMeshStream]')
+            print('\t postProcessMesh failed!')
 
     return mesh
 
 def loadMeshFile(
     mesh_file_path: str,
     print_progress: bool=False,
+    print_error: bool=True,
 ) -> Optional[trimesh.Trimesh]:
     if not os.path.exists(mesh_file_path):
-        print('[ERROR][io::loadMeshFile]')
-        print('\t mesh file not exist!')
-        print('\t mesh_file_path:', mesh_file_path)
+        if print_error:
+            print('[ERROR][io::loadMeshFile]')
+            print('\t mesh file not exist!')
+            print('\t mesh_file_path:', mesh_file_path)
         return None
 
     uv_wrap_mode = None
@@ -392,7 +397,8 @@ def loadMeshFile(
 
     mesh = postProcessMesh(mesh, print_progress, uv_wrap_mode=uv_wrap_mode)
     if mesh is None:
-        print('[ERROR][io::loadMeshFile]')
-        print('\t postProcessMesh failed!')
+        if print_error:
+            print('[ERROR][io::loadMeshFile]')
+            print('\t postProcessMesh failed!')
 
     return mesh
