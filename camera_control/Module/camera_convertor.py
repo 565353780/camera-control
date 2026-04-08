@@ -194,6 +194,9 @@ class CameraConvertor(object):
         for cam in normalized_camera_list:
             cam.world2camera[:3, 3] += cam.R @ focus
 
+        for cam in normalized_camera_list:
+            cam.updateCCM()
+
         return normalized_camera_list
 
     @staticmethod
