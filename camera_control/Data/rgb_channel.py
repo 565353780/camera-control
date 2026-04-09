@@ -24,6 +24,18 @@ class RGBChannel(object):
     ) -> bool:
         self.width = int(width)
         self.height = int(height)
+
+        if self.image is None:
+            return True
+        if self.image.shape[0] == self.height and self.image.shape[1] == self.width:
+            return True
+
+        self.image = torch.nn.functional.interpolate(
+            self.image.permute(2, 0, 1).unsqueeze(0),
+            size=(self.height, self.width),
+            mode='bilinear',
+            align_corners=False,
+        ).squeeze(0).permute(1, 2, 0)
         return True
 
     def loadImage(
@@ -34,15 +46,7 @@ class RGBChannel(object):
 
         self.setImageSize(image.shape[1], image.shape[0])
 
-        try:
-            self.image = image.reshape(self.height, self.width, 3)
-        except:
-            self.image = torch.nn.functional.interpolate(
-                image.permute(2, 0, 1).unsqueeze(0),
-                size=(self.height, self.width),
-                mode='bilinear',
-                align_corners=False,
-            ).squeeze(0).permute(1, 2, 0)
+        self.image = image.reshape(self.height, self.width, 3)
         return True
 
     def loadImageFile(
