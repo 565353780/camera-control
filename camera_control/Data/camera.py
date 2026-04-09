@@ -286,17 +286,6 @@ class CameraData(object):
         self.world2camera = self.world2camera.to(dtype=self.dtype, device=self.device)
         return True
 
-    def setImageSize(
-        self,
-        width: int,
-        height: int,
-    ) -> bool:
-        self.width = int(width)
-        self.height = int(height)
-        self.cx = 0.5 * self.width
-        self.cy = 0.5 * self.height
-        return True
-
     def setR(
         self,
         R: Union[torch.Tensor, np.ndarray, list],

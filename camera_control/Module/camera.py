@@ -135,6 +135,20 @@ class Camera(
         DepthChannel.update(self)
         return True
 
+    def setImageSize(
+        self,
+        width: int,
+        height: int,
+    ) -> bool:
+        if not RGBChannel.setImageSize(self, width, height):
+            print('[ERROR][Camera::setImageSize]')
+            print('\t setImageSize for RGBChannel failed!')
+            return False
+
+        self.cx = 0.5 * self.width
+        self.cy = 0.5 * self.height
+        return True
+
     def project_points_to_uv(
         self,
         points: Union[torch.Tensor, np.ndarray, list],
