@@ -75,3 +75,17 @@ class MaskChannel(object):
         idx_w = (u * Mw - 0.5).round().long().clamp(0, Mw - 1)
         idx_h = ((1.0 - v) * Mh - 0.5).round().long().clamp(0, Mh - 1)
         return self.mask[idx_h, idx_w]
+
+    def sampleMaskWithSize(self, width: int, height: int) -> torch.Tensor:
+        """
+        按给定宽高生成像素中心 UV 网格，再通过 sampleMaskAtUV 采样 mask。
+        返回: (height, width) bool tensor。
+        """
+        w = max(width, 1)
+        h = max(height, 1)
+        u = (torch.arange(w, dtype=torch.float32, device=self.device) + 0.5) / w
+        v = (torch.arange(h, dtype=torch.float32, device=self.device) + 0.5) / h
+        uu, vv = torch.meshgrid(u, v, indexing='xy')
+        vv = 1.0 - vv
+        uv_grid = torch.stack([uu, vv], dim=-1)  # (height, width, 2)
+        return self.sampleMaskAtUV(uv_grid)
