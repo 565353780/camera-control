@@ -2,7 +2,7 @@ import torch
 import random
 import trimesh
 import numpy as np
-from typing import List
+from typing import List, Optional
 
 from camera_control.Module.camera import Camera
 
@@ -106,7 +106,7 @@ def sampleCameras(
     dtype = torch.float32,
     device: str = 'cuda:0',
     focus_center_ratio: float=1.0,
-    is_random_up: bool = False,
+    up_direction: Optional[List[float]] = [0, 0, 1],
 ) -> List[Camera]:
     """
     创建围绕mesh均匀分布的相机和深度数据
@@ -119,7 +119,7 @@ def sampleCameras(
         height: 图像高度
         fx: 焦距x
         fy: 焦距y
-        is_random_up: 是否随机生成垂直于视线方向的up向量
+        up_direction: up向量, 如果不提供则随机生成up方向
 
     Returns:
         camera_list: 相机列表
@@ -147,10 +147,8 @@ def sampleCameras(
 
         camera_position = look_at + camera_dist * sampled_camera_directions[i]
 
-        if is_random_up:
-            up = sampleRandomUp(camera_position, look_at)
-        else:
-            up = [0, 0, 1]
+        if up_direction is None:
+            up_direction = sampleRandomUp(camera_position, look_at)
 
         fovx_degree = np.random.uniform(*fovx_degree_range)
 
@@ -160,7 +158,7 @@ def sampleCameras(
             fovx_degree=fovx_degree,
             pos=camera_position,
             look_at=bbox_center,
-            up=up,
+            up=up_direction,
             dtype=dtype,
             device=device,
         )

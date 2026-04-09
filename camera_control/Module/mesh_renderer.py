@@ -33,7 +33,7 @@ class MeshRenderer(object):
         dtype = torch.float32,
         device: str = 'cuda:0',
         focus_center_ratio: float=1.0,
-        is_random_up: bool=False,
+        up_direction: Optional[List[float]] = [0, 0, 1],
         vertices_tensor: Optional[torch.Tensor] = None,
     ) -> List[Camera]:
         camera_list = sampleCameras(
@@ -47,7 +47,7 @@ class MeshRenderer(object):
             dtype=dtype,
             device=device,
             focus_center_ratio=focus_center_ratio,
-            is_random_up=is_random_up,
+            up_direction=up_direction,
         )
 
         print('[INFO][MeshRenderer::sampleRenderData]')
@@ -92,7 +92,7 @@ class MeshRenderer(object):
         dtype = torch.float32,
         device: str = 'cuda:0',
         focus_center_ratio: float=1.0,
-        is_random_up: bool=False,
+        up_direction: Optional[List[float]] = [0, 0, 1],
     ) -> bool:
         camera_list = MeshRenderer.sampleRenderData(
             mesh=mesh,
@@ -106,7 +106,7 @@ class MeshRenderer(object):
             dtype=dtype,
             device=device,
             focus_center_ratio=focus_center_ratio,
-            is_random_up=is_random_up,
+            up_direction=up_direction,
         )
 
         # 处理有/无顶点颜色、纹理等多种情况
@@ -151,7 +151,7 @@ class MeshRenderer(object):
         dtype = torch.float32,
         device: str = 'cuda:0',
         focus_center_ratio: float=1.0,
-        is_random_up: bool=False,
+        up_direction: Optional[List[float]] = [0, 0, 1],
     ) -> bool:
         if os.path.exists(save_data_folder_path):
             rmtree(save_data_folder_path)
@@ -178,7 +178,7 @@ class MeshRenderer(object):
             dtype=dtype,
             device=device,
             focus_center_ratio=focus_center_ratio,
-            is_random_up=is_random_up,
+            up_direction=up_direction,
         )
 
         first_camera = camera_list[0]
@@ -235,7 +235,7 @@ class MeshRenderer(object):
         dtype = torch.float32,
         device: str = 'cuda:0',
         focus_center_ratio: float=1.0,
-        is_random_up: bool=False,
+        up_direction: Optional[List[float]] = [0, 0, 1],
     ) -> bool:
         camera_list = MeshRenderer.sampleRenderData(
             mesh=mesh,
@@ -249,7 +249,7 @@ class MeshRenderer(object):
             dtype=dtype,
             device=device,
             focus_center_ratio=focus_center_ratio,
-            is_random_up=is_random_up,
+            up_direction=up_direction,
         )
 
         images = []

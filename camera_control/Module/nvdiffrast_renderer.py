@@ -521,7 +521,7 @@ class NVDiffRastRenderer(object):
         camera: Camera,
         bg_color: list = [255, 255, 255],
         vertices_tensor: Optional[torch.Tensor] = None,
-        enable_antialias: bool = True,
+        enable_antialias: bool = False,
         rasterize_dict: Optional[dict] = None,
     ) -> dict:
         """
@@ -581,7 +581,7 @@ class NVDiffRastRenderer(object):
         camera: Camera,
         bg_color: list = [255, 255, 255],
         vertices_tensor: Optional[torch.Tensor] = None,
-        enable_antialias: bool = True,
+        enable_antialias: bool = False,
         rasterize_dict: Optional[dict] = None,
     ) -> dict:
         """
@@ -707,6 +707,7 @@ class NVDiffRastRenderer(object):
             results['rgb'] = tex_out['rgb']
 
         # 深度渲染，depth + depth 可视化 rgb
+        #FIXME: depth should not antialias
         if 'depth' in render_types:
             depth_out = NVDiffRastRenderer.renderDepth(
                 mesh=mesh,
@@ -720,6 +721,7 @@ class NVDiffRastRenderer(object):
             results['rgb_depth'] = depth_out['rgb']
 
         # 法向渲染（世界坐标系 + 相机坐标系）
+        #FIXME: normal should not antialias
         if 'normal' in render_types:
             normal_out = NVDiffRastRenderer.renderNormal(
                 mesh=mesh,
