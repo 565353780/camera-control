@@ -73,7 +73,6 @@ class CameraConvertor(object):
             if getattr(cam, "depth", None) is not None:
                 # 场景放大 s 倍，相机观察同视角的物理深度同步放大 s 倍
                 cam.depth = cam.depth * scale_safe
-                cam.updateCCM()
 
             # =========================================================
             # Step D: 法线旋转更新
@@ -193,9 +192,6 @@ class CameraConvertor(object):
 
         for cam in normalized_camera_list:
             cam.world2camera[:3, 3] += cam.R @ focus
-
-        for cam in normalized_camera_list:
-            cam.updateCCM()
 
         return normalized_camera_list
 
@@ -369,11 +365,11 @@ class CameraConvertor(object):
 
             colmap_pose = camera.toColmapPose().cpu().numpy()
 
-            cv2.imwrite(image_folder_path + image_filename, camera.image_cv)
+            cv2.imwrite(image_folder_path + image_filename, camera.toImageVisCV(use_mask=False))
 
             if camera.mask is not None:
                 cv2.imwrite(mask_folder_path + image_filename, camera.mask_cv)
-                cv2.imwrite(masked_image_folder_path + image_filename, camera.toMaskedImageCV())
+                cv2.imwrite(masked_image_folder_path + image_filename, camera.toImageVisCV(use_mask=False))
 
             if camera.depth is not None:
                 np.save(depth_folder_path + image_basename + '.npy', camera.depth_with_conf.cpu().numpy())
@@ -382,13 +378,13 @@ class CameraConvertor(object):
 
             if camera.normal_world is not None:
                 np.save(normal_world_folder_path + image_basename + '.npy', camera.normal_world.cpu().numpy())
-                cv2.imwrite(normal_world_vis_folder_path + image_filename, camera.normal_world_cv)
-                cv2.imwrite(masked_normal_world_vis_folder_path + image_filename, camera.toMaskedNormalWorldCV())
+                cv2.imwrite(normal_world_vis_folder_path + image_filename, camera.toNormalWorldVisCV(use_mask=False))
+                cv2.imwrite(masked_normal_world_vis_folder_path + image_filename, camera.toNormalWorldVisCV(use_mask=True))
 
             if camera.normal_camera is not None:
                 np.save(normal_camera_folder_path + image_basename + '.npy', camera.normal_camera.cpu().numpy())
-                cv2.imwrite(normal_camera_vis_folder_path + image_filename, camera.normal_camera_cv)
-                cv2.imwrite(masked_normal_camera_vis_folder_path + image_filename, camera.toMaskedNormalCameraCV())
+                cv2.imwrite(normal_camera_vis_folder_path + image_filename, camera.toNormalCameraVisCV(use_mask=False))
+                cv2.imwrite(masked_normal_camera_vis_folder_path + image_filename, camera.toNormalCameraVisCV(use_mask=True))
 
             return (camera_idx, image_filename, colmap_pose)
 

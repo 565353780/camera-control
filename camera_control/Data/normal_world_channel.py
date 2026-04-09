@@ -15,10 +15,6 @@ class NormalWorldChannel(BaseNormalChannel):
     def update(self) -> bool:
         return BaseNormalChannel._update_normal(self, _ATTR)
 
-    @property
-    def normal_world_cv(self) -> np.ndarray:
-        return BaseNormalChannel._get_normal_cv(self, _ATTR)
-
     def loadNormalWorld(
         self,
         normal: Union[torch.Tensor, np.ndarray, list],
@@ -34,14 +30,22 @@ class NormalWorldChannel(BaseNormalChannel):
     def toNormalWorldUV(self) -> torch.Tensor:
         return BaseNormalChannel._to_normal_uv(self, _ATTR)
 
-    def toMaskedNormalWorld(
+    def toNormalWorld(
         self,
-        background_color: List[float] = [255, 255, 255],
+        use_mask: bool = True,
     ) -> torch.Tensor:
-        return BaseNormalChannel._to_masked_normal(self, _ATTR, background_color)
+        return BaseNormalChannel._to_normal(self, _ATTR, use_mask)
 
-    def toMaskedNormalWorldCV(
+    def toNormalWorldVis(
         self,
         background_color: List[float] = [255, 255, 255],
+        use_mask: bool = True,
+    ) -> torch.Tensor:
+        return BaseNormalChannel._to_normal_vis(self, _ATTR, background_color, use_mask)
+
+    def toNormalWorldVisCV(
+        self,
+        background_color: List[float] = [255, 255, 255],
+        use_mask: bool = True,
     ) -> np.ndarray:
-        return BaseNormalChannel._to_masked_normal_cv(self, _ATTR, background_color)
+        return BaseNormalChannel._to_normal_vis_cv(self, _ATTR, background_color, use_mask)

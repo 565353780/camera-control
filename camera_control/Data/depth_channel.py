@@ -15,7 +15,6 @@ class DepthChannel(object):
         self.depth: torch.Tensor = None
         self.conf: torch.Tensor = None
         self.valid_depth_mask: torch.Tensor = None
-        self.ccm: torch.Tensor = None
         # depth map 的宽高（可能与 camera 的 width/height 即 image 尺寸不同）
         self.depth_width: int = 0
         self.depth_height: int = 0
@@ -28,8 +27,6 @@ class DepthChannel(object):
             self.conf = self.conf.to(dtype=self.dtype, device=self.device)
         if self.valid_depth_mask is not None:
             self.valid_depth_mask = self.valid_depth_mask.to(dtype=torch.bool, device=self.device)
-        if self.ccm is not None:
-            self.ccm = self.ccm.to(dtype=self.dtype, device=self.device)
         return True
 
     def toDepthUV(self) -> torch.Tensor:
@@ -47,14 +44,10 @@ class DepthChannel(object):
         uv = torch.stack([uu, vv_new], dim=-1)  # (depth_height, depth_width, 2)
         return uv
 
-    def updateCCM(self) -> bool:
-        if self.depth is None:
-            return False
-
-        # 用 depth 每个像素的 UV 作为统一位置信息反投影，与 camera.image 的 UV 一致
-        uv = self.toDepthUV()  # (depth_height, depth_width, 2)
-        self.ccm = self.projectUV2Points(uv, self.depth)
-        return True
+    def _computeCCM(self) -> torch.Tensor:
+        """从当前 depth 实时计算 camera coordinate map。"""
+        uv = self.toDepthUV()
+        return self.projectUV2Points(uv, self.depth)
 
     def loadDepth(
         self,
@@ -81,7 +74,6 @@ class DepthChannel(object):
         # 记录有效像素位置
         self.valid_depth_mask = (depth > 1e-5) & (depth < 1e5)
 
-        self.updateCCM()
         return True
 
     def loadDepthFile(
@@ -118,7 +110,7 @@ class DepthChannel(object):
         query_pixel: Union[torch.Tensor, np.ndarray, list],
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        给定 depth 像素坐标，查询 self.ccm 得到空间点坐标和有效 mask。
+        给定 depth 像素坐标，实时计算 ccm 并查询空间点坐标和有效 mask。
         query_pixel: [..., 2] 最后一维为 (u, v)，即 depth map 上的像素坐标。
         返回: (points: [..., 3], confs: [...], valid_mask: [...])
         """
@@ -130,7 +122,8 @@ class DepthChannel(object):
         u = query_pixel_flat[:, 0].clamp(0, self.depth_width - 1)
         v = query_pixel_flat[:, 1].clamp(0, self.depth_height - 1)
 
-        points = self.ccm[v, u]  # (N, 3)
+        ccm = self._computeCCM()
+        points = ccm[v, u]  # (N, 3)
         confs = self.conf[v, u]
         valid_mask = self.valid_depth_mask[v, u]  # (N,)
 
@@ -217,19 +210,19 @@ class DepthChannel(object):
         use_mask: bool=True,
     ) -> torch.Tensor:
         """
-        返回mask区域内的ccm，其他地方置零。
+        从当前 depth 实时计算 ccm，返回 mask 区域内的 ccm，其他地方置零。
 
         Returns:
-            valid_ccm: [H, W, 3]，mask为True的地方保留ccm，其余为0
+            valid_ccm: [H, W, 3]，mask 为 True 的地方保留 ccm，其余为 0
         """
+        ccm = self._computeCCM()
         depth_mask = self.toDepthMask(
             conf_thresh=conf_thresh,
             use_mask=use_mask,
         )  # (H, W)
 
-        # torch.where对于多通道ccm的mask扩展
-        mask_expanded = depth_mask.unsqueeze(-1).expand_as(self.ccm)  # (H, W, 3)
-        valid_ccm = torch.where(mask_expanded, self.ccm, torch.zeros_like(self.ccm))
+        mask_expanded = depth_mask.unsqueeze(-1).expand_as(ccm)  # (H, W, 3)
+        valid_ccm = torch.where(mask_expanded, ccm, torch.zeros_like(ccm))
         return valid_ccm
 
     def toDepthVis(
@@ -287,12 +280,12 @@ class DepthChannel(object):
         返回: (points: (N, 3) tensor, confs: (N,) tensor)
         conf_thresh=None 表示不做置信度筛选；conf_thresh=0.8 表示保留 conf 处于 80% 分位及以上的点。
         """
-        assert self.ccm is not None
+        ccm = self._computeCCM()
         mask_t = self.toDepthMask(conf_thresh, use_mask)
-        points = self.ccm[mask_t]  # (N, 3)
+        points = ccm[mask_t]  # (N, 3)
         confs = (
             self.conf[mask_t]
             if self.conf is not None
-            else torch.ones(points.shape[0], dtype=self.ccm.dtype, device=self.device)
+            else torch.ones(points.shape[0], dtype=self.dtype, device=self.device)
         )  # (N,)
         return points, confs

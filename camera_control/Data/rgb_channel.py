@@ -17,10 +17,6 @@ class RGBChannel(object):
             self.image = self.image.to(dtype=self.dtype, device=self.device)
         return True
 
-    @property
-    def image_cv(self) -> np.ndarray:
-        return toNumpy(self.image * 255.0, np.uint8)[..., ::-1]
-
     def setImageSize(
         self,
         width: int,
@@ -38,7 +34,15 @@ class RGBChannel(object):
 
         self.setImageSize(image.shape[1], image.shape[0])
 
-        self.image = image.reshape(self.height, self.width, 3)
+        try:
+            self.image = image.reshape(self.height, self.width, 3)
+        except:
+            self.image = torch.nn.functional.interpolate(
+                image.permute(2, 0, 1).unsqueeze(0),
+                size=(self.height, self.width),
+                mode='bilinear',
+                align_corners=False,
+            ).squeeze(0).permute(1, 2, 0)
         return True
 
     def loadImageFile(
@@ -72,32 +76,48 @@ class RGBChannel(object):
         uv = torch.stack([uu, vv_new], dim=-1)  # shape: (height, width, 2)
         return uv
 
-    def toMaskedImage(
+    def toImage(
         self,
-        background_color: List[float] = [255, 255, 255],
+        use_mask: bool = True,
     ) -> torch.Tensor:
         """
-        self.mask 不存在时等价于返回 self.image；存在时按 image 每个像素的 UV 在 mask 上
-        最近邻采样得到遮罩，True 处保留 self.image，False 处填 background_color。
-        background_color: [R, G, B]，默认 0–255，内部会除以 255；输出 tensor 为 [0, 1]。
+        use_mask=False 或 mask 不存在时返回原始 self.image；
+        存在时按 image 每个像素的 UV 在 mask 上最近邻采样得到遮罩，
+        True 处保留 self.image，False 处填零。
         返回: (H, W, 3) tensor
         """
         assert self.image is not None
-        if getattr(self, "mask", None) is None:
+        if not use_mask or getattr(self, "mask", None) is None:
             return self.image
-        uv = self.toImageUV()  # (H, W, 2)
-        mask_t = self.sampleMaskAtUV(uv).unsqueeze(-1)  # (H, W, 1)
-        bg = toTensor(background_color, self.dtype, self.device) / 255.0
-        bg = bg.view(1, 1, 3) if bg.numel() == 3 else bg
-        out = torch.where(mask_t, self.image, bg.to(self.image.dtype))
-        return out
+        uv = self.toImageUV()
+        mask_t = self.sampleMaskAtUV(uv).unsqueeze(-1)
+        return torch.where(mask_t, self.image, torch.zeros_like(self.image))
 
-    def toMaskedImageCV(
+    def toImageVis(
         self,
         background_color: List[float] = [255, 255, 255],
+        use_mask: bool = True,
+    ) -> torch.Tensor:
+        """
+        可视化 image：mask 外区域用 background_color 填充。
+        background_color: [R, G, B]，默认 0–255，内部会除以 255。
+        返回: (H, W, 3) tensor，值在 [0, 1]
+        """
+        assert self.image is not None
+        if not use_mask or getattr(self, "mask", None) is None:
+            return self.image
+        uv = self.toImageUV()
+        mask_t = self.sampleMaskAtUV(uv).unsqueeze(-1)
+        bg = toTensor(background_color, self.dtype, self.device) / 255.0
+        bg = bg.view(1, 1, 3) if bg.numel() == 3 else bg
+        return torch.where(mask_t, self.image, bg.to(self.image.dtype))
+
+    def toImageVisCV(
+        self,
+        background_color: List[float] = [255, 255, 255],
+        use_mask: bool = True,
     ) -> np.ndarray:
-        """toMaskedImage 的 OpenCV BGR uint8 版本。无 mask 时等价于 self.image_cv。"""
-        return toNumpy(self.toMaskedImage(background_color) * 255.0, np.uint8)[..., ::-1]
+        return toNumpy(self.toImageVis(background_color, use_mask) * 255.0, np.uint8)[..., ::-1]
 
     def sampleRGBAtUV(self, uv_grid: Union[torch.Tensor, np.ndarray]) -> torch.Tensor:
         """

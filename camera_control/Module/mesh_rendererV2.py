@@ -157,7 +157,7 @@ class MeshRenderer(object):
         print('\t start create omnivggt data folder...')
         for i in range(len(camera_list)):
             camera = camera_list[i]
-            rgb = camera.image_cv
+            rgb = camera.toImageVisCV(use_mask=False)
             depth = camera.depth
             depth_vis = camera.toDepthVisCV()
 
@@ -216,7 +216,7 @@ class MeshRenderer(object):
         print('\t start create da3 data file...')
         for i in range(len(camera_list)):
             camera = camera_list[i]
-            rgb = camera.image_cv
+            rgb = camera.toImageVisCV(use_mask=False)
 
             extrinsic = toNumpy(camera.world2cameraCV, np.float32)
             intrinsic = toNumpy(camera.intrinsic, np.float32)
