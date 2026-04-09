@@ -137,7 +137,7 @@ def sampleCameras(
     # 创建相机列表
     camera_list = []
     for i in range(camera_num):
-        focus_center = np.random.rand() > focus_center_ratio
+        focus_center = np.random.rand() <= focus_center_ratio
         if focus_center:
             look_at = bbox_center
         else:

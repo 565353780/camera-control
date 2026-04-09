@@ -23,27 +23,31 @@ class MeshRenderer(object):
     @staticmethod
     def sampleRenderData(
         mesh: trimesh.Trimesh,
+        candidate_camera_num: int = 20,
         camera_num: int = 20,
-        camera_dist: float = 2.5,
-        width: int = 518,
-        height: int = 518,
-        fx: float = 500.0,
-        fy: float = 500.0,
+        camera_dist_range: List[float] = [2.5, 2.5],
+        width: int = 512,
+        height: int = 512,
+        fovx_degree_range: List[float] = [60.0, 60.0],
         bg_color: list=[255, 255, 255],
         dtype = torch.float32,
         device: str = 'cuda:0',
+        focus_center_ratio: float=1.0,
+        is_random_up: bool=False,
         vertices_tensor: Optional[torch.Tensor] = None,
     ) -> List[Camera]:
         camera_list = sampleCameras(
             mesh=mesh,
+            candidate_camera_num=candidate_camera_num,
             camera_num=camera_num,
-            camera_dist=camera_dist,
+            camera_dist_range=camera_dist_range,
             width=width,
             height=height,
-            fx=fx,
-            fy=fy,
+            fovx_degree_range=fovx_degree_range,
             dtype=dtype,
             device=device,
+            focus_center_ratio=focus_center_ratio,
+            is_random_up=is_random_up,
         )
 
         print('[INFO][MeshRenderer::sampleRenderData]')
@@ -78,27 +82,31 @@ class MeshRenderer(object):
     def createColmapDataFolder(
         mesh: trimesh.Trimesh,
         save_data_folder_path: str,
+        candidate_camera_num: int = 20,
         camera_num: int = 20,
-        camera_dist: float = 2.5,
-        width: int = 518,
-        height: int = 518,
-        fx: float = 500.0,
-        fy: float = 500.0,
+        camera_dist_range: List[float] = [2.5, 2.5],
+        width: int = 512,
+        height: int = 512,
+        fovx_degree_range: List[float] = [60.0, 60.0],
         bg_color: list=[255, 255, 255],
         dtype = torch.float32,
         device: str = 'cuda:0',
+        focus_center_ratio: float=1.0,
+        is_random_up: bool=False,
     ) -> bool:
         camera_list = MeshRenderer.sampleRenderData(
             mesh=mesh,
+            candidate_camera_num=candidate_camera_num,
             camera_num=camera_num,
-            camera_dist=camera_dist,
+            camera_dist_range=camera_dist_range,
             width=width,
             height=height,
-            fx=fx,
-            fy=fy,
+            fovx_degree_range=fovx_degree_range,
             bg_color=bg_color,
             dtype=dtype,
             device=device,
+            focus_center_ratio=focus_center_ratio,
+            is_random_up=is_random_up,
         )
 
         # 处理有/无顶点颜色、纹理等多种情况
@@ -133,15 +141,17 @@ class MeshRenderer(object):
     def createOmniVGGTDataFolder(
         mesh: trimesh.Trimesh,
         save_data_folder_path: str,
+        candidate_camera_num: int = 20,
         camera_num: int = 20,
-        camera_dist: float = 2.5,
-        width: int = 518,
-        height: int = 518,
-        fx: float = 500.0,
-        fy: float = 500.0,
+        camera_dist_range: List[float] = [2.5, 2.5],
+        width: int = 512,
+        height: int = 512,
+        fovx_degree_range: List[float] = [60.0, 60.0],
         bg_color: list=[255, 255, 255],
         dtype = torch.float32,
         device: str = 'cuda:0',
+        focus_center_ratio: float=1.0,
+        is_random_up: bool=False,
     ) -> bool:
         if os.path.exists(save_data_folder_path):
             rmtree(save_data_folder_path)
@@ -158,15 +168,17 @@ class MeshRenderer(object):
 
         camera_list = MeshRenderer.sampleRenderData(
             mesh=mesh,
+            candidate_camera_num=candidate_camera_num,
             camera_num=camera_num,
-            camera_dist=camera_dist,
+            camera_dist_range=camera_dist_range,
             width=width,
             height=height,
-            fx=fx,
-            fy=fy,
+            fovx_degree_range=fovx_degree_range,
             bg_color=bg_color,
             dtype=dtype,
             device=device,
+            focus_center_ratio=focus_center_ratio,
+            is_random_up=is_random_up,
         )
 
         first_camera = camera_list[0]
@@ -213,27 +225,31 @@ class MeshRenderer(object):
     def createDA3DataFile(
         mesh: trimesh.Trimesh,
         save_data_file_path: str,
+        candidate_camera_num: int = 20,
         camera_num: int = 20,
-        camera_dist: float = 2.5,
-        width: int = 518,
-        height: int = 518,
-        fx: float = 500.0,
-        fy: float = 500.0,
+        camera_dist_range: List[float] = [2.5, 2.5],
+        width: int = 512,
+        height: int = 512,
+        fovx_degree_range: List[float] = [60.0, 60.0],
         bg_color: list=[255, 255, 255],
         dtype = torch.float32,
         device: str = 'cuda:0',
+        focus_center_ratio: float=1.0,
+        is_random_up: bool=False,
     ) -> bool:
         camera_list = MeshRenderer.sampleRenderData(
             mesh=mesh,
+            candidate_camera_num=candidate_camera_num,
             camera_num=camera_num,
-            camera_dist=camera_dist,
+            camera_dist_range=camera_dist_range,
             width=width,
             height=height,
-            fx=fx,
-            fy=fy,
+            fovx_degree_range=fovx_degree_range,
             bg_color=bg_color,
             dtype=dtype,
             device=device,
+            focus_center_ratio=focus_center_ratio,
+            is_random_up=is_random_up,
         )
 
         images = []
