@@ -148,10 +148,9 @@ class DepthChannel(object):
         orig_shape = query_uv_tensor.shape[:-1]
         query_uv_flat = query_uv_tensor.reshape(-1, 2)  # (N, 2)
 
-        # 在 depth 网格上由归一化 UV 得到最近像素（UV 与 camera 一致，v=0 左下）
-        # 像素中心约定: uv = (pixel + 0.5) / N, 反向: pixel = floor(uv * N)
-        u_nearest = (query_uv_flat[:, 0] * self.depth_width - 0.5).round().long().clamp(0, self.depth_width - 1)
-        v_nearest = ((1.0 - query_uv_flat[:, 1]) * self.depth_height - 0.5).round().long().clamp(0, self.depth_height - 1)
+        # 像素 i 占据 UV 区间 [i/N, (i+1)/N)，反向: pixel = floor(uv * N)
+        u_nearest = (query_uv_flat[:, 0] * self.depth_width).long().clamp(0, self.depth_width - 1)
+        v_nearest = ((1.0 - query_uv_flat[:, 1]) * self.depth_height).long().clamp(0, self.depth_height - 1)
 
         # 从depth map获取最近像素的depth值
         depth_values = self.depth[v_nearest, u_nearest]  # (N,)

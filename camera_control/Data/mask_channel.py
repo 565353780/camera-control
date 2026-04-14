@@ -95,8 +95,8 @@ class MaskChannel(object):
         Mh, Mw = mask.shape[0], mask.shape[1]
         u = uv_grid[..., 0]
         v = uv_grid[..., 1]
-        idx_w = (u * Mw - 0.5).round().long().clamp(0, Mw - 1)
-        idx_h = ((1.0 - v) * Mh - 0.5).round().long().clamp(0, Mh - 1)
+        idx_w = (u * Mw).long().clamp(0, Mw - 1)
+        idx_h = ((1.0 - v) * Mh).long().clamp(0, Mh - 1)
         return mask[idx_h, idx_w]
 
     def sampleMaskWithSize(self, width: int, height: int, mask_smaller_pixel_num: int = 0) -> torch.Tensor:
