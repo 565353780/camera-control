@@ -70,6 +70,7 @@ class BaseNormalChannel(object):
         obj,
         attr_name: str,
         use_mask: bool = True,
+        mask_smaller_pixel_num: int = 0,
     ) -> torch.Tensor:
         """
         mask 不存在或 use_mask=False 时返回原始 normal；
@@ -82,7 +83,7 @@ class BaseNormalChannel(object):
         if not use_mask or getattr(obj, "mask", None) is None:
             return val
         uv = BaseNormalChannel._to_normal_uv(obj, attr_name)
-        mask_t = obj.sampleMaskAtUV(uv).unsqueeze(-1)
+        mask_t = obj.sampleMaskAtUV(uv, mask_smaller_pixel_num).unsqueeze(-1)
         out = torch.where(mask_t, val, torch.zeros_like(val))
         return out
 
@@ -92,6 +93,7 @@ class BaseNormalChannel(object):
         attr_name: str,
         background_color: List[float] = [255, 255, 255],
         use_mask: bool = True,
+        mask_smaller_pixel_num: int = 0,
     ) -> torch.Tensor:
         """
         可视化 normal：先 * 0.5 + 0.5 映射到 [0, 1]，再用 background_color 填充 mask 外区域。
@@ -104,7 +106,7 @@ class BaseNormalChannel(object):
         if not use_mask or getattr(obj, "mask", None) is None:
             return vis
         uv = BaseNormalChannel._to_normal_uv(obj, attr_name)
-        mask_t = obj.sampleMaskAtUV(uv).unsqueeze(-1)
+        mask_t = obj.sampleMaskAtUV(uv, mask_smaller_pixel_num).unsqueeze(-1)
         bg = toTensor(background_color, obj.dtype, obj.device) / 255.0
         bg = bg.view(1, 1, 3) if bg.numel() == 3 else bg
         return torch.where(mask_t, vis, bg.to(vis.dtype))
@@ -115,8 +117,9 @@ class BaseNormalChannel(object):
         attr_name: str,
         background_color: List[float] = [255, 255, 255],
         use_mask: bool = True,
+        mask_smaller_pixel_num: int = 0,
     ) -> np.ndarray:
         return toNumpy(
-            BaseNormalChannel._to_normal_vis(obj, attr_name, background_color, use_mask) * 255.0,
+            BaseNormalChannel._to_normal_vis(obj, attr_name, background_color, use_mask, mask_smaller_pixel_num) * 255.0,
             np.uint8,
         )[..., ::-1]

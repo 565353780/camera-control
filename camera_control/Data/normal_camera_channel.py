@@ -33,19 +33,22 @@ class NormalCameraChannel(BaseNormalChannel):
     def toNormalCamera(
         self,
         use_mask: bool = True,
+        mask_smaller_pixel_num: int = 0,
     ) -> torch.Tensor:
-        return BaseNormalChannel._to_normal(self, _ATTR, use_mask)
+        return BaseNormalChannel._to_normal(self, _ATTR, use_mask, mask_smaller_pixel_num)
 
     def toNormalCameraVis(
         self,
         background_color: List[float] = [255, 255, 255],
         use_mask: bool = True,
+        mask_smaller_pixel_num: int = 0,
     ) -> torch.Tensor:
-        return BaseNormalChannel._to_normal_vis(self, _ATTR, background_color, use_mask)
+        return BaseNormalChannel._to_normal_vis(self, _ATTR, background_color, use_mask, mask_smaller_pixel_num)
 
     def toNormalCameraVisCV(
         self,
         background_color: List[float] = [255, 255, 255],
         use_mask: bool = True,
+        mask_smaller_pixel_num: int = 0,
     ) -> np.ndarray:
-        return BaseNormalChannel._to_normal_vis_cv(self, _ATTR, background_color, use_mask)
+        return BaseNormalChannel._to_normal_vis_cv(self, _ATTR, background_color, use_mask, mask_smaller_pixel_num)

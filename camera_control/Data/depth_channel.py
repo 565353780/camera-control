@@ -178,12 +178,13 @@ class DepthChannel(object):
         self,
         conf_thresh: Optional[float] = None,
         use_mask: bool=True,
+        mask_smaller_pixel_num: int = 0,
     ) -> torch.Tensor:
         if not use_mask or getattr(self, "mask", None) is None:
             mask_t = self.valid_depth_mask
         else:
             uv = self.toDepthUV()  # (H, W, 2)
-            mask_t = self.sampleMaskAtUV(uv) & self.valid_depth_mask  # (H, W)
+            mask_t = self.sampleMaskAtUV(uv, mask_smaller_pixel_num) & self.valid_depth_mask  # (H, W)
 
         if conf_thresh is not None and self.conf is not None:
             if self.conf.numel() > 0:
@@ -195,10 +196,12 @@ class DepthChannel(object):
         self,
         conf_thresh: Optional[float] = None,
         use_mask: bool=True,
+        mask_smaller_pixel_num: int = 0,
     ) -> torch.Tensor:
         depth_mask = self.toDepthMask(
             conf_thresh=conf_thresh,
             use_mask=use_mask,
+            mask_smaller_pixel_num=mask_smaller_pixel_num,
         )
         # 仅在 depth_mask 为 True 的位置保留原始 depth，其他位置设为 0
         valid_depth = torch.where(depth_mask, self.depth, torch.zeros_like(self.depth))
@@ -208,6 +211,7 @@ class DepthChannel(object):
         self,
         conf_thresh: Optional[float] = None,
         use_mask: bool=True,
+        mask_smaller_pixel_num: int = 0,
     ) -> torch.Tensor:
         """
         从当前 depth 实时计算 ccm，返回 mask 区域内的 ccm，其他地方置零。
@@ -219,6 +223,7 @@ class DepthChannel(object):
         depth_mask = self.toDepthMask(
             conf_thresh=conf_thresh,
             use_mask=use_mask,
+            mask_smaller_pixel_num=mask_smaller_pixel_num,
         )  # (H, W)
 
         mask_expanded = depth_mask.unsqueeze(-1).expand_as(ccm)  # (H, W, 3)
@@ -230,6 +235,7 @@ class DepthChannel(object):
         depth_min: Optional[float]=None,
         depth_max: Optional[float]=None,
         use_mask: bool=True,
+        mask_smaller_pixel_num: int = 0,
     ) -> torch.Tensor:
         """
         将self.depth转换为可视化的RGB格式tensor图像
@@ -240,7 +246,7 @@ class DepthChannel(object):
         assert self.depth is not None
 
         # 获取有效深度值
-        mask = self.toDepthMask(use_mask=use_mask)
+        mask = self.toDepthMask(use_mask=use_mask, mask_smaller_pixel_num=mask_smaller_pixel_num)
         valid_depth = self.depth[mask]
 
         # 归一化深度值
@@ -266,13 +272,15 @@ class DepthChannel(object):
         depth_min: Optional[float]=None,
         depth_max: Optional[float]=None,
         use_mask: bool=True,
+        mask_smaller_pixel_num: int = 0,
     ) -> np.ndarray:
-        return toNumpy(self.toDepthVis(depth_min, depth_max, use_mask) * 255.0, np.uint8)[..., ::-1]
+        return toNumpy(self.toDepthVis(depth_min, depth_max, use_mask, mask_smaller_pixel_num) * 255.0, np.uint8)[..., ::-1]
 
     def toDepthPoints(
         self,
         conf_thresh: Optional[float] = None,
         use_mask: bool=True,
+        mask_smaller_pixel_num: int = 0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         先从 valid_depth 中按 conf 分位数 conf_thresh 得到置信度阈值并筛选；
@@ -281,7 +289,7 @@ class DepthChannel(object):
         conf_thresh=None 表示不做置信度筛选；conf_thresh=0.8 表示保留 conf 处于 80% 分位及以上的点。
         """
         ccm = self._computeCCM()
-        mask_t = self.toDepthMask(conf_thresh, use_mask)
+        mask_t = self.toDepthMask(conf_thresh, use_mask, mask_smaller_pixel_num)
         points = ccm[mask_t]  # (N, 3)
         confs = (
             self.conf[mask_t]

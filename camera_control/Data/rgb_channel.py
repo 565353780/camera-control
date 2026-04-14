@@ -83,6 +83,7 @@ class RGBChannel(object):
     def toImage(
         self,
         use_mask: bool = True,
+        mask_smaller_pixel_num: int = 0,
     ) -> torch.Tensor:
         """
         use_mask=False 或 mask 不存在时返回原始 self.image；
@@ -94,13 +95,14 @@ class RGBChannel(object):
         if not use_mask or getattr(self, "mask", None) is None:
             return self.image
         uv = self.toImageUV()
-        mask_t = self.sampleMaskAtUV(uv).unsqueeze(-1)
+        mask_t = self.sampleMaskAtUV(uv, mask_smaller_pixel_num).unsqueeze(-1)
         return torch.where(mask_t, self.image, torch.zeros_like(self.image))
 
     def toImageVis(
         self,
         background_color: List[float] = [255, 255, 255],
         use_mask: bool = True,
+        mask_smaller_pixel_num: int = 0,
     ) -> torch.Tensor:
         """
         可视化 image：mask 外区域用 background_color 填充。
@@ -111,7 +113,7 @@ class RGBChannel(object):
         if not use_mask or getattr(self, "mask", None) is None:
             return self.image
         uv = self.toImageUV()
-        mask_t = self.sampleMaskAtUV(uv).unsqueeze(-1)
+        mask_t = self.sampleMaskAtUV(uv, mask_smaller_pixel_num).unsqueeze(-1)
         bg = toTensor(background_color, self.dtype, self.device) / 255.0
         bg = bg.view(1, 1, 3) if bg.numel() == 3 else bg
         return torch.where(mask_t, self.image, bg.to(self.image.dtype))
@@ -120,8 +122,9 @@ class RGBChannel(object):
         self,
         background_color: List[float] = [255, 255, 255],
         use_mask: bool = True,
+        mask_smaller_pixel_num: int = 0,
     ) -> np.ndarray:
-        return toNumpy(self.toImageVis(background_color, use_mask) * 255.0, np.uint8)[..., ::-1]
+        return toNumpy(self.toImageVis(background_color, use_mask, mask_smaller_pixel_num) * 255.0, np.uint8)[..., ::-1]
 
     def sampleRGBAtUV(self, uv_grid: Union[torch.Tensor, np.ndarray]) -> torch.Tensor:
         """

@@ -196,11 +196,16 @@ class CameraConvertor(object):
         return normalized_camera_list
 
     @staticmethod
-    def _process_camera_for_pcd(camera: Camera, conf_thresh: float, use_mask: bool):
-        mask = camera.toDepthMask(conf_thresh, use_mask)
+    def _process_camera_for_pcd(
+        camera: Camera,
+        conf_thresh: float,
+        use_mask: bool,
+        mask_smaller_pixel_num: int,
+    ):
+        mask = camera.toDepthMask(conf_thresh, use_mask, mask_smaller_pixel_num)
         image_colors = camera.sampleRGBAtUV(camera.toDepthUV())
         colors = image_colors[mask]
-        points, _ = camera.toDepthPoints(conf_thresh, use_mask)
+        points, _ = camera.toDepthPoints(conf_thresh, use_mask, mask_smaller_pixel_num)
         return points, colors
 
     @staticmethod
@@ -208,10 +213,16 @@ class CameraConvertor(object):
         camera_list: List[Camera],
         conf_thresh: float=0.8,
         use_mask: bool=True,
+        mask_smaller_pixel_num: int=0,
     ) -> o3d.geometry.PointCloud:
         with ThreadPoolExecutor() as executor:
             results = list(executor.map(
-                lambda cam: CameraConvertor._process_camera_for_pcd(cam, conf_thresh, use_mask),
+                lambda cam: CameraConvertor._process_camera_for_pcd(
+                    cam,
+                    conf_thresh,
+                    use_mask,
+                    mask_smaller_pixel_num,
+                ),
                 camera_list,
             ))
         points_list = [r[0] for r in results]
@@ -368,8 +379,8 @@ class CameraConvertor(object):
             cv2.imwrite(image_folder_path + image_filename, camera.toImageVisCV(use_mask=False))
 
             if camera.mask is not None:
-                cv2.imwrite(mask_folder_path + image_filename, camera.mask_cv)
-                cv2.imwrite(masked_image_folder_path + image_filename, camera.toImageVisCV(use_mask=False))
+                cv2.imwrite(mask_folder_path + image_filename, camera.toMaskCV())
+                cv2.imwrite(masked_image_folder_path + image_filename, camera.toImageVisCV(use_mask=True))
 
             if camera.depth is not None:
                 np.save(depth_folder_path + image_basename + '.npy', camera.depth_with_conf.cpu().numpy())
