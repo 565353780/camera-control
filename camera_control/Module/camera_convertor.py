@@ -215,16 +215,23 @@ class CameraConvertor(object):
         use_mask: bool=True,
         mask_smaller_pixel_num: int=0,
     ) -> o3d.geometry.PointCloud:
+        print('[INFO][CameraConvertor::createDepthPcd]')
+        print('\t start create depth pcd...')
         with ThreadPoolExecutor() as executor:
-            results = list(executor.map(
-                lambda cam: CameraConvertor._process_camera_for_pcd(
+            futures = [
+                executor.submit(
+                    CameraConvertor._process_camera_for_pcd,
                     cam,
                     conf_thresh,
                     use_mask,
                     mask_smaller_pixel_num,
-                ),
-                camera_list,
-            ))
+                )
+                for cam in camera_list
+            ]
+            results = [
+                f.result()
+                for f in tqdm(futures)
+            ]
         points_list = [r[0] for r in results]
         colors_list = [r[1] for r in results]
 
