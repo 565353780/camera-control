@@ -784,27 +784,8 @@ class CameraData(object):
         return frustum
 
     def toO3DAxisMesh(self) -> o3d.geometry.TriangleMesh:
-        axis = self.axis
-        camera_pos = self.pos.cpu().numpy()
-
-        axis_mesh = o3d.geometry.TriangleMesh()
-
-        colors = [
-            [255, 0, 0],  # 红
-            [0, 255, 0],  # 绿
-            [0, 0, 255],  # 蓝
-        ]
-        for i in range(3):
-            # Open3D的arrow是沿Z轴，需先得到目标方向的旋转矩阵
-            mesh_arrow = createAxisMesh(axis[i], colors[i])
-
-            if mesh_arrow is None:
-                print('[WARN][CameraData::toO3DAxisMesh]')
-                print('\t createAxisMesh failed!')
-                continue
-
-            mesh_arrow.translate(camera_pos)
-            axis_mesh += mesh_arrow
+        axis_mesh = createAxisMesh(self.axis)
+        axis_mesh.translate(self.pos.cpu().numpy())
         return axis_mesh
 
     def getWorld2NVDiffRast(

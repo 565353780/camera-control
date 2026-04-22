@@ -86,7 +86,7 @@ def sample_points_from_mesh(mesh, n_points):
     points = np.asarray(pcd.points)
     return points
 
-def createAxisMesh(
+def createSingleAxisMesh(
     direction: Union[torch.Tensor, np.ndarray, list],
     color: Union[torch.Tensor, np.ndarray, list]=[255, 0, 0],
 ) -> Optional[o3d.geometry.TriangleMesh]:
@@ -94,7 +94,7 @@ def createAxisMesh(
 
     norm = np.linalg.norm(direction)
     if norm == 0:
-        print('[WARN][mesh::createAxisMesh]')
+        print('[WARN][mesh::createSingleAxisMesh]')
         print('\t direction norm is 0!')
         return None
 
@@ -121,4 +121,29 @@ def createAxisMesh(
         angle = np.arccos(np.dot(z, v))
         R = o3d.geometry.get_rotation_matrix_from_axis_angle(axis_rot / np.linalg.norm(axis_rot) * angle)
     mesh_arrow.rotate(R, center=(0, 0, 0))
+
     return mesh_arrow
+
+def createAxisMesh(
+    directions: Union[torch.Tensor, np.ndarray, list],
+) -> o3d.geometry.TriangleMesh:
+    directions = toNumpy(directions).reshape(3, 3)
+
+    axis_mesh = o3d.geometry.TriangleMesh()
+
+    colors = [
+        [255, 0, 0],
+        [0, 255, 0],
+        [0, 0, 255],
+    ]
+    for i in range(3):
+        mesh_arrow = createSingleAxisMesh(directions[i], colors[i])
+
+        if mesh_arrow is None:
+            print('[WARN][mesh::createAxisMesh]')
+            print('\t createAxisMesh failed!')
+            continue
+
+        axis_mesh += mesh_arrow
+
+    return axis_mesh
