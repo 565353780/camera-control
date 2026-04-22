@@ -865,6 +865,13 @@ class CameraData(object):
 
         return quat_t
 
+    def toDirectionsCamera(
+        self,
+        directions_world: Union[torch.Tensor, np.ndarray, list],
+    ) -> torch.Tensor:
+        directions_world = toTensor(directions_world, self.dtype, self.device)
+        return directions_world @ self.world2camera[:3, :3]
+
     def toDirectionsWorld(
         self,
         directions_camera: Union[torch.Tensor, np.ndarray, list],
