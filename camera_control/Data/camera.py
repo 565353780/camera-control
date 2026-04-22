@@ -738,50 +738,81 @@ class CameraData(object):
 
     def toO3DMesh(
         self,
-        far: float=1.0,
-        color: list=[0, 1, 0],
-    ) -> o3d.geometry.LineSet:
+        far: float = 1.0,
+        color: list = [0, 1, 0],
+        radius: float = 0.01,
+        resolution: int = 20,
+    ) -> o3d.geometry.TriangleMesh:
         """
-        创建相机视锥的可视化网格
+        创建相机视锥的可视化三角面网格
 
         相机坐标系：X右，Y上，Z后（看向 -Z 方向）
+        用圆柱体替换直线，模拟 frustum wireframe 效果
         """
+        import open3d as o3d
         half_width = (self.width / self.fx) * far
         half_height = (self.height / self.fy) * far
 
-        # 在相机坐标系中定义远平面的四个角点
-        # 相机看向 -Z 方向，所以远平面在 Z = -far 处
+        # 定义远平面四角点
         far_corners_camera = np.array([
             [-half_width, -half_height, -far],  # 左下
             [half_width, -half_height, -far],   # 右下
             [half_width, half_height, -far],    # 右上
             [-half_width, half_height, -far],   # 左上
-        ])
+        ], dtype=np.float64)
 
-        # 将相机坐标系中的点转换到世界坐标系（使用torch计算）
+        # 相机坐标转世界
         far_corners_camera_torch = torch.from_numpy(far_corners_camera).to(
             dtype=self.dtype, device=self.device)
         far_corners_camera_homo = torch.cat([
-            far_corners_camera_torch, 
+            far_corners_camera_torch,
             torch.ones((4, 1), dtype=self.dtype, device=self.device)
         ], dim=1)
         far_corners_world_homo = far_corners_camera_homo @ self.camera2world.T
         far_corners_world = toNumpy(far_corners_world_homo[:, :3])
 
-        pos = toNumpy(self.pos)
-        vertices = np.vstack([far_corners_world, pos.reshape(1, 3)])
+        pos = toNumpy(self.pos).reshape(1, 3)
+        vertices = np.vstack([far_corners_world, pos])  # 0~3:角, 4:相机中心
 
-        lines = np.array([
-            [0, 1], [1, 2], [2, 3], [3, 0],  # 远平面矩形
-            [4, 0], [4, 1], [4, 2], [4, 3],  # 连接相机中心到四个角点
-        ], dtype=np.int64)
+        # 定义frustum各线的端点索引
+        edges = [
+            (0, 1), (1, 2), (2, 3), (3, 0),  # 远平面矩形
+            (4, 0), (4, 1), (4, 2), (4, 3),  # 从相机中心到各角
+        ]
 
-        frustum = o3d.geometry.LineSet()
-        frustum.points = o3d.utility.Vector3dVector(vertices)
-        frustum.lines = o3d.utility.Vector2iVector(lines)
-        frustum.paint_uniform_color(color)
+        # 用圆柱体模拟每一根线
+        mesh_all = o3d.geometry.TriangleMesh()
+        for idx0, idx1 in edges:
+            p0 = vertices[idx0]
+            p1 = vertices[idx1]
+            direction = p1 - p0
+            length = np.linalg.norm(direction)
+            if length < 1e-8:
+                continue
 
-        return frustum
+            cylinder = o3d.geometry.TriangleMesh.create_cylinder(radius=radius, height=length, resolution=resolution, split=4)
+            cylinder.paint_uniform_color(color)
+
+            # 旋转 cylinder 使其 z 轴对齐 direction
+            z = np.array([0, 0, 1], dtype=np.float64)
+            dir_normed = direction / (np.linalg.norm(direction) + 1e-8)
+            axis = np.cross(z, dir_normed)
+            if np.linalg.norm(axis) < 1e-8:
+                R = np.eye(3)
+            else:
+                axis = axis / np.linalg.norm(axis)
+                angle = np.arccos(np.dot(z, dir_normed))
+                K = np.array([[0, -axis[2], axis[1]],
+                              [axis[2], 0, -axis[0]],
+                              [-axis[1], axis[0], 0]])
+                R = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * (K @ K)
+            cylinder.rotate(R, center=np.zeros(3))
+            # create_cylinder 创建的圆柱体以原点为中心沿 z 轴对称分布，
+            # 因此旋转后需要平移到线段中点，使两端分别落在 p0 和 p1
+            cylinder.translate((p0 + p1) / 2.0)
+            mesh_all += cylinder
+
+        return mesh_all
 
     def toO3DAxisMesh(self) -> o3d.geometry.TriangleMesh:
         axis_mesh = createAxisMesh(self.axis)
