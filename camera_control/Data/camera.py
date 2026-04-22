@@ -7,6 +7,7 @@ from copy import deepcopy
 from typing import Union, Optional
 
 from camera_control.Method.data import toNumpy, toTensor
+from camera_control.Method.mesh import createAxisMesh
 from camera_control.Method.rotate import rotmat2qvec, qvec2rotmat
 from camera_control.Method.path import removeFile, createFileFolder
 
@@ -265,6 +266,10 @@ class CameraData(object):
     @property
     def camera2worldColmap(self) -> torch.Tensor:
         return CameraData.toInvMat(self.world2cameraColmap)
+
+    @property
+    def axis(self) -> torch.Tensor:
+        return self.camera2world[:3, :3].T
 
     def match(self, dtype=None, device: Optional[str]=None) -> bool:
         if dtype != self.dtype:
@@ -777,6 +782,30 @@ class CameraData(object):
         frustum.paint_uniform_color(color)
 
         return frustum
+
+    def toO3DAxisMesh(self) -> o3d.geometry.TriangleMesh:
+        axis = self.axis
+        camera_pos = self.pos.cpu().numpy()
+
+        axis_mesh = o3d.geometry.TriangleMesh()
+
+        colors = [
+            [255, 0, 0],  # 红
+            [0, 255, 0],  # 绿
+            [0, 0, 255],  # 蓝
+        ]
+        for i in range(3):
+            # Open3D的arrow是沿Z轴，需先得到目标方向的旋转矩阵
+            mesh_arrow = createAxisMesh(axis[i], colors[i])
+
+            if mesh_arrow is None:
+                print('[WARN][CameraData::toO3DAxisMesh]')
+                print('\t createAxisMesh failed!')
+                continue
+
+            mesh_arrow.translate(camera_pos)
+            axis_mesh += mesh_arrow
+        return axis_mesh
 
     def getWorld2NVDiffRast(
         self,
