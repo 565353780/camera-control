@@ -900,15 +900,37 @@ class CameraData(object):
         self,
         directions_world: Union[torch.Tensor, np.ndarray, list],
     ) -> torch.Tensor:
+        """
+        将世界坐标系下的方向向量转换到相机坐标系。
+
+        约定：输入按「行 = 方向向量」组织，形状 (N, 3) 或 (3,)。
+        输出与输入形状一致，每一行是变换后的方向向量。
+
+        推导：
+            列形式   v_camera_col = R @ v_world_col
+            转置得   v_camera_row = v_world_row @ R^T
+            其中 R = world2camera[:3,:3]，R^T = camera2world[:3,:3]。
+        """
         directions_world = toTensor(directions_world, self.dtype, self.device)
-        return directions_world @ self.world2camera[:3, :3]
+        return directions_world @ self.camera2world[:3, :3]
 
     def toDirectionsWorld(
         self,
         directions_camera: Union[torch.Tensor, np.ndarray, list],
     ) -> torch.Tensor:
+        """
+        将相机坐标系下的方向向量转换到世界坐标系。
+
+        约定：输入按「行 = 方向向量」组织，形状 (N, 3) 或 (3,)。
+        输出与输入形状一致，每一行是变换后的方向向量。
+
+        推导：
+            列形式   v_world_col = R^T @ v_camera_col
+            转置得   v_world_row = v_camera_row @ R
+            其中 R = world2camera[:3,:3]。
+        """
         directions_camera = toTensor(directions_camera, self.dtype, self.device)
-        return directions_camera @ self.camera2world[:3, :3]
+        return directions_camera @ self.world2camera[:3, :3]
 
     def save(
         self,
