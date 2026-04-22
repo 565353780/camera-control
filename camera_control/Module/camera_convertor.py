@@ -383,11 +383,11 @@ class CameraConvertor(object):
 
             colmap_pose = camera.toColmapPose().cpu().numpy()
 
-            cv2.imwrite(image_folder_path + image_filename, camera.toImageVisCV(use_mask=False))
+            cv2.imwrite(image_folder_path + image_filename, camera.toImageCV(use_mask=False))
 
             if camera.mask is not None:
                 cv2.imwrite(mask_folder_path + image_filename, camera.toMaskCV())
-                cv2.imwrite(masked_image_folder_path + image_filename, camera.toImageVisCV(use_mask=True))
+                cv2.imwrite(masked_image_folder_path + image_filename, camera.toImageCV(use_mask=True))
 
             if camera.depth is not None:
                 np.save(depth_folder_path + image_basename + '.npy', camera.depth_with_conf.cpu().numpy())
