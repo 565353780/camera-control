@@ -865,6 +865,13 @@ class CameraData(object):
 
         return quat_t
 
+    def toDirectionsWorld(
+        self,
+        directions_camera: Union[torch.Tensor, np.ndarray, list],
+    ) -> torch.Tensor:
+        directions_camera = toTensor(directions_camera, self.dtype, self.device)
+        return directions_camera @ self.camera2world[:3, :3]
+
     def save(
         self,
         save_npy_file_path: str,
