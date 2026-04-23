@@ -245,8 +245,8 @@ class CameraConvertor(object):
     @staticmethod
     def createColmapDataFolder(
         cameras: List[Camera],
-        pcd: Union[trimesh.Trimesh, o3d.geometry.PointCloud, torch.Tensor, np.ndarray, list, str],
         save_data_folder_path: str,
+        pcd: Union[trimesh.Trimesh, o3d.geometry.PointCloud, torch.Tensor, np.ndarray, list, str, None]=None,
         point_num_max: Optional[int]=None,
     ) -> bool:
         """
@@ -270,38 +270,41 @@ class CameraConvertor(object):
         - 世界坐标系保持不变（与mesh坐标系一致）
         - 只转换相机坐标系，不转换世界坐标系
         """
-        if isinstance(pcd, str):
-            if not os.path.exists(pcd):
+        pcd = None
+
+        if pcd is not None:
+            if isinstance(pcd, str):
+                if not os.path.exists(pcd):
+                    print('[ERROR][CameraConvertor::createColmapDataFolder]')
+                    print('\t pcd file not exist!')
+                    print('\t pcd:', pcd)
+                    return False
+
+                pcd = o3d.io.read_point_cloud(pcd)
+            elif isinstance(pcd, trimesh.Trimesh):
+                pcd = toPcd(pcd.vertices)
+            elif isinstance(pcd, torch.Tensor) or isinstance(pcd, np.ndarray) or isinstance(pcd, list):
+                points = toNumpy(pcd).reshape(-1, 3)
+                pcd = toPcd(points)
+
+            if not isinstance(pcd, o3d.geometry.PointCloud):
                 print('[ERROR][CameraConvertor::createColmapDataFolder]')
-                print('\t pcd file not exist!')
-                print('\t pcd:', pcd)
+                print('\t pcd is not o3d.geometry.PointCloud!')
                 return False
 
-            pcd = o3d.io.read_point_cloud(pcd)
-        elif isinstance(pcd, trimesh.Trimesh):
-            pcd = toPcd(pcd.vertices)
-        elif isinstance(pcd, torch.Tensor) or isinstance(pcd, np.ndarray) or isinstance(pcd, list):
-            points = toNumpy(pcd).reshape(-1, 3)
-            pcd = toPcd(points)
+            if point_num_max is not None:
+                point_num = len(pcd.points)
+                if point_num > point_num_max:
+                    sample_ratio = point_num_max / point_num
+                    pcd = pcd.random_down_sample(sample_ratio)
 
-        if not isinstance(pcd, o3d.geometry.PointCloud):
-            print('[ERROR][CameraConvertor::createColmapDataFolder]')
-            print('\t pcd is not o3d.geometry.PointCloud!')
-            return False
-
-        if point_num_max is not None:
-            point_num = len(pcd.points)
-            if point_num > point_num_max:
-                sample_ratio = point_num_max / point_num
-                pcd = pcd.random_down_sample(sample_ratio)
-
-        # 检查pcd，如果没有颜色则全部赋值为[128,128,128]
-        if not pcd.has_colors():
-            colors = np.tile(np.array([[128, 128, 128]], dtype=np.float64) / 255.0, (np.asarray(pcd.points).shape[0], 1))
-            pcd.colors = o3d.utility.Vector3dVector(colors)
-        # 如果没有法向，估计法向
-        if not pcd.has_normals():
-            pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=30))
+            # 检查pcd，如果没有颜色则全部赋值为[128,128,128]
+            if not pcd.has_colors():
+                colors = np.tile(np.array([[128, 128, 128]], dtype=np.float64) / 255.0, (np.asarray(pcd.points).shape[0], 1))
+                pcd.colors = o3d.utility.Vector3dVector(colors)
+            # 如果没有法向，估计法向
+            if not pcd.has_normals():
+                pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=30))
 
         camera_num = len(cameras)
         height, width = cameras[0].image.shape[:2]
@@ -431,13 +434,15 @@ class CameraConvertor(object):
             f.writelines(images_txt_lines)
 
         # 生成points3D.ply点云文件
-        print('\t generating points3D.ply from points...')
-        ply_path = sparse_folder_path + 'points3D.ply'
-        o3d.io.write_point_cloud(ply_path, pcd, write_ascii=True)
+        if pcd is not None:
+            print('\t generating points3D.ply from points...')
+            ply_path = sparse_folder_path + 'points3D.ply'
+            o3d.io.write_point_cloud(ply_path, pcd, write_ascii=True)
 
         print(f'\t saved to: {save_data_folder_path}')
         print(f'\t total images: {camera_num}')
-        print(f'\t total points: {len(pcd.points)}')
+        if pcd is not None:
+            print(f'\t total points: {len(pcd.points)}')
         return True
 
     @staticmethod
