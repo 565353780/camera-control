@@ -270,8 +270,6 @@ class CameraConvertor(object):
         - 世界坐标系保持不变（与mesh坐标系一致）
         - 只转换相机坐标系，不转换世界坐标系
         """
-        pcd = None
-
         if pcd is not None:
             if isinstance(pcd, str):
                 if not os.path.exists(pcd):
