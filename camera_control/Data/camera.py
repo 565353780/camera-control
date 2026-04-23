@@ -320,8 +320,8 @@ class CameraData(object):
 
     def setWorldPose(
         self,
-        look_at: Union[torch.Tensor, np.ndarray, list],
-        up: Union[torch.Tensor, np.ndarray, list] = [0, 0, 1],
+        look_at: Union[torch.Tensor, np.ndarray, list, None] = None,
+        up: Union[torch.Tensor, np.ndarray, list, None] = None,
         pos: Union[torch.Tensor, np.ndarray, list, None] = None,
     ) -> bool:
         """
@@ -333,17 +333,30 @@ class CameraData(object):
         - Z轴：向后（相机看向 -Z 方向）
 
         Args:
-            look_at: 相机看向的世界坐标点
-            up: 世界坐标系中的上方向向量
-            pos: 相机在世界坐标系中的位置
+            look_at: 相机看向的世界坐标点，若为 None 则保持当前朝向不变
+            up: 世界坐标系中的上方向向量，若为 None 则保持当前上方向不变
+            pos: 相机在世界坐标系中的位置，若为 None 则保持当前位置不变
         """
-        look_at = toTensor(look_at, self.dtype, self.device)
-        up = toTensor(up, self.dtype, self.device)
+        if look_at is None and up is None and pos is None:
+            return True
 
         if pos is None:
             pos = self.pos
         else:
             pos = toTensor(pos, self.dtype, self.device)
+
+        if look_at is None:
+            # 当前 forward 方向在世界坐标系中为 -z_axis_world = -R[2]
+            forward_current = -self.R[2]
+            look_at = pos + forward_current
+        else:
+            look_at = toTensor(look_at, self.dtype, self.device)
+
+        if up is None:
+            # 当前 up 方向在世界坐标系中为 y_axis_world = R[1]
+            up = self.R[1]
+        else:
+            up = toTensor(up, self.dtype, self.device)
 
         look_at = look_at.flatten()
         up = up.flatten()
