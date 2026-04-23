@@ -133,8 +133,8 @@ class MeshRenderer(object):
 
         return CameraConvertor.createColmapDataFolder(
             cameras=camera_list,
-            pcd=pcd,
             save_data_folder_path=save_data_folder_path,
+            pcd=pcd,
         )
 
     @staticmethod
