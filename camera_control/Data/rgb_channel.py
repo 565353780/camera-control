@@ -49,6 +49,13 @@ class RGBChannel(object):
         self.image = image.reshape(self.height, self.width, 3)
         return True
 
+    def loadImageCV(
+        self,
+        image_cv: np.ndarray,
+    ) -> bool:
+        image = image_cv[..., ::-1].astype(np.float32) / 255.0
+        return self.loadImage(image)
+
     def loadImageFile(
         self,
         image_file_path: str,
@@ -60,9 +67,7 @@ class RGBChannel(object):
             print('\t loadImage failed!')
             return False
 
-        image = image[..., ::-1].astype(np.float32) / 255.0
-
-        return self.loadImage(image)
+        return self.loadImageCV(image)
 
     def toImageUV(self) -> torch.Tensor:
         """
