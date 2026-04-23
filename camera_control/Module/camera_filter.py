@@ -51,14 +51,13 @@ class CameraFilter(object):
     @staticmethod
     def samplePolarFarCameraIdxs(
         camera_list: List[Camera],
-        target_position: Union[torch.Tensor, np.ndarray, list],
         sample_camera_num: int,
     ) -> List[int]:
         n = len(camera_list)
         if sample_camera_num >= n:
             return list(range(n))
 
-        polars = np.array([cam.toPolar(target_position) for cam in camera_list])
+        polars = np.array([cam.polar for cam in camera_list])
         phi = polars[:, 0]
         theta = polars[:, 1]
 
@@ -85,8 +84,7 @@ class CameraFilter(object):
     @staticmethod
     def samplePolarFarCameras(
         camera_list: List[Camera],
-        target_position: Union[torch.Tensor, np.ndarray, list],
         sample_camera_num: int,
     ) -> List[Camera]:
-        idxs = CameraFilter.samplePolarFarCameraIdxs(camera_list, target_position, sample_camera_num)
+        idxs = CameraFilter.samplePolarFarCameraIdxs(camera_list, sample_camera_num)
         return [camera_list[idx] for idx in idxs]
