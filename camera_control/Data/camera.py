@@ -318,6 +318,42 @@ class CameraData(object):
         self.world2camera = world2camera
         return True
 
+    @property
+    def forwardDirection(self) -> torch.Tensor:
+        return -self.R[2]
+
+    @property
+    def upDirection(self) -> torch.Tensor:
+        return self.R[1]
+
+    @property
+    def polar(self) -> torch.Tensor:
+        """
+        获取相机的极坐标 (phi, theta, dist)。
+
+        极坐标定义在世界坐标系中：
+        - phi: 极角/天顶角 [0, pi]，与 z 轴正方向的夹角
+        - theta: 方位角，xy 平面上的角度
+        - dist: 相机到目标点的距离
+
+        笛卡尔坐标与极坐标的关系（与 sampleFibonacciSpherePoints 一致）：
+            x = sin(phi) * sin(theta)
+            y = sin(phi) * cos(theta)
+            z = cos(phi)
+
+        Returns:
+            polar: (phi, theta, dist)
+        """
+        direction = self.forwardDirection  # torch.Tensor, shape (3,)
+
+        # Ensure all calculations are in torch and device/dtype are correct
+        z = torch.clamp(direction[2], -1.0, 1.0)
+        phi = torch.arccos(z)
+        theta = torch.atan2(direction[0], direction[1])
+
+        polar = torch.stack([phi, theta])
+        return polar
+
     def setWorldPose(
         self,
         look_at: Union[torch.Tensor, np.ndarray, list, None] = None,
@@ -346,15 +382,13 @@ class CameraData(object):
             pos = toTensor(pos, self.dtype, self.device)
 
         if look_at is None:
-            # 当前 forward 方向在世界坐标系中为 -z_axis_world = -R[2]
-            forward_current = -self.R[2]
-            look_at = pos + forward_current
+            look_at = pos + self.forwardDirection
         else:
             look_at = toTensor(look_at, self.dtype, self.device)
 
         if up is None:
             # 当前 up 方向在世界坐标系中为 y_axis_world = R[1]
-            up = self.R[1]
+            up = self.upDirection
         else:
             up = toTensor(up, self.dtype, self.device)
 
@@ -641,51 +675,10 @@ class CameraData(object):
 
         dist = (2.5 * radius * f) / target_px
 
-        look_at = -self.R[2]
+        new_pos = center - dist * self.forwardDirection
 
-        new_pos = center - dist * look_at
-
-        self.setWorldPose(center, self.R[1], new_pos)
+        self.setWorldPose(look_at=center, pos=new_pos)
         return True
-
-    def toPolar(
-        self,
-        target_position: Union[torch.Tensor, np.ndarray, list],
-    ) -> np.ndarray:
-        """
-        获取相机相对于目标点的极坐标 (phi, theta, dist)。
-
-        极坐标定义在世界坐标系中：
-        - phi: 极角/天顶角 [0, pi]，与 z 轴正方向的夹角
-        - theta: 方位角，xy 平面上的角度
-        - dist: 相机到目标点的距离
-
-        笛卡尔坐标与极坐标的关系（与 sampleFibonacciSpherePoints 一致）：
-            x = sin(phi) * sin(theta)
-            y = sin(phi) * cos(theta)
-            z = cos(phi)
-
-        Args:
-            target_position: 目标点在世界坐标系中的位置
-
-        Returns:
-            polar: (phi, theta, dist)
-        """
-        target_position = toNumpy(target_position, np.float64).flatten()
-        cam_pos = toNumpy(self.pos, np.float64).flatten()
-
-        diff = cam_pos - target_position
-        dist = float(np.linalg.norm(diff))
-
-        if dist < 1e-12:
-            return np.array([0.0, 0.0, 0.0])
-
-        direction = diff / dist
-
-        phi = float(np.arccos(np.clip(direction[2], -1.0, 1.0)))
-        theta = float(np.arctan2(direction[0], direction[1]))
-
-        return np.array([phi, theta, dist])
 
     def setPolarPosition(
         self,
@@ -710,38 +703,38 @@ class CameraData(object):
         Returns:
             是否设置成功
         """
-        polar = toNumpy(polar, np.float64).flatten()
-        target_position = toNumpy(target_position, np.float64).flatten()
+        polar = toTensor(polar, self.dtype, self.device).flatten()
+        target_position = toTensor(target_position, self.dtype, self.device).flatten()
 
         phi = polar[0]
         theta = polar[1]
 
         if camera_dist is not None:
-            dist = float(camera_dist)
+            dist = torch.tensor(float(camera_dist), dtype=self.dtype, device=self.device)
         elif polar.shape[0] >= 3:
-            dist = float(polar[2])
+            dist = polar[2]
         else:
             print('[ERROR][CameraData::setPolarPosition]')
             print('\t dist not provided in polar or camera_dist!')
             return False
 
-        cos_phi = np.cos(phi)
-        sin_phi = np.sin(phi)
-        cos_theta = np.cos(theta)
-        sin_theta = np.sin(theta)
+        cos_phi = torch.cos(phi)
+        sin_phi = torch.sin(phi)
+        cos_theta = torch.cos(theta)
+        sin_theta = torch.sin(theta)
 
         x = sin_phi * sin_theta
         y = sin_phi * cos_theta
         z = cos_phi
 
-        direction = np.array([x, y, z])
+        direction = torch.stack([x, y, z])
         cam_pos = target_position + direction * dist
 
-        x_axis = np.array([-cos_theta, sin_theta, 0.0])
-        y_axis = np.array([-cos_phi * sin_theta, -cos_phi * cos_theta, sin_phi])
-        z_axis = np.array([sin_phi * sin_theta, sin_phi * cos_theta, cos_phi])
+        x_axis = torch.stack([-cos_theta, sin_theta, torch.tensor(0.0, dtype=self.dtype, device=self.device)])
+        y_axis = torch.stack([-cos_phi * sin_theta, -cos_phi * cos_theta, sin_phi])
+        z_axis = torch.stack([sin_phi * sin_theta, sin_phi * cos_theta, cos_phi])
 
-        R = np.stack([x_axis, y_axis, z_axis])
+        R = torch.stack([x_axis, y_axis, z_axis])
         t = -R @ cam_pos
 
         self.world2camera = torch.eye(4, dtype=self.dtype, device=self.device)
