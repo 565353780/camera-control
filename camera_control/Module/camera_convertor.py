@@ -84,7 +84,7 @@ class CameraConvertor(object):
         return transformed_list
 
     @staticmethod
-    def getNormalizeTransform(
+    def getZAxisNormalizeTransform(
         camera_list: List[Camera],
         x_direction: list=[1, 0, 0],
         y_direction: list=[0, 1, 0],
@@ -207,6 +207,358 @@ class CameraConvertor(object):
         #     world_transform = [[M,             0],
         #                        [-focus_world^T @ M, 1]]
         # =====================================================
+        world_transform = torch.eye(4, dtype=dtype, device=device)
+        world_transform[:3, :3] = M
+        world_transform[3, :3] = -(focus_world @ M)
+
+        return world_transform
+
+    @staticmethod
+    def getPolarNormalizeTransform(
+        camera_list: List[Camera],
+        x_direction: list=[1, 0, 0],
+        y_direction: list=[0, 1, 0],
+        z_direction: list=[0, 0, 1],
+        up_cluster_angle_deg: float=15.0,
+        min_cluster_ratio: float=0.3,
+    ) -> torch.Tensor:
+        """
+        与 `getZAxisNormalizeTransform` 语义一致，但对「主 up 方向」的估计改为
+        基于球面方向聚类的最密集模态，而不是简单的算术平均：
+        1. 收集所有相机在世界系下的 image-Y（up）方向；
+        2. 在单位球面上寻找最密集的方向簇（最多邻居的候选），
+           用该簇内方向的平均作为主 up 方向；
+        3. 旋转使主 up 方向对齐 z_direction；
+        4. 绕 z_direction 轴旋转使第一个相机视线对齐 -x_direction；
+        5. 平移使所有视线射线的最近公共交点位于世界原点。
+
+        这样可以抗离群视角，更符合「所有相机最集中的 up 方向」的直觉。
+
+        Args:
+            camera_list: 相机列表（只读）
+            x_direction: 目标坐标系 X 轴方向（cam0 视线将对齐 -x_direction）
+            y_direction: 目标坐标系 Y 轴方向（保留参数，实际由 cross(z_dir, x_dir) 确定）
+            z_direction: 目标坐标系 Z 轴方向（主 up 方向将对齐此方向）
+            up_cluster_angle_deg: 主簇的角度阈值（度），与候选中心夹角不大于此阈值视为同簇
+            min_cluster_ratio: 主簇大小占相机总数的最低比例，低于此比例时回退到简单平均
+
+        Returns:
+            world_transform: 4x4 张量，符合 `transformCameras` 的行向量右乘约定
+                             （即 Open3D ICP 矩阵的转置），可直接传入 transformCameras。
+        """
+        device = camera_list[0].device
+        dtype = camera_list[0].dtype
+
+        z_cam = torch.tensor([0., 0., 1.], dtype=dtype, device=device)
+        y_cam = torch.tensor([0., 1., 0.], dtype=dtype, device=device)
+
+        z_dir = torch.tensor(z_direction, dtype=dtype, device=device)
+        z_dir = z_dir / (torch.linalg.norm(z_dir) + 1e-8)
+
+        x_dir = torch.tensor(x_direction, dtype=dtype, device=device)
+        x_dir = x_dir - torch.dot(x_dir, z_dir) * z_dir
+        x_dir = x_dir / (torch.linalg.norm(x_dir) + 1e-8)
+
+        def rot_from_a_to_b(a, b):
+            """Rodrigues 旋转：将单位向量 a 旋转到 b，含反平行处理。"""
+            v = torch.cross(a, b)
+            c = torch.dot(a, b)
+            s = torch.linalg.norm(v)
+            if s < 1e-8:
+                if c > 0:
+                    return torch.eye(3, dtype=dtype, device=device)
+                perp = torch.tensor([1., 0., 0.], dtype=dtype, device=device)
+                if torch.abs(torch.dot(a, perp)) > 0.9:
+                    perp = torch.tensor([0., 1., 0.], dtype=dtype, device=device)
+                n = torch.cross(a, perp)
+                n = n / torch.linalg.norm(n)
+                return 2.0 * n[:, None] @ n[None, :] - torch.eye(3, dtype=dtype, device=device)
+            vx = torch.tensor([
+                [0, -v[2], v[1]],
+                [v[2], 0, -v[0]],
+                [-v[1], v[0], 0]
+            ], dtype=dtype, device=device)
+            return torch.eye(3, dtype=dtype, device=device) + vx + vx @ vx * ((1 - c) / (s * s))
+
+        # =====================================================
+        # Step 1: 球面聚类估计主 up 方向
+        # 每个相机在世界系下的 image-Y 方向即 cam.R.T @ y_cam，
+        # 其球面表示 (phi, theta) 与 Camera.polar 同约定；这里
+        # 直接在单位向量空间用余弦相似度做邻居计数，避免 atan2 在
+        # 极点 / theta 卷绕带来的数值问题。
+        # =====================================================
+        ups_world = torch.stack([cam.R.T @ y_cam for cam in camera_list])
+        ups_world = ups_world / (torch.linalg.norm(ups_world, dim=1, keepdim=True) + 1e-8)
+
+        n_cams = ups_world.shape[0]
+
+        cos_thresh = float(np.cos(np.deg2rad(up_cluster_angle_deg)))
+        cos_matrix = ups_world @ ups_world.T  # (N, N)
+        neighbor_mask = cos_matrix >= cos_thresh
+        neighbor_count = neighbor_mask.sum(dim=1)
+
+        best_idx = int(torch.argmax(neighbor_count).item())
+        best_count = int(neighbor_count[best_idx].item())
+        min_cluster_size = max(1, int(np.ceil(min_cluster_ratio * n_cams)))
+
+        if best_count >= min_cluster_size:
+            cluster_members = ups_world[neighbor_mask[best_idx]]
+            u_main = cluster_members.mean(dim=0)
+            if torch.linalg.norm(u_main) < 1e-6:
+                # 理论上同簇方向夹角不超过阈值，平均不应退化；仍给回退。
+                u_main = ups_world.mean(dim=0)
+        else:
+            # 视角过于分散，无显著主簇，回退到简单平均，
+            # 与 getZAxisNormalizeTransform 保持一致。
+            print('[WARN][CameraConvertor::getPolarNormalizeTransform]')
+            print('\t no dominant up cluster found, falling back to mean.')
+            print('\t best_count / n_cams:', best_count, '/', n_cams)
+            u_main = ups_world.mean(dim=0)
+
+        u_main = u_main / (torch.linalg.norm(u_main) + 1e-8)
+
+        Q_up = rot_from_a_to_b(u_main, z_dir)
+
+        # =====================================================
+        # Step 2: 求 Q_yaw — cam0 视线对齐 -x_direction
+        # =====================================================
+        look0_orig = -(camera_list[0].R.T @ z_cam)
+        look0 = Q_up @ look0_orig
+
+        look0_proj = look0 - torch.dot(look0, z_dir) * z_dir
+        proj_norm = torch.linalg.norm(look0_proj)
+        if proj_norm < 1e-6:
+            # cam0 视线与 z_dir 近乎共线，yaw 退化：此时绕 z_dir
+            # 的任意旋转都不会让 cam0 的视线更接近 -x_dir，
+            # 直接跳过。
+            print('[WARN][CameraConvertor::getPolarNormalizeTransform]')
+            print('\t cam0 forward is nearly parallel to z_direction, skip yaw alignment.')
+            Q_yaw = torch.eye(3, dtype=dtype, device=device)
+        else:
+            look0_proj = look0_proj / (proj_norm + 1e-8)
+            Q_yaw = rot_from_a_to_b(look0_proj, -x_dir)
+
+        M = Q_up.T @ Q_yaw.T
+
+        # =====================================================
+        # Step 3: 求平移 focus — 原始世界坐标系下视线的最近公共交点
+        # =====================================================
+        origins, dirs = [], []
+        for cam in camera_list:
+            C = -cam.R.T @ cam.t
+            d = -(cam.R.T @ z_cam)
+            d = d / (torch.linalg.norm(d) + 1e-8)
+            origins.append(C)
+            dirs.append(d)
+
+        origins = torch.stack(origins)
+        dirs = torch.stack(dirs)
+
+        I = torch.eye(3, dtype=dtype, device=device)
+        A = torch.zeros((3, 3), dtype=dtype, device=device)
+        b = torch.zeros((3,), dtype=dtype, device=device)
+
+        for o, d in zip(origins, dirs):
+            P = I - d[:, None] @ d[None, :]
+            A += P
+            b += P @ o
+
+        focus_world = torch.linalg.solve(A, b)
+
+        # =====================================================
+        # 构造 transformCameras 所需的 world_transform
+        # （与 getZAxisNormalizeTransform 完全一致的约定）
+        # =====================================================
+        world_transform = torch.eye(4, dtype=dtype, device=device)
+        world_transform[:3, :3] = M
+        world_transform[3, :3] = -(focus_world @ M)
+
+        return world_transform
+
+    @staticmethod
+    def getXZPlaneNormalizeTransform(
+        camera_list: List[Camera],
+        x_direction: list=[1, 0, 0],
+        y_direction: list=[0, 1, 0],
+        z_direction: list=[0, 0, 1],
+        up_cluster_angle_deg: float=15.0,
+        min_cluster_ratio: float=0.3,
+    ) -> torch.Tensor:
+        """
+        基于「世界 Z 轴大致位于每个相机的 Y(上)-Z(后) 平面内」的观察估计主 up 轴：
+          若 z 位于相机 YZ 平面内，则 z 应与相机 X 轴（该平面的法线）在世界系下近似垂直。
+          因此以 z_candidate = argmin_{||z||=1} sum_i (r_i · z)^2 估计主 up 轴，
+          其中 r_i 为相机 i 在世界系下的右方向；该解为矩阵
+              S = sum_i r_i r_i^T
+          的最小特征值对应的特征向量。
+
+        对「歪相机」的离群点处理：
+          1. 先用所有相机的 up 方向在球面上做聚类，取最密集的主簇作为内点相机；
+          2. 仅在内点相机的 right 向量上做最小特征向量拟合，避免倾斜相机把 z 拉偏。
+          若主簇占比不足 min_cluster_ratio，则回退使用全部相机。
+
+        其余对齐步骤与 getPolarNormalizeTransform 保持一致：
+          - 旋转使 z_candidate 对齐 z_direction；
+          - 绕 z_direction 旋转使 cam0 视线对齐 -x_direction；
+          - 平移使所有视线射线的最近公共交点位于世界原点。
+
+        Args:
+            camera_list: 相机列表（只读）
+            x_direction: 目标坐标系 X 轴方向（cam0 视线将对齐 -x_direction）
+            y_direction: 目标坐标系 Y 轴方向（保留参数，实际由 cross(z_dir, x_dir) 确定）
+            z_direction: 目标坐标系 Z 轴方向（主 up 方向将对齐此方向）
+            up_cluster_angle_deg: up 方向聚类角度阈值（度），用于筛选非歪相机
+            min_cluster_ratio: 主簇大小最低占比，低于该比例时回退为全量内点
+
+        Returns:
+            world_transform: 4x4 张量，符合 `transformCameras` 的行向量右乘约定
+        """
+        device = camera_list[0].device
+        dtype = camera_list[0].dtype
+
+        x_cam = torch.tensor([1., 0., 0.], dtype=dtype, device=device)
+        y_cam = torch.tensor([0., 1., 0.], dtype=dtype, device=device)
+        z_cam = torch.tensor([0., 0., 1.], dtype=dtype, device=device)
+
+        z_dir = torch.tensor(z_direction, dtype=dtype, device=device)
+        z_dir = z_dir / (torch.linalg.norm(z_dir) + 1e-8)
+
+        x_dir = torch.tensor(x_direction, dtype=dtype, device=device)
+        x_dir = x_dir - torch.dot(x_dir, z_dir) * z_dir
+        x_dir = x_dir / (torch.linalg.norm(x_dir) + 1e-8)
+
+        def rot_from_a_to_b(a, b):
+            """Rodrigues 旋转：将单位向量 a 旋转到 b，含反平行处理。"""
+            v = torch.cross(a, b)
+            c = torch.dot(a, b)
+            s = torch.linalg.norm(v)
+            if s < 1e-8:
+                if c > 0:
+                    return torch.eye(3, dtype=dtype, device=device)
+                perp = torch.tensor([1., 0., 0.], dtype=dtype, device=device)
+                if torch.abs(torch.dot(a, perp)) > 0.9:
+                    perp = torch.tensor([0., 1., 0.], dtype=dtype, device=device)
+                n = torch.cross(a, perp)
+                n = n / torch.linalg.norm(n)
+                return 2.0 * n[:, None] @ n[None, :] - torch.eye(3, dtype=dtype, device=device)
+            vx = torch.tensor([
+                [0, -v[2], v[1]],
+                [v[2], 0, -v[0]],
+                [-v[1], v[0], 0]
+            ], dtype=dtype, device=device)
+            return torch.eye(3, dtype=dtype, device=device) + vx + vx @ vx * ((1 - c) / (s * s))
+
+        # =====================================================
+        # Step 1a: 用 up 方向球面聚类筛选内点相机（剔除"歪"相机）
+        # =====================================================
+        ups_world = torch.stack([cam.R.T @ y_cam for cam in camera_list])
+        ups_world = ups_world / (torch.linalg.norm(ups_world, dim=1, keepdim=True) + 1e-8)
+
+        n_cams = ups_world.shape[0]
+        cos_thresh = float(np.cos(np.deg2rad(up_cluster_angle_deg)))
+        cos_matrix = ups_world @ ups_world.T
+        neighbor_mask = cos_matrix >= cos_thresh
+        neighbor_count = neighbor_mask.sum(dim=1)
+
+        best_idx = int(torch.argmax(neighbor_count).item())
+        best_count = int(neighbor_count[best_idx].item())
+        min_cluster_size = max(1, int(np.ceil(min_cluster_ratio * n_cams)))
+
+        if best_count >= min_cluster_size:
+            inlier_mask = neighbor_mask[best_idx]
+        else:
+            # 视角过于分散，没有明显"非歪"主簇，退化为全量相机。
+            print('[WARN][CameraConvertor::getXZPlaneNormalizeTransform]')
+            print('\t no dominant up cluster found, using all cameras as inliers.')
+            print('\t best_count / n_cams:', best_count, '/', n_cams)
+            inlier_mask = torch.ones(n_cams, dtype=torch.bool, device=device)
+
+        # =====================================================
+        # Step 1b: 内点相机上拟合 z_candidate —— sum_i r_i r_i^T 的最小特征向量
+        # 几何含义：z_candidate 同时"最贴近"所有相机的 YZ 平面。
+        # =====================================================
+        rights_world = torch.stack([cam.R.T @ x_cam for cam in camera_list])
+        rights_world = rights_world / (torch.linalg.norm(rights_world, dim=1, keepdim=True) + 1e-8)
+
+        r_inliers = rights_world[inlier_mask]
+        ups_inliers = ups_world[inlier_mask]
+
+        if r_inliers.shape[0] < 2:
+            # 内点过少，约束矩阵秩不足，退化为 up 均值。
+            print('[WARN][CameraConvertor::getXZPlaneNormalizeTransform]')
+            print('\t too few inliers for XZ-plane fitting, falling back to mean up.')
+            u_main = ups_inliers.mean(dim=0) if ups_inliers.shape[0] > 0 else ups_world.mean(dim=0)
+        else:
+            S = r_inliers.T @ r_inliers
+            S = 0.5 * (S + S.T)
+            eigvals, eigvecs = torch.linalg.eigh(S)
+            # eigvals 升序排列，最小特征值对应的特征向量即为 z_candidate。
+            u_main = eigvecs[:, 0]
+
+            # 特征向量仅在符号上有二义性；用内点 up 均值定号，
+            # 保证 u_main 指向"多数相机头顶"方向。
+            up_ref = ups_inliers.mean(dim=0)
+            if torch.linalg.norm(up_ref) < 1e-6:
+                up_ref = ups_world.mean(dim=0)
+            if torch.dot(u_main, up_ref) < 0:
+                u_main = -u_main
+
+            # 记录最小残差，便于线上定位数据退化情况
+            # （例如所有相机位姿共面会让最小特征值接近次小）。
+            min_eig = float(eigvals[0].item())
+            mid_eig = float(eigvals[1].item())
+            if mid_eig > 1e-8 and min_eig / mid_eig > 0.3:
+                print('[WARN][CameraConvertor::getXZPlaneNormalizeTransform]')
+                print('\t smallest / middle eigenvalue ratio is high:', min_eig / mid_eig)
+                print('\t z_candidate may be weakly constrained (cameras near-coplanar right-axes).')
+
+        u_main = u_main / (torch.linalg.norm(u_main) + 1e-8)
+
+        Q_up = rot_from_a_to_b(u_main, z_dir)
+
+        # =====================================================
+        # Step 2: 求 Q_yaw — cam0 视线对齐 -x_direction
+        # =====================================================
+        look0_orig = -(camera_list[0].R.T @ z_cam)
+        look0 = Q_up @ look0_orig
+
+        look0_proj = look0 - torch.dot(look0, z_dir) * z_dir
+        proj_norm = torch.linalg.norm(look0_proj)
+        if proj_norm < 1e-6:
+            print('[WARN][CameraConvertor::getXZPlaneNormalizeTransform]')
+            print('\t cam0 forward is nearly parallel to z_direction, skip yaw alignment.')
+            Q_yaw = torch.eye(3, dtype=dtype, device=device)
+        else:
+            look0_proj = look0_proj / (proj_norm + 1e-8)
+            Q_yaw = rot_from_a_to_b(look0_proj, -x_dir)
+
+        M = Q_up.T @ Q_yaw.T
+
+        # =====================================================
+        # Step 3: 求平移 focus — 原始世界系下视线最近公共交点
+        # =====================================================
+        origins, dirs = [], []
+        for cam in camera_list:
+            C = -cam.R.T @ cam.t
+            d = -(cam.R.T @ z_cam)
+            d = d / (torch.linalg.norm(d) + 1e-8)
+            origins.append(C)
+            dirs.append(d)
+
+        origins = torch.stack(origins)
+        dirs = torch.stack(dirs)
+
+        I = torch.eye(3, dtype=dtype, device=device)
+        A = torch.zeros((3, 3), dtype=dtype, device=device)
+        b = torch.zeros((3,), dtype=dtype, device=device)
+
+        for o, d in zip(origins, dirs):
+            P = I - d[:, None] @ d[None, :]
+            A += P
+            b += P @ o
+
+        focus_world = torch.linalg.solve(A, b)
+
         world_transform = torch.eye(4, dtype=dtype, device=device)
         world_transform[:3, :3] = M
         world_transform[3, :3] = -(focus_world @ M)
