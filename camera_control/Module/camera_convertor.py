@@ -84,14 +84,14 @@ class CameraConvertor(object):
         return transformed_list
 
     @staticmethod
-    def normalizeCameras(
+    def getNormalizeTransform(
         camera_list: List[Camera],
         x_direction: list=[1, 0, 0],
         y_direction: list=[0, 1, 0],
         z_direction: list=[0, 0, 1],
-    ) -> List[Camera]:
+    ) -> torch.Tensor:
         """
-        归一化相机阵列的世界坐标系（支持任意目标坐标轴方向）：
+        计算用于归一化相机阵列世界坐标系的 4x4 变换矩阵：
         1. 旋转使所有相机 Y 轴（图像朝上）的平均方向对齐 z_direction
         2. 绕 z_direction 轴旋转使第一个相机的视线方向对齐 -x_direction
         3. 平移使所有视线射线的最近公共交点位于世界原点
@@ -99,15 +99,17 @@ class CameraConvertor(object):
         相机坐标系约定：X 右、Y 上、Z 后，相机看向 -Z。
 
         Args:
-            camera_list: 相机列表
+            camera_list: 相机列表（只读）
             x_direction: 目标坐标系 X 轴方向（cam0 视线将对齐 -x_direction）
             y_direction: 目标坐标系 Y 轴方向（保留参数，实际由 cross(z_dir, x_dir) 确定）
             z_direction: 目标坐标系 Z 轴方向（平均相机朝上方向将对齐此方向）
-        """
-        normalized_camera_list = deepcopy(camera_list)
 
-        device = normalized_camera_list[0].device
-        dtype = normalized_camera_list[0].dtype
+        Returns:
+            world_transform: 4x4 张量，符合 `transformCameras` 的行向量右乘约定
+                             （即 Open3D ICP 矩阵的转置），可直接传入 transformCameras。
+        """
+        device = camera_list[0].device
+        dtype = camera_list[0].dtype
 
         z_cam = torch.tensor([0., 0., 1.], dtype=dtype, device=device)
         y_cam = torch.tensor([0., 1., 0.], dtype=dtype, device=device)
@@ -142,34 +144,36 @@ class CameraConvertor(object):
             return torch.eye(3, dtype=dtype, device=device) + vx + vx @ vx * ((1 - c) / (s * s))
 
         # =====================================================
-        # Step 1: 旋转 — 平均 image-Y 对齐 z_direction
+        # Step 1: 求旋转 Q_up — 平均 image-Y 对齐 z_direction
         # =====================================================
-        y_avg = torch.stack([cam.R.T @ y_cam for cam in normalized_camera_list]).mean(dim=0)
+        y_avg = torch.stack([cam.R.T @ y_cam for cam in camera_list]).mean(dim=0)
         y_avg = y_avg / (torch.linalg.norm(y_avg) + 1e-8)
 
         Q_up = rot_from_a_to_b(y_avg, z_dir)
 
-        for cam in normalized_camera_list:
-            cam.world2camera[:3, :3] = cam.R @ Q_up.T
-
         # =====================================================
-        # Step 2: 旋转 — cam0 视线对齐 -x_direction（绕 z_direction 轴）
+        # Step 2: 求旋转 Q_yaw — cam0 视线对齐 -x_direction（绕 z_direction 轴）
+        # 注：Q_up 作用后 cam0 的视线变为 Q_up @ look0_orig，
+        #     这里直接用该等价形式，避免先真的旋转再读出
         # =====================================================
-        look0 = -(normalized_camera_list[0].R.T @ z_cam)
+        look0_orig = -(camera_list[0].R.T @ z_cam)
+        look0 = Q_up @ look0_orig
 
         look0_proj = look0 - torch.dot(look0, z_dir) * z_dir
         look0_proj = look0_proj / (torch.linalg.norm(look0_proj) + 1e-8)
 
         Q_yaw = rot_from_a_to_b(look0_proj, -x_dir)
 
-        for cam in normalized_camera_list:
-            cam.world2camera[:3, :3] = cam.R @ Q_yaw.T
+        # 合并旋转右乘因子：R_new = R_old @ M
+        M = Q_up.T @ Q_yaw.T
 
         # =====================================================
-        # Step 3: 平移 — 视线最近公共交点移至原点
+        # Step 3: 求平移 focus — 原始世界坐标系下视线的最近公共交点
+        # 几何不变性：旋转后坐标系下的 focus = M^T @ focus_world
+        # 代回 t_new = t_old + R_new @ focus_rotated 即得 t_new = t_old + R_old @ focus_world
         # =====================================================
         origins, dirs = [], []
-        for cam in normalized_camera_list:
+        for cam in camera_list:
             C = -cam.R.T @ cam.t
             d = -(cam.R.T @ z_cam)
             d = d / (torch.linalg.norm(d) + 1e-8)
@@ -188,12 +192,26 @@ class CameraConvertor(object):
             A += P
             b += P @ o
 
-        focus = torch.linalg.solve(A, b)
+        focus_world = torch.linalg.solve(A, b)
 
-        for cam in normalized_camera_list:
-            cam.world2camera[:3, 3] += cam.R @ focus
+        # =====================================================
+        # 直接构造 transformCameras 所需的行向量右乘矩阵 world_transform
+        # （= Open3D ICP 矩阵的转置），避免任何数值求逆：
+        #
+        # transformCameras 内部对 w2c 最终的右乘量为
+        #     T_clean_left_inv = [[R_l^T, -R_l^T @ t_l], [0, 1]]
+        # 其中 (R_l, t_l) 由 world_transform.T 分解得到。
+        #
+        # 我们希望该最终量等于刚体 T_rigid = [[M, focus_world], [0, 1]]，
+        # 反推得 R_l = M^T，t_l = -M^T @ focus_world，于是
+        #     world_transform = [[M,             0],
+        #                        [-focus_world^T @ M, 1]]
+        # =====================================================
+        world_transform = torch.eye(4, dtype=dtype, device=device)
+        world_transform[:3, :3] = M
+        world_transform[3, :3] = -(focus_world @ M)
 
-        return normalized_camera_list
+        return world_transform
 
     @staticmethod
     def _process_camera_for_pcd(
