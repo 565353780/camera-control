@@ -30,6 +30,12 @@ class NormalCameraChannel(BaseNormalChannel):
     def toNormalCameraUV(self) -> torch.Tensor:
         return BaseNormalChannel._to_normal_uv(self, _ATTR)
 
+    def sampleNormalCameraAtUV(
+        self,
+        uv_grid: Union[torch.Tensor, np.ndarray],
+    ) -> torch.Tensor:
+        return BaseNormalChannel._sample_normal_at_uv(self, _ATTR, uv_grid)
+
     def toNormalCamera(
         self,
         use_mask: bool = True,

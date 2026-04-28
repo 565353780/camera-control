@@ -66,6 +66,30 @@ class BaseNormalChannel(object):
         return uv
 
     @staticmethod
+    def _sample_normal_at_uv(
+        obj,
+        attr_name: str,
+        uv_grid: Union[torch.Tensor, np.ndarray],
+    ) -> torch.Tensor:
+        """
+        按归一化 UV 在 normal map 上做最近邻采样，与 RGBChannel.sampleRGBAtUV 同约定，
+        便于 depth / mask 等其它模态按各自 UV 对齐 normal，节省重复网格构造。
+
+        uv_grid: (..., 2) 归一化 UV [0,1]，u 向右、v 向上（v=0 为左下）。
+        normal map 行 0 对应 v=1（上），行 Mh-1 对应 v=0（下）。
+        返回: 与 uv_grid 前若干维同形状的 (..., 3) tensor。
+        """
+        val = getattr(obj, attr_name)
+        assert val is not None
+        uv_grid = toTensor(uv_grid, torch.float32, obj.device)
+        Mh, Mw = val.shape[0], val.shape[1]
+        u = uv_grid[..., 0]
+        v = uv_grid[..., 1]
+        idx_w = (u * Mw - 0.5).round().long().clamp(0, Mw - 1)
+        idx_h = ((1.0 - v) * Mh - 0.5).round().long().clamp(0, Mh - 1)
+        return val[idx_h, idx_w]
+
+    @staticmethod
     def _to_normal(
         obj,
         attr_name: str,

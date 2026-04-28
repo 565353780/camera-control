@@ -573,10 +573,24 @@ class CameraConvertor(object):
         mask_smaller_pixel_num: int,
     ):
         mask = camera.toDepthMask(conf_thresh, use_mask, mask_smaller_pixel_num)
-        image_colors = camera.sampleRGBAtUV(camera.toDepthUV())
-        colors = image_colors[mask]
         points, _ = camera.toDepthPoints(conf_thresh, use_mask, mask_smaller_pixel_num)
-        return points, colors
+
+        depth_uv = None
+
+        colors = None
+        if getattr(camera, "image", None) is not None:
+            depth_uv = camera.toDepthUV()
+            image_colors = camera.sampleRGBAtUV(depth_uv)
+            colors = image_colors[mask]
+
+        normals = None
+        if getattr(camera, "normal_world", None) is not None:
+            if depth_uv is None:
+                depth_uv = camera.toDepthUV()
+            sampled_normals = camera.sampleNormalWorldAtUV(depth_uv)
+            normals = sampled_normals[mask]
+
+        return points, normals, colors
 
     @staticmethod
     def createDepthPcd(
@@ -603,13 +617,23 @@ class CameraConvertor(object):
                 for f in tqdm(futures)
             ]
         points_list = [r[0] for r in results]
-        colors_list = [r[1] for r in results]
+        normals_list = [r[1] for r in results]
+        colors_list = [r[2] for r in results]
 
         points = torch.cat(points_list, dim=0)
-        colors = torch.cat(colors_list, dim=0)
+        # 仅当所有相机都具备对应模态时才聚合，避免点云与颜色/法线长度不一致。
+        colors = (
+            torch.cat(colors_list, dim=0)
+            if all(c is not None for c in colors_list)
+            else None
+        )
+        normals = (
+            torch.cat(normals_list, dim=0)
+            if all(n is not None for n in normals_list)
+            else None
+        )
 
-        pcd = toPcd(points, colors)
-
+        pcd = toPcd(points, colors, normals)
         return pcd
 
     @staticmethod
