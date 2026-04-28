@@ -35,6 +35,7 @@ class MeshRenderer(object):
         focus_center_ratio: float=1.0,
         up_direction: Optional[List[float]] = [0, 0, 1],
         vertices_tensor: Optional[torch.Tensor] = None,
+        enable_antialias: bool=True,
     ) -> List[Camera]:
         camera_list = sampleCameras(
             mesh=mesh,
@@ -61,7 +62,7 @@ class MeshRenderer(object):
                 render_types=['mask', 'rgb', 'depth', 'normal'],
                 bg_color=bg_color,
                 vertices_tensor=vertices_tensor,
-                enable_antialias=True,
+                enable_antialias=enable_antialias,
             )
 
             camera.image_id = f'{i:06d}.png'
@@ -93,6 +94,7 @@ class MeshRenderer(object):
         device: str = 'cuda:0',
         focus_center_ratio: float=1.0,
         up_direction: Optional[List[float]] = [0, 0, 1],
+        enable_antialias: bool=True,
     ) -> bool:
         camera_list = MeshRenderer.sampleRenderData(
             mesh=mesh,
@@ -107,6 +109,7 @@ class MeshRenderer(object):
             device=device,
             focus_center_ratio=focus_center_ratio,
             up_direction=up_direction,
+            enable_antialias=enable_antialias,
         )
 
         # 处理有/无顶点颜色、纹理等多种情况
@@ -152,6 +155,7 @@ class MeshRenderer(object):
         device: str = 'cuda:0',
         focus_center_ratio: float=1.0,
         up_direction: Optional[List[float]] = [0, 0, 1],
+        enable_antialias: bool=True,
     ) -> bool:
         if os.path.exists(save_data_folder_path):
             rmtree(save_data_folder_path)
@@ -179,6 +183,7 @@ class MeshRenderer(object):
             device=device,
             focus_center_ratio=focus_center_ratio,
             up_direction=up_direction,
+            enable_antialias=enable_antialias,
         )
 
         first_camera = camera_list[0]
@@ -236,6 +241,7 @@ class MeshRenderer(object):
         device: str = 'cuda:0',
         focus_center_ratio: float=1.0,
         up_direction: Optional[List[float]] = [0, 0, 1],
+        enable_antialias: bool=True,
     ) -> bool:
         camera_list = MeshRenderer.sampleRenderData(
             mesh=mesh,
@@ -250,6 +256,7 @@ class MeshRenderer(object):
             device=device,
             focus_center_ratio=focus_center_ratio,
             up_direction=up_direction,
+            enable_antialias=enable_antialias,
         )
 
         images = []
