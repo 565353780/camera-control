@@ -5,7 +5,7 @@ import open3d as o3d
 from camera_control.Method.data import toNumpy
 
 
-def toPcd(points, colors=None) -> o3d.geometry.PointCloud:
+def toPcd(points, colors=None, normals=None) -> o3d.geometry.PointCloud:
     points = toNumpy(points, np.float64).reshape(-1, 3)
 
     pcd = o3d.geometry.PointCloud()
@@ -21,4 +21,7 @@ def toPcd(points, colors=None) -> o3d.geometry.PointCloud:
 
         colors = toNumpy(colors, np.float64).reshape(-1, 3)
         pcd.colors = o3d.utility.Vector3dVector(colors)
+
+    if normals is not None:
+        pcd.normals = o3d.utility.Vector3dVector(toNumpy(normals, np.float64).reshape(-1, 3))
     return pcd
