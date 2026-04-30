@@ -878,14 +878,20 @@ class CameraConvertor(object):
                 if not line or line.startswith('#'):
                     continue
                 parts = line.split()
-                if len(parts) < 8:
+                if len(parts) < 7:
                     continue
                 camera_id = int(parts[0])
                 model = parts[1]
                 width = int(parts[2])
                 height = int(parts[3])
+                fx = float(parts[4])
                 if model == 'PINHOLE' and len(parts) >= 8:
-                    fx, fy, cx, cy = float(parts[4]), float(parts[5]), float(parts[6]), float(parts[7])
+                    fy, cx, cy = float(parts[5]), float(parts[6]), float(parts[7])
+                    cameras_dict[camera_id] = {'width': width, 'height': height, 'fx': fx, 'fy': fy, 'cx': cx, 'cy': cy}
+                elif model == 'SIMPLE_PINHOLE' and len(parts) >= 7:
+                    fy = fx
+                    cx = float(parts[5])
+                    cy = float(parts[6])
                     cameras_dict[camera_id] = {'width': width, 'height': height, 'fx': fx, 'fy': fy, 'cx': cx, 'cy': cy}
 
         # 解析 images.txt: 每张图两行，第一行 IMAGE_ID QW QX QY QZ TX TY TZ CAMERA_ID NAME
