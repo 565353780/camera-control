@@ -983,3 +983,14 @@ class CameraConvertor(object):
         camera_list = [c for c in results if isinstance(c, Camera)]
         camera_list.sort(key=lambda c: c.image_id)
         return camera_list
+
+def toCamerasMesh(
+    camera_list: List[Camera],
+) -> o3d.geometry.TriangleMesh:
+    cameras_mesh = o3d.geometry.TriangleMesh()
+
+    for camera in camera_list:
+        cameras_mesh += camera.toO3DMesh()
+        cameras_mesh += camera.toO3DAxisMesh()
+
+    return cameras_mesh
