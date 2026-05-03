@@ -1,4 +1,3 @@
-import os
 import numpy as np
 import open3d as o3d
 
@@ -7,7 +6,7 @@ from camera_control.Method.filter import searchMainClusterPointMask
 
 
 def test():
-    pcd_file_path = '/Users/chli/Documents/debug_source_pcd.ply'
+    pcd_file_path = '/Users/chli/Documents/vggt_source_pcd.ply'
     save_pcd_file_path = '/Users/chli/Documents/debug_filtered_pcd.ply'
 
     pcd = o3d.io.read_point_cloud(pcd_file_path)

@@ -1,234 +1,8 @@
 import numpy as np
-import open3d as o3d
 
-from tqdm import trange
-from typing import Any, Tuple, Union
+from typing import Any
 
 from camera_control.Method.data import toNumpy
-from camera_control.Method.pcd import toPcd
-
-
-def _sampleProxyPoints(
-    xyz_np: np.ndarray,
-    proxy_point_num: int = 20000,
-) -> np.ndarray:
-    '''
-    使用 Open3D voxel downsample 快速得到近似均匀的代理点。
-    通过 bbox 估计初始 voxel size, 再二分搜索到接近 proxy_point_num 的点数。
-    点数不足时直接返回原始点。
-    '''
-    n = int(xyz_np.shape[0])
-    target = int(proxy_point_num)
-    if target <= 0 or n <= target:
-        return xyz_np
-
-    pcd = toPcd(xyz_np)
-    bbox_min = np.min(xyz_np, axis=0)
-    bbox_max = np.max(xyz_np, axis=0)
-    bbox_extent = np.maximum(bbox_max - bbox_min, 0.0)
-    positive_extent = bbox_extent[bbox_extent > 0.0]
-
-    print('[INFO][filter::_sampleProxyPoints]')
-    print('\t start sample proxy points...')
-    print('\t point num from', n, 'to around', target)
-
-    if positive_extent.size == 0 or not np.all(np.isfinite(positive_extent)):
-        return xyz_np
-
-    min_count = max(1, int(np.floor(target * 0.8)))
-    max_count = max(min_count, int(np.ceil(target * 1.2)))
-    max_iter = 16
-
-    def _downsample(voxel_size: float) -> np.ndarray:
-        sampled = pcd.voxel_down_sample(float(voxel_size))
-        return np.asarray(sampled.points, dtype=np.float64)
-
-    def _is_valid_count(count: int) -> bool:
-        return min_count <= count <= max_count
-
-    bbox_measure = float(np.prod(positive_extent))
-    voxel_size = float(
-        np.power(bbox_measure / float(target), 1.0 / float(positive_extent.size)),
-    )
-    if voxel_size <= 0.0 or not np.isfinite(voxel_size):
-        return xyz_np
-
-    best_proxy = _downsample(voxel_size)
-    best_count = int(best_proxy.shape[0])
-    best_error = abs(best_count - target)
-    if best_count == 0:
-        return xyz_np
-    if _is_valid_count(best_count):
-        print('\t sampled point num:', best_count)
-        return best_proxy
-
-    low_size = None
-    high_size = None
-
-    if best_count > max_count:
-        low_size = voxel_size
-        search_size = voxel_size
-        for _ in range(max_iter):
-            search_size *= 2.0
-            proxy_np = _downsample(search_size)
-            count = int(proxy_np.shape[0])
-            if count == 0:
-                break
-            error = abs(count - target)
-            if error < best_error:
-                best_proxy = proxy_np
-                best_count = count
-                best_error = error
-            if _is_valid_count(count):
-                print('\t sampled point num:', count)
-                return proxy_np
-            if count < min_count:
-                high_size = search_size
-                break
-            low_size = search_size
-    else:
-        high_size = voxel_size
-        search_size = voxel_size
-        for _ in range(max_iter):
-            search_size *= 0.5
-            proxy_np = _downsample(search_size)
-            count = int(proxy_np.shape[0])
-            if count == 0:
-                break
-            error = abs(count - target)
-            if error < best_error:
-                best_proxy = proxy_np
-                best_count = count
-                best_error = error
-            if _is_valid_count(count):
-                print('\t sampled point num:', count)
-                return proxy_np
-            if count > max_count:
-                low_size = search_size
-                break
-            high_size = search_size
-
-    if low_size is None or high_size is None:
-        print('\t sampled point num:', best_count)
-        return best_proxy
-
-    for _ in range(max_iter):
-        mid_size = (low_size + high_size) * 0.5
-        proxy_np = _downsample(mid_size)
-        count = int(proxy_np.shape[0])
-        if count == 0:
-            high_size = mid_size
-            continue
-
-        error = abs(count - target)
-        if error < best_error:
-            best_proxy = proxy_np
-            best_count = count
-            best_error = error
-
-        if _is_valid_count(count):
-            print('\t sampled point num:', count)
-            return proxy_np
-
-        if count > max_count:
-            low_size = mid_size
-        else:
-            high_size = mid_size
-
-    print('\t sampled point num:', best_count)
-    return best_proxy
-
-def _computeKNearestNeighborDistances(
-    xyz_np: np.ndarray,
-    k: int,
-) -> np.ndarray:
-    '''
-    使用 Open3D KDTree 计算每个点到自身以外 k 个最近点的欧氏距离 (N, k)。
-    '''
-    n = int(xyz_np.shape[0])
-    k = max(1, min(int(k), n - 1))
-
-    pcd = toPcd(xyz_np)
-    tree = o3d.geometry.KDTreeFlann(pcd)
-
-    knn_dist_np = np.empty((n, k), dtype=np.float64)
-    query_count = k + 1
-    print('[INFO][filter::_computeKNearestNeighborDistances]')
-    print('\t start search knn dists...')
-    for i in trange(n):
-        found, _, sq_dists = tree.search_knn_vector_3d(xyz_np[i], query_count)
-        sq = np.asarray(sq_dists, dtype=np.float64)
-        if found < query_count:
-            # 重复点等极端情况下查询不足 k+1 个邻居, 用最后一个距离填充
-            fill_value = float(sq[-1]) if sq.size > 0 else 0.0
-            padded = np.full(query_count, fill_value, dtype=np.float64)
-            if sq.size > 0:
-                padded[: sq.size] = sq
-            sq = padded
-        # search_knn_vector_3d 返回平方距离, 第 0 个是自身 (0.0)
-        knn_dist_np[i] = np.sqrt(np.maximum(sq[1:query_count], 0.0))
-
-    return knn_dist_np
-
-
-def _sparseOutlierThreshold(scores: np.ndarray) -> float:
-    '''
-    根据局部稀疏度分数自动寻找离群阈值。
-    优先使用最高分尾部小簇的明显对数间隙；没有明显间隙时使用保守分位数兜底。
-    '''
-    finite_scores = scores[np.isfinite(scores)]
-    if finite_scores.size == 0:
-        return float('inf')
-
-    sorted_scores = np.sort(finite_scores.astype(np.float64))
-    count = int(sorted_scores.size)
-    tiny = float(np.finfo(sorted_scores.dtype).eps)
-    median = float(sorted_scores[count // 2])
-    mad = float(np.median(np.abs(sorted_scores - median)))
-    robust_limit = median + 8.0 * 1.4826 * mad
-
-    q_values = np.quantile(sorted_scores, [0.95, 0.99, 0.995, 0.999])
-    fallback_limit = max(robust_limit, float(q_values[2]))
-
-    threshold = fallback_limit
-    gap_reject_count = 0
-
-    if count >= 8:
-        log_scores = np.log(np.clip(sorted_scores, a_min=tiny, a_max=None))
-        gaps = log_scores[1:] - log_scores[:-1]
-        tail_start = max(0, int(count * 0.90) - 1)
-        if tail_start < int(gaps.size):
-            tail_gaps = gaps[tail_start:]
-            local_idx = int(np.argmax(tail_gaps))
-            gap_value = float(tail_gaps[local_idx])
-            gap_index = tail_start + local_idx
-            gap_reject_count = count - gap_index - 1
-            max_reject_count = max(16, int(count * 0.02))
-            if (
-                gap_value >= float(np.log(2.5))
-                and 1 <= gap_reject_count <= max_reject_count
-            ):
-                left = float(sorted_scores[gap_index])
-                right = float(sorted_scores[gap_index + 1])
-                threshold = float(np.sqrt(left * right))
-
-            # 对扫描物体点云，近离群点通常表现为最高分尾部中的小簇。
-            # 只在最多剔除 10 个点时放宽到较小尾部间隙，避免误删真实稀疏表面。
-            tight_tail_reject_limit = min(10, max(1, int(count * 0.001)))
-            tight_start = max(0, count - tight_tail_reject_limit - 1)
-            if tight_start < int(gaps.size):
-                tight_gaps = gaps[tight_start:]
-                candidate_mask = tight_gaps >= float(np.log(1.5))
-                if bool(candidate_mask.any()):
-                    candidate_local = int(np.flatnonzero(candidate_mask)[0])
-                    selected_gap_index = tight_start + candidate_local
-                    selected_gap_reject_count = count - selected_gap_index - 1
-                    if selected_gap_reject_count > gap_reject_count:
-                        left = float(sorted_scores[selected_gap_index])
-                        right = float(sorted_scores[selected_gap_index + 1])
-                        threshold = float(np.sqrt(left * right))
-
-    return threshold
 
 
 def _maskByBBox(
@@ -239,87 +13,157 @@ def _maskByBBox(
     return np.all((xyz_np >= bbox_min) & (xyz_np <= bbox_max), axis=1)
 
 
-def _expandMaskByBBox(
+def _octreeCoreMask(
+    xyz_np: np.ndarray,
+    leaf_count_ratio: float,
+    octree_max_depth: int,
+    min_leaf_points: int,
+    min_remaining_points: int,
+    max_depth_reject_ratio: float,
+) -> np.ndarray:
+    '''
+    基于自适应八叉树的逐深度叶子占用率筛选 core 表面点。
+
+    与静态八叉树的关键区别: 每进入下一个 depth 之前, 用当前仍保留的点重新计算
+    bbox, 再对这个 bbox 做该 depth 的体素化与占用率剔除。这样在 "离群点从物体
+    向远处延伸" 的极端场景下, 第 1 层先剔掉远端稀疏链, 之后 bbox 会大幅收紧,
+    第 2~N 层再以更细尺度识别越来越靠近物体的低密度离群点, 而不会被极端 bbox
+    把整个物体表面压成单个 voxel 的退化失败。
+
+    每个 depth 的剔除规则: 叶子节点点数小于该深度最大叶子节点点数
+    leaf_count_ratio 倍 (默认 1%) 的体素中所有点全部抛弃。
+
+    早停: 若某个 depth 提议的剔除比例超过 max_depth_reject_ratio, 视作阈值
+    已开始误删真实表面 (例如低密度但合法的表面区域), 撤销该层并停止迭代;
+    这条规则把 "用 1% 阈值识别离群体素" 与 "在均匀阈值下不再继续切真实表面"
+    两个第一性原理结合。
+
+    返回长度 n 的 bool mask, True 表示在所有 (实际生效的) 深度都属于高占用
+    叶子。
+    '''
+    n = int(xyz_np.shape[0])
+    if n == 0:
+        return np.zeros(0, dtype=np.bool_)
+
+    keep_mask = np.ones(n, dtype=np.bool_)
+    leaf_count_ratio = float(leaf_count_ratio)
+    min_leaf_points = max(1, int(min_leaf_points))
+    min_remaining_points = max(4, int(min_remaining_points))
+    max_depth_reject_ratio = max(0.0, float(max_depth_reject_ratio))
+
+    print('[INFO][filter::_octreeCoreMask]')
+    print('\t scan octree leaves per depth (adaptive bbox)...')
+
+    for depth in range(1, int(octree_max_depth) + 1):
+        sub_indices = np.flatnonzero(keep_mask)
+        sub_n = int(sub_indices.size)
+        if sub_n < min_remaining_points:
+            break
+
+        sub_xyz = xyz_np[sub_indices]
+        bbox_min = sub_xyz.min(axis=0).astype(np.float64)
+        bbox_max = sub_xyz.max(axis=0).astype(np.float64)
+        extent = bbox_max - bbox_min
+
+        if not np.all(np.isfinite(extent)) or float(np.max(extent)) <= 0.0:
+            break
+
+        safe_extent = np.where(extent > 0.0, extent, 1.0)
+        rel = (sub_xyz - bbox_min) / safe_extent
+
+        grid = 1 << depth
+        idx_xyz = np.floor(rel * float(grid)).astype(np.int64)
+        np.clip(idx_xyz, 0, grid - 1, out=idx_xyz)
+        linear = (idx_xyz[:, 0] * grid + idx_xyz[:, 1]) * grid + idx_xyz[:, 2]
+
+        _, inverse, counts = np.unique(
+            linear, return_inverse=True, return_counts=True,
+        )
+        max_count = int(counts.max())
+        threshold = max(min_leaf_points, int(np.ceil(max_count * leaf_count_ratio)))
+        leaf_keep = counts >= threshold
+        local_rejected = ~leaf_keep[inverse]
+        depth_reject_count = int(local_rejected.sum())
+        depth_reject_ratio = depth_reject_count / float(sub_n) if sub_n > 0 else 0.0
+
+        print(
+            '\t depth', depth,
+            '| sub_n', sub_n,
+            '| leaves', int(counts.size),
+            '| max_leaf_count', max_count,
+            '| threshold', threshold,
+            '| reject', depth_reject_count,
+            '| reject_ratio', round(depth_reject_ratio, 4),
+            '| extent', np.round(extent, 4).tolist(),
+        )
+
+        if depth_reject_ratio > max_depth_reject_ratio:
+            print(
+                '\t -> stop: depth_reject_ratio',
+                round(depth_reject_ratio, 4),
+                '>',
+                max_depth_reject_ratio,
+                '(treat as surface erosion, undo this depth)',
+            )
+            break
+
+        if depth_reject_count > 0:
+            keep_mask[sub_indices[local_rejected]] = False
+
+    return keep_mask
+
+
+def _expandedBBoxMask(
     xyz_np: np.ndarray,
     bbox_min: np.ndarray,
     bbox_max: np.ndarray,
-    expand_ratio: float = 0.1,
+    expand_ratio: float,
 ) -> np.ndarray:
     '''
-    基于初始 bbox 在 xyz_np 上逐轮膨胀, 拾回可能被 kNN 稀疏度误删的表面点。
-    每轮按初始 bbox 的 xyz 边长膨胀 expand_ratio, 没有新增点则停止。
+    基于 core bbox 做一次性有限扩张, 召回 core 阶段被过度删除的边缘表面点。
+    不做 "扩到无新增点为止" 的迭代扩张, 避免沿连续离群链把远端点重新拉回来。
     '''
     bbox_min = bbox_min.astype(np.float64).reshape(3)
     bbox_max = bbox_max.astype(np.float64).reshape(3)
-    expand_step = (bbox_max - bbox_min) * float(expand_ratio)
-
-    expanded_mask = _maskByBBox(xyz_np, bbox_min, bbox_max)
-
-    cur_min = bbox_min.copy()
-    cur_max = bbox_max.copy()
-
-    while True:
-        cur_min = cur_min - expand_step
-        cur_max = cur_max + expand_step
-        new_mask = _maskByBBox(xyz_np, cur_min, cur_max)
-
-        if int(new_mask.sum()) <= int(expanded_mask.sum()):
-            return expanded_mask
-
-        expanded_mask = new_mask
-
-
-def _proxyMainClusterBBox(
-    proxy_xyz: np.ndarray,
-    knn_k: int,
-) -> Union[Tuple[np.ndarray, np.ndarray], None]:
-    '''
-    在代理点集上估计主物体的 bbox。失败时返回 None, 表示降级使用全部点。
-    '''
-    n = int(proxy_xyz.shape[0])
-    if n < 4:
-        return None
-
-    density_k = max(1, min(int(knn_k), n - 1))
-    knn_dist = _computeKNearestNeighborDistances(xyz_np=proxy_xyz, k=density_k)
-    density_score = knn_dist[:, -1]
-    density_threshold = _sparseOutlierThreshold(density_score)
-    density_mask = density_score <= density_threshold
-
-    if not bool(density_mask.any()):
-        return None
-
-    kept = proxy_xyz[density_mask]
-    bbox_min = kept.min(axis=0)
-    bbox_max = kept.max(axis=0)
-    return bbox_min, bbox_max
+    pad = (bbox_max - bbox_min) * float(expand_ratio)
+    return _maskByBBox(xyz_np, bbox_min - pad, bbox_max + pad)
 
 
 def searchMainClusterPointMask(
     points: Any,
-    chunk_size: int = 4096,
-    knn_k: int = 16,
-    proxy_point_num: int = 20000,
-    expand_ratio: float = 0.1,
+    leaf_count_ratio: float = 0.01,
+    octree_max_depth: int = 8,
+    min_leaf_points: int = 1,
+    min_remaining_points: int = 16,
+    max_depth_reject_ratio: float = 0.01,
+    bbox_expand_ratio: float = 0.05,
+    min_core_keep_ratio: float = 0.5,
 ) -> np.ndarray:
     '''
     返回主物体点云掩码: True 为保留, False 为离群点。
 
-    算法:
-      1. 对原始 xyz 做 Open3D voxel downsample 得到约 proxy_point_num 个
-         近似均匀代理点 (点数不足时直接使用原始点)。
-      2. 在代理点上计算每个点到自身以外第 k 个最近点的距离作为局部稀疏度分数,
-         结合尾部对数间隙 / MAD + 高分位数兜底确定离群阈值, 得到代理主簇 bbox。
-      3. 在原始 xyz 上以代理主簇 bbox 为初始范围, 按 bbox 边长 expand_ratio
-         逐轮膨胀, 直到没有新增点, 得到最终保留 mask。
+    算法 (基于第一性原理):
+      1. 在原始 xyz 上做自适应八叉树占用率筛选: 每个 depth 用当前仍保留的点重
+         算 bbox, 再做该 depth 的体素化, 把叶子点数少于最大叶子点数
+         leaf_count_ratio 倍的低占用体素整体抛弃。bbox 随每层收紧, 自然适配
+         "离群点从物体延伸到远处" 的多尺度场景, 得到 core 表面点集。
+         若某 depth 触发的剔除比例超过 max_depth_reject_ratio, 撤销该层并停止
+         迭代, 视作 1% 阈值已经开始切真实表面。
+      2. 用 core 点集的 bbox 做一次有限的 bbox_expand_ratio 比例扩张, 仅召回
+         紧邻 core bbox 的边缘表面点; 不沿离群链做无限扩张。
 
-    chunk_size 已废弃, 仅为兼容旧调用保留。
+    超参 (调用方仅需传 points; 其余仅供调参):
+      - leaf_count_ratio:        每深度叶子保留阈值占最大叶子点数的比例 (默认 1%)
+      - octree_max_depth:        最大扫描深度
+      - min_leaf_points:         叶子保留的下界点数, 防止阈值退化为 0
+      - min_remaining_points:    剩余点数低于该值时停止更深的 octree 迭代
+      - max_depth_reject_ratio:  单层剔除比例上限, 超过即视为开始切表面并停止
+      - bbox_expand_ratio:       一次性 bbox 扩张比例
+      - min_core_keep_ratio:     core 保留比例不足时退化为全保留, 防止误删全场
 
     输入无效或点数过少时返回全 True 掩码; 无法确定点数时返回 shape (0,)
     的 bool 数组。
     '''
-    _ = chunk_size
-
     xyz_np = toNumpy(points, np.float64)
 
     if xyz_np.ndim != 2 or xyz_np.shape[1] != 3:
@@ -331,18 +175,37 @@ def searchMainClusterPointMask(
     if n < 4:
         return np.ones(n, dtype=np.bool_)
 
-    proxy_xyz = _sampleProxyPoints(xyz_np, proxy_point_num=int(proxy_point_num))
-    bbox = _proxyMainClusterBBox(proxy_xyz=proxy_xyz, knn_k=int(knn_k))
+    core_mask = _octreeCoreMask(
+        xyz_np=xyz_np,
+        leaf_count_ratio=float(leaf_count_ratio),
+        octree_max_depth=int(octree_max_depth),
+        min_leaf_points=int(min_leaf_points),
+        min_remaining_points=int(min_remaining_points),
+        max_depth_reject_ratio=float(max_depth_reject_ratio),
+    )
 
-    if bbox is None:
+    core_count = int(core_mask.sum())
+    min_core_count = int(np.ceil(float(n) * float(min_core_keep_ratio)))
+
+    print('[INFO][filter::searchMainClusterPointMask]')
+    print('\t total', n, '| core', core_count, '| min_core_count', min_core_count)
+
+    if core_count == 0 or core_count < min_core_count:
+        print('[WARN][filter::searchMainClusterPointMask]')
+        print('\t core kept too few points, fall back to all True')
         return np.ones(n, dtype=np.bool_)
 
-    bbox_min, bbox_max = bbox
-    expanded_mask = _expandMaskByBBox(
+    core_xyz = xyz_np[core_mask]
+    bbox_min = core_xyz.min(axis=0)
+    bbox_max = core_xyz.max(axis=0)
+
+    expanded_mask = _expandedBBoxMask(
         xyz_np=xyz_np,
         bbox_min=bbox_min,
         bbox_max=bbox_max,
-        expand_ratio=float(expand_ratio),
+        expand_ratio=float(bbox_expand_ratio),
     )
+
+    print('\t kept after bbox expand:', int(expanded_mask.sum()))
 
     return expanded_mask.astype(np.bool_)
