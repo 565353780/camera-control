@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 
-from typing import List, Union
+from typing import List
 
 from camera_control.Module.camera import Camera
 
