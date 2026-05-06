@@ -566,7 +566,7 @@ class CameraConvertor(object):
         return world_transform
 
     @staticmethod
-    def getBestCameraPos(
+    def getBestCameraPose(
         camera: Camera,
         pts: np.ndarray,
         safe_pixel_num: int = 10,
@@ -750,19 +750,45 @@ class CameraConvertor(object):
         return new_pos.astype(np.float32)
 
     @staticmethod
-    def getBestPosCamera(
-        camera: Camera,
+    def getBestCameraPoses(
+        camera_list: List[Camera],
         pts: np.ndarray,
         safe_pixel_num: int = 10,
-    ) -> Camera:
-        best_pos_camera = camera.clone()
-        best_pos = CameraConvertor.getBestCameraPos(
-            camera=camera,
+    ) -> np.ndarray:
+        if len(camera_list) == 0:
+            return np.empty((0, 3), dtype=np.float32)
+
+        with ThreadPoolExecutor() as executor:
+            best_poses = list(
+                executor.map(
+                    lambda camera: CameraConvertor.getBestCameraPose(
+                        camera=camera,
+                        pts=pts,
+                        safe_pixel_num=safe_pixel_num,
+                    ),
+                    camera_list,
+                )
+            )
+
+        return np.stack(best_poses, axis=0).astype(np.float32, copy=False)
+
+    @staticmethod
+    def getBestPoseCameras(
+        camera_list: List[Camera],
+        pts: np.ndarray,
+        safe_pixel_num: int = 10,
+    ) -> List[Camera]:
+        best_pose_camera_list = deepcopy(camera_list)
+
+        best_poses = CameraConvertor.getBestCameraPoses(
+            camera_list=camera_list,
             pts=pts,
             safe_pixel_num=safe_pixel_num,
         )
-        best_pos_camera.setWorldPose(pos=best_pos)
-        return best_pos_camera
+
+        for i in range(len(camera_list)):
+            best_pose_camera_list[i].setWorldPose(best_poses[i])
+        return best_pose_camera_list
 
     @staticmethod
     def _process_camera_for_pcd(
