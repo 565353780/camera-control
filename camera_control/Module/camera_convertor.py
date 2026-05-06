@@ -566,6 +566,205 @@ class CameraConvertor(object):
         return world_transform
 
     @staticmethod
+    def getBestCameraPos(
+        camera: Camera,
+        pts: np.ndarray,
+        safe_pixel_num: int = 10,
+    ) -> np.ndarray:
+        """Closed-form solver for the closest camera center under fixed orientation.
+
+        Given ``camera.forwardDirection``, ``camera.upDirection`` and
+        ``camera.fovx_degree`` (together with the current image size), find a
+        camera position that:
+        1. keeps every point of ``pts`` inside the image,
+        2. leaves an outer ring of ``safe_pixel_num`` empty pixels on every
+            side (so the projected point cloud never touches the border), and
+        3. is as close to the point cloud as possible along the forward axis
+            while keeping the projected point-cloud bbox centered in the
+            effective image area.
+
+        The four side planes of the (shrunken) frustum become four linear
+        inequalities on the camera center expressed in the fixed
+        ``(right, up, forward)`` basis, so the optimum can be obtained
+        analytically in O(N) without any iterative search.
+        """
+        pts = np.asarray(pts, dtype=np.float64)
+        if pts.ndim != 2 or pts.shape[1] != 3 or pts.shape[0] == 0:
+            raise ValueError('pts must be a non-empty Nx3 array.')
+
+        finite_mask = np.isfinite(pts).all(axis=1)
+        pts = pts[finite_mask]
+        if pts.shape[0] == 0:
+            raise ValueError('pts contains no finite points.')
+
+        safe = float(safe_pixel_num)
+        if safe < 0:
+            raise ValueError('safe_pixel_num must be non-negative.')
+
+        width = float(camera.width)
+        height = float(camera.height)
+        u_min = safe
+        u_max = width - 1.0 - safe
+        v_min = safe
+        v_max = height - 1.0 - safe
+        if u_min > u_max or v_min > v_max:
+            raise ValueError('safe_pixel_num leaves no valid image area.')
+
+        def _normalize(vec: np.ndarray) -> np.ndarray:
+            norm = np.linalg.norm(vec)
+            if norm < 1e-12:
+                raise ValueError('Cannot normalize near-zero camera direction.')
+            return vec / norm
+
+        forward = _normalize(
+            camera.forwardDirection.detach().cpu().numpy().astype(np.float64)
+        )
+        raw_up = camera.upDirection.detach().cpu().numpy().astype(np.float64)
+
+        up = raw_up - np.dot(raw_up, forward) * forward
+        if np.linalg.norm(up) < 1e-8:
+            axes = np.eye(3, dtype=np.float64)
+            fallback = axes[int(np.argmin(np.abs(axes @ forward)))]
+            up = fallback - np.dot(fallback, forward) * forward
+        up = _normalize(up)
+
+        right = _normalize(np.cross(forward, up))
+        up = _normalize(np.cross(right, forward))
+
+        fx = float(camera.fx)
+        fy = float(camera.fy)
+        cx = float(camera.cx)
+        cy = float(camera.cy)
+
+        # Convert pixel-space safe bounds into camera-space slopes.
+        # u_pixel = fx * X / D + cx  =>  X / D = (u_pixel - cx) / fx
+        # The four side planes of the shrunken frustum correspond to
+        # X / D in [k_left, k_right] and Y / D in [k_bottom, k_top].
+        k_left = (u_min - cx) / fx
+        k_right = (u_max - cx) / fx
+        k_bottom = (v_min - cy) / fy
+        k_top = (v_max - cy) / fy
+        if not (k_left < k_right and k_bottom < k_top):
+            raise ValueError('Invalid effective frustum after applying safe pixels.')
+
+        x = pts @ right
+        y = pts @ up
+        s = pts @ forward
+
+        # Camera center C = cr * right + cu * up + cf * forward.
+        # Depth of point i is D_i = s_i - cf (> 0).
+        # Frustum constraints become linear in (cr, cu, cf):
+        #   k_left   * (s_i - cf) <= x_i - cr <= k_right * (s_i - cf)
+        #   k_bottom * (s_i - cf) <= y_i - cu <= k_top   * (s_i - cf)
+        # For a fixed cf they collapse to interval constraints on cr and cu.
+        # The largest feasible cf is reached when those intervals shrink to
+        # a single point, which has a closed-form per-axis solution.
+        cf_x = (
+            np.min(x - k_left * s) - np.max(x - k_right * s)
+        ) / (k_right - k_left)
+        cf_y = (
+            np.min(y - k_bottom * s) - np.max(y - k_top * s)
+        ) / (k_top - k_bottom)
+
+        scene_scale = max(float(np.max(np.ptp(pts, axis=0))), 1.0)
+        eps = 1e-9 * scene_scale
+        cf = min(float(cf_x), float(cf_y), float(np.min(s)) - eps) - eps
+
+        cr_low = float(np.max(x - k_right * s + k_right * cf))
+        cr_high = float(np.min(x - k_left * s + k_left * cf))
+        cu_low = float(np.max(y - k_top * s + k_top * cf))
+        cu_high = float(np.min(y - k_bottom * s + k_bottom * cf))
+
+        tol = 1e-6 * scene_scale
+        if cr_low > cr_high + tol or cu_low > cu_high + tol:
+            raise RuntimeError('Failed to find a feasible camera position.')
+
+        if cr_low > cr_high:
+            cr_mid = 0.5 * (cr_low + cr_high)
+            cr_low = cr_mid
+            cr_high = cr_mid
+        if cu_low > cu_high:
+            cu_mid = 0.5 * (cu_low + cu_high)
+            cu_low = cu_mid
+            cu_high = cu_mid
+
+        depth = s - cf
+        if np.min(depth) <= 0:
+            raise RuntimeError('Failed to keep all points in front of the camera.')
+
+        def _projected_bbox_center(
+            coord: np.ndarray,
+            offset: float,
+            focal: float,
+            principal: float,
+        ) -> float:
+            pixels = focal * (coord - offset) / depth + principal
+            return 0.5 * (float(np.min(pixels)) + float(np.max(pixels)))
+
+        def _solve_centered_offset(
+            coord: np.ndarray,
+            low: float,
+            high: float,
+            focal: float,
+            principal: float,
+            target_center: float,
+        ) -> float:
+            low_center = _projected_bbox_center(coord, low, focal, principal)
+            high_center = _projected_bbox_center(coord, high, focal, principal)
+
+            # bbox center decreases monotonically as the camera center offset grows.
+            if target_center >= low_center:
+                return low
+            if target_center <= high_center:
+                return high
+
+            left = low
+            right_bound = high
+            for _ in range(80):
+                mid = 0.5 * (left + right_bound)
+                center = _projected_bbox_center(coord, mid, focal, principal)
+                if center > target_center:
+                    left = mid
+                else:
+                    right_bound = mid
+            return 0.5 * (left + right_bound)
+
+        cr = _solve_centered_offset(
+            x,
+            cr_low,
+            cr_high,
+            fx,
+            cx,
+            0.5 * (u_min + u_max),
+        )
+        cu = _solve_centered_offset(
+            y,
+            cu_low,
+            cu_high,
+            fy,
+            cy,
+            0.5 * (v_min + v_max),
+        )
+
+        new_pos = cr * right + cu * up + cf * forward
+        return new_pos.astype(np.float32)
+
+    @staticmethod
+    def getBestPosCamera(
+        camera: Camera,
+        pts: np.ndarray,
+        safe_pixel_num: int = 10,
+    ) -> Camera:
+        best_pos_camera = camera.clone()
+        best_pos = CameraConvertor.getBestCameraPos(
+            camera=camera,
+            pts=pts,
+            safe_pixel_num=safe_pixel_num,
+        )
+        best_pos_camera.setWorldPose(pos=best_pos)
+        return best_pos_camera
+
+    @staticmethod
     def _process_camera_for_pcd(
         camera: Camera,
         conf_thresh: float,
