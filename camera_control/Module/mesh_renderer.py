@@ -36,6 +36,7 @@ class MeshRenderer(object):
         up_direction: Optional[List[float]] = [0, 0, 1],
         vertices_tensor: Optional[torch.Tensor] = None,
         enable_antialias: bool=True,
+        safe_pixel_num: Optional[int]=None,
     ) -> List[Camera]:
         camera_list = sampleCameras(
             mesh=mesh,
@@ -50,6 +51,13 @@ class MeshRenderer(object):
             focus_center_ratio=focus_center_ratio,
             up_direction=up_direction,
         )
+
+        if safe_pixel_num is not None:
+            camera_list = CameraConvertor.getBestPoseCameras(
+                camera_list=camera_list,
+                pts=mesh.vertices,
+                safe_pixel_num=safe_pixel_num,
+            )
 
         print('[INFO][MeshRenderer::sampleRenderData]')
         print('\t start sample render data...')
