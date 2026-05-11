@@ -214,6 +214,383 @@ class CameraConvertor(object):
         return world_transform
 
     @staticmethod
+    def getCamerasSphere(
+        camera_list: List[Camera],
+    ) -> torch.Tensor:
+        """
+        估计能够最优匹配所有相机布局的球的球心与半径。
+
+        几何模型：
+            理想的 orbit 阵列满足 p_i = c + r * b_i，其中
+              - p_i 为相机 i 在世界系下的位置；
+              - b_i 为相机 i 的"后方向"（即视线方向的反方向）的单位向量，
+                等价于相机的极坐标方向；
+              - c 为球心，r 为球半径。
+            这使得 (c, r) 共 4 个未知数对每个相机贡献 3 个等式，
+            可用线性最小二乘闭式求解。
+
+        策略（鲁棒）：
+            1. 主路径——线性最小二乘：相机数 ≥ 2 且后方向有足够的角散度时，
+               解法方程 A x = rhs，x = [c; r]。检查 r 是否为正以及残差是否合理，
+               并在显著外点存在时做一次 MAD 阈值 inlier refit。
+            2. 退化路径——相机仅位于一侧或几乎同向时，半径不可由位置 + 方向
+               的线性约束观测：
+               - 取后方向均值 n_dir 为"垂直相机朝向的平均平面"的法线；
+               - 平均平面过相机位置均值，相机在平面上的 2D 投影点构造
+                 凸包并取多边形质心，作为球心在该平面上的投影；
+               - 用相机到该投影中心的稳健距离（中位数）作为原始半径；
+               - 球心 = 投影中心 - raw_radius * n_dir，使球心位于相机
+                 看向的一侧、距平均平面 raw_radius 的位置（这恰好等价于
+                 用户所述："球心距平均平面为 sphere_radius，平均平面投影
+                 凸包中心为球心投影"，差一个全局尺度因子，由后续 normalize
+                 完成）。
+
+        Args:
+            camera_list: 相机列表（至少 1 个）。
+
+        Returns:
+            长度为 4 的张量 [cx, cy, cz, r]，dtype/device 与首相机一致；
+            r > 0。
+        """
+        if len(camera_list) == 0:
+            raise ValueError(
+                '[CameraConvertor::getCamerasSphere] camera_list is empty.'
+            )
+
+        device = camera_list[0].device
+        dtype = camera_list[0].dtype
+
+        z_cam = torch.tensor([0., 0., 1.], dtype=dtype, device=device)
+
+        # =====================================================
+        # 收集相机位置 p_i 和单位后方向 b_i = R_i^T @ z_cam
+        # （与 Camera.forwardDirection = -R[2] 保持一致：b_i = -forward）
+        # =====================================================
+        centers = torch.stack([-cam.R.T @ cam.t for cam in camera_list])  # (N, 3)
+        back_dirs = torch.stack([cam.R.T @ z_cam for cam in camera_list])  # (N, 3)
+        back_dirs = back_dirs / (
+            torch.linalg.norm(back_dirs, dim=1, keepdim=True) + 1e-8
+        )
+
+        n_cams = centers.shape[0]
+
+        # =====================================================
+        # 评估后方向的"散度"，用于判断主路径是否可用：
+        #   M_back = sum_i (b_i - mean) (b_i - mean)^T
+        # 其最大特征值 / N ≈ 单位向量到均值的 RMS 偏差平方。
+        # 阈值取约 sin^2(5°) ≈ 0.0076，更小则视为相机视线近乎共线，
+        # 此时半径列不可观测。
+        # =====================================================
+        mean_back = back_dirs.mean(dim=0)
+        centered_back = back_dirs - mean_back[None, :]
+        M_back = centered_back.T @ centered_back
+        M_back = 0.5 * (M_back + M_back.T)
+        eig_back = torch.linalg.eigvalsh(M_back)
+        spread = float(eig_back[-1].item()) / max(1.0, float(n_cams))
+        spread_threshold = 0.0076
+
+        sphere_center: Optional[torch.Tensor] = None
+        sphere_radius_est: Optional[float] = None
+
+        if n_cams >= 2 and spread > spread_threshold:
+            # =====================================================
+            # 主路径：线性最小二乘闭式解
+            #   每相机贡献等式 c + r * b_i = p_i（3 个标量）。
+            #   将 [c; r] 记为 4 维向量 x，A_i = [I_3 | b_i]。
+            #   法方程 (sum A_i^T A_i) x = sum A_i^T p_i 展开为：
+            #     [N I_3       sum b_i ] [c] = [sum p_i        ]
+            #     [sum b_i^T   sum |b|^2] [r]   [sum b_i . p_i  ]
+            #   其中 sum |b|^2 = N（单位向量）。
+            # =====================================================
+            I3 = torch.eye(3, dtype=dtype, device=device)
+            sum_b = back_dirs.sum(dim=0)
+            N_t = torch.tensor(float(n_cams), dtype=dtype, device=device)
+
+            A_mat = torch.zeros((4, 4), dtype=dtype, device=device)
+            A_mat[:3, :3] = N_t * I3
+            A_mat[:3, 3] = sum_b
+            A_mat[3, :3] = sum_b
+            A_mat[3, 3] = N_t
+
+            rhs = torch.zeros((4,), dtype=dtype, device=device)
+            rhs[:3] = centers.sum(dim=0)
+            rhs[3] = (centers * back_dirs).sum()
+
+            try:
+                x = torch.linalg.solve(A_mat, rhs)
+                c_lin = x[:3]
+                r_lin = float(x[3].item())
+            except Exception:
+                c_lin = centers.mean(dim=0)
+                r_lin = -1.0
+
+            if r_lin > 0:
+                # MAD inlier refit，抑制少量外点。
+                residuals = torch.linalg.norm(
+                    centers - (c_lin[None, :] + r_lin * back_dirs), dim=1
+                )
+                med = torch.median(residuals)
+                mad = torch.median(torch.abs(residuals - med)).clamp(min=1e-8)
+                inlier_mask = residuals <= med + 3.0 * 1.4826 * mad
+                n_in = int(inlier_mask.sum().item())
+
+                if n_in >= max(2, int(0.5 * n_cams)) and n_in < n_cams:
+                    cb = centers[inlier_mask]
+                    bb = back_dirs[inlier_mask]
+                    Nn_t = torch.tensor(float(n_in), dtype=dtype, device=device)
+                    sum_b2 = bb.sum(dim=0)
+
+                    A2 = torch.zeros((4, 4), dtype=dtype, device=device)
+                    A2[:3, :3] = Nn_t * I3
+                    A2[:3, 3] = sum_b2
+                    A2[3, :3] = sum_b2
+                    A2[3, 3] = Nn_t
+
+                    rhs2 = torch.zeros((4,), dtype=dtype, device=device)
+                    rhs2[:3] = cb.sum(dim=0)
+                    rhs2[3] = (cb * bb).sum()
+
+                    try:
+                        x2 = torch.linalg.solve(A2, rhs2)
+                        if float(x2[3].item()) > 0:
+                            c_lin = x2[:3]
+                            r_lin = float(x2[3].item())
+                    except Exception:
+                        pass
+
+                sphere_center = c_lin
+                sphere_radius_est = r_lin
+            else:
+                # 主路径解出非正半径，说明几何与 orbit 模型不符，转退化路径。
+                print('[WARN][CameraConvertor::getCamerasSphere]')
+                print('\t linear sphere fit yields non-positive radius:', r_lin)
+                print('\t falling back to projected-plane estimation.')
+
+        if sphere_center is None or sphere_radius_est is None:
+            # =====================================================
+            # 退化路径：相机视线集中或相机数过少
+            # =====================================================
+            mean_back_norm = torch.linalg.norm(mean_back)
+
+            if mean_back_norm > 1e-6:
+                n_dir = mean_back / mean_back_norm
+            else:
+                # 极少见：方向均值近 0 但又没通过散度阈值；用相机位置 PCA
+                # 最小特征向量当法线，并按多数后方向定号。
+                pos_mean = centers.mean(dim=0)
+                centers_zm = centers - pos_mean[None, :]
+                cov_p = centers_zm.T @ centers_zm
+                cov_p = 0.5 * (cov_p + cov_p.T)
+                _, eigvecs_p = torch.linalg.eigh(cov_p)
+                n_dir = eigvecs_p[:, 0]
+                # 任意定号：让 n_dir 与多数 back_dir 同侧
+                if (back_dirs @ n_dir).sum() < 0:
+                    n_dir = -n_dir
+
+            n_dir = n_dir / (torch.linalg.norm(n_dir) + 1e-8)
+
+            plane_point = centers.mean(dim=0)
+
+            # 投影到过 plane_point、法向 n_dir 的平面
+            offsets = centers - plane_point[None, :]
+            depths = offsets @ n_dir  # (N,)
+            centers_planar = centers - depths[:, None] * n_dir[None, :]
+
+            # 平面 2D 正交基
+            e_axis = torch.tensor([1., 0., 0.], dtype=dtype, device=device)
+            if torch.abs(torch.dot(e_axis, n_dir)) > 0.9:
+                e_axis = torch.tensor([0., 1., 0.], dtype=dtype, device=device)
+            u_axis = e_axis - torch.dot(e_axis, n_dir) * n_dir
+            u_axis = u_axis / (torch.linalg.norm(u_axis) + 1e-8)
+            v_axis = torch.linalg.cross(n_dir, u_axis)
+            v_axis = v_axis / (torch.linalg.norm(v_axis) + 1e-8)
+
+            uv = torch.stack([
+                (centers_planar - plane_point[None, :]) @ u_axis,
+                (centers_planar - plane_point[None, :]) @ v_axis,
+            ], dim=1)  # (N, 2)
+
+            centroid_uv = CameraConvertor._convexHullCentroid2D(uv)
+
+            centroid_3d = (
+                plane_point
+                + centroid_uv[0] * u_axis
+                + centroid_uv[1] * v_axis
+            )
+
+            # 原始半径：相机到 centroid_3d 的 3D 距离中位数。
+            # 这同时利用了平面上的散度和（若有）沿 n_dir 的微小深度变化。
+            dists = torch.linalg.norm(centers - centroid_3d[None, :], dim=1)
+            raw_radius = float(torch.median(dists).item())
+
+            if raw_radius < 1e-6:
+                print('[WARN][CameraConvertor::getCamerasSphere]')
+                print('\t cameras nearly coincide, using unit fallback radius.')
+                raw_radius = 1.0
+
+            # 球心位于相机看向的一侧（即 -n_dir 方向），距平均平面 raw_radius。
+            sphere_center = centroid_3d - raw_radius * n_dir
+            sphere_radius_est = raw_radius
+
+        radius_tensor = torch.tensor(
+            [float(sphere_radius_est)], dtype=dtype, device=device
+        )
+        return torch.cat([sphere_center, radius_tensor])
+
+    @staticmethod
+    def _convexHullCentroid2D(uv: torch.Tensor) -> torch.Tensor:
+        """
+        计算 2D 点集凸包多边形的（按面积加权的）质心。
+
+        - n = 0：抛错；
+        - n = 1：返回该点；
+        - n = 2 或所有点共线：返回点集均值（线段中点等价）；
+        - n ≥ 3：用 Andrew's monotone chain 求凸包，再用 shoelace 公式
+          求多边形质心（不是顶点平均）。
+
+        Args:
+            uv: (N, 2) 张量
+
+        Returns:
+            (2,) 张量，与 uv 同 dtype/device
+        """
+        n = uv.shape[0]
+        if n == 0:
+            raise ValueError(
+                '[CameraConvertor::_convexHullCentroid2D] empty point set.'
+            )
+        if n == 1:
+            return uv[0].clone()
+        if n == 2:
+            return uv.mean(dim=0)
+
+        pts_np = toNumpy(uv, np.float64)
+
+        # 字典序排序（先 x 后 y）
+        order = np.lexsort((pts_np[:, 1], pts_np[:, 0]))
+        sorted_pts = pts_np[order]
+
+        # 去重，避免 monotone chain 退化
+        unique_pts = [sorted_pts[0]]
+        for p in sorted_pts[1:]:
+            if not np.allclose(p, unique_pts[-1], atol=1e-12):
+                unique_pts.append(p)
+        sorted_pts = np.array(unique_pts)
+
+        if sorted_pts.shape[0] < 3:
+            return uv.mean(dim=0)
+
+        def cross_2d(o, a, b):
+            return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+        lower: List[np.ndarray] = []
+        for p in sorted_pts:
+            while (
+                len(lower) >= 2
+                and cross_2d(lower[-2], lower[-1], p) <= 0
+            ):
+                lower.pop()
+            lower.append(p)
+
+        upper: List[np.ndarray] = []
+        for p in sorted_pts[::-1]:
+            while (
+                len(upper) >= 2
+                and cross_2d(upper[-2], upper[-1], p) <= 0
+            ):
+                upper.pop()
+            upper.append(p)
+
+        hull = np.array(lower[:-1] + upper[:-1])
+
+        if hull.shape[0] < 3:
+            # 共线退化：用沿主轴投影的中点更稳，等价于 sorted_pts 的 bbox 中心。
+            mid = 0.5 * (sorted_pts.min(axis=0) + sorted_pts.max(axis=0))
+            return torch.tensor(mid, dtype=uv.dtype, device=uv.device)
+
+        # Shoelace 多边形质心
+        x = hull[:, 0]
+        y = hull[:, 1]
+        x_next = np.roll(x, -1)
+        y_next = np.roll(y, -1)
+        cross_terms = x * y_next - x_next * y
+        area2 = float(cross_terms.sum())  # = 2 * 有符号面积
+
+        if abs(area2) < 1e-12:
+            mid = 0.5 * (hull.min(axis=0) + hull.max(axis=0))
+            return torch.tensor(mid, dtype=uv.dtype, device=uv.device)
+
+        cx = float(((x + x_next) * cross_terms).sum() / (3.0 * area2))
+        cy = float(((y + y_next) * cross_terms).sum() / (3.0 * area2))
+        return torch.tensor([cx, cy], dtype=uv.dtype, device=uv.device)
+
+    @staticmethod
+    def getPolarScaleNormalizeTransform(
+        camera_list: List[Camera],
+        sphere_radius: float=4.0,
+    ) -> torch.Tensor:
+        """
+        基于相机阵列的最优拟合球，构造平移 + 均匀缩放的归一化变换：
+          - 将估计球心移到世界原点；
+          - 将估计球半径缩放为 `sphere_radius`。
+
+        球心和半径由 `getCamerasSphere` 估计：理想 orbit 输入会得到
+        紧致的闭式解；当相机仅分布于一侧或几乎同向时，球心定义为
+        "距相机平均平面为 sphere_radius、且其在平面上的投影为相机
+        投影凸包质心"的点，由该函数已经自动处理。
+
+        返回的 4x4 张量与 `transformCameras` 的行向量右乘约定一致
+        （即 Open3D ICP 矩阵的转置），可直接传入 `transformCameras`。
+
+        构造原理（与 `getZAxisNormalizeTransform` 同套约定）：
+          列形式左乘矩阵 T_left = [[s I, -s c], [0, 1]]，
+          其中 c 为原始世界系下的球心，s = sphere_radius / r 为均匀缩放。
+          故 world_transform = T_left^T 满足：
+              world_transform[:3, :3] = s I,
+              world_transform[3, :3]  = -s c,
+              world_transform[3, 3]   = 1.
+
+        Args:
+            camera_list: 相机列表（只读）
+            sphere_radius: 归一化后的目标球半径，必须为正
+
+        Returns:
+            world_transform: 4x4 张量
+        """
+        if len(camera_list) == 0:
+            raise ValueError(
+                '[CameraConvertor::getPolarScaleNormalizeTransform]'
+                ' camera_list is empty.'
+            )
+        if sphere_radius <= 0:
+            raise ValueError(
+                '[CameraConvertor::getPolarScaleNormalizeTransform]'
+                ' sphere_radius must be positive, got {}.'.format(sphere_radius)
+            )
+
+        device = camera_list[0].device
+        dtype = camera_list[0].dtype
+
+        sphere = CameraConvertor.getCamerasSphere(camera_list)
+        sphere_center = sphere[:3]
+        raw_radius = float(sphere[3].item())
+
+        if raw_radius <= 1e-8:
+            # getCamerasSphere 已做退化保护，这里再加一道防御。
+            print('[WARN][CameraConvertor::getPolarScaleNormalizeTransform]')
+            print('\t estimated raw radius is degenerate:', raw_radius)
+            raw_radius = 1.0
+
+        scale = float(sphere_radius) / raw_radius
+        scale_t = torch.tensor(scale, dtype=dtype, device=device)
+
+        world_transform = torch.eye(4, dtype=dtype, device=device)
+        world_transform[:3, :3] = scale_t * torch.eye(3, dtype=dtype, device=device)
+        world_transform[3, :3] = -scale_t * sphere_center
+
+        return world_transform
+
+    @staticmethod
     def getPolarNormalizeTransform(
         camera_list: List[Camera],
         x_direction: list=[1, 0, 0],
