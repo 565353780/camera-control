@@ -1428,34 +1428,35 @@ class CameraConvertor(object):
             f"# Number of images: {camera_num}\n",
         ]
 
+        png_params = [cv2.IMWRITE_PNG_COMPRESSION, 0]
+
         def _process_one_camera(camera_idx):
             camera = cameras[camera_idx]
-            image_filename = camera.image_id
-            format = '.' + image_filename.split('.')[-1]
-            image_basename = image_filename.split(format)[0]
+            image_basename = os.path.splitext(camera.image_id)[0]
+            image_filename = image_basename + '.png'
 
             colmap_pose = camera.toColmapPose().cpu().numpy()
 
-            cv2.imwrite(image_folder_path + image_filename, camera.toImageCV(use_mask=False))
+            cv2.imwrite(image_folder_path + image_filename, camera.toImageCV(use_mask=False), png_params)
 
             if camera.mask is not None:
-                cv2.imwrite(mask_folder_path + image_filename, camera.toMaskCV())
-                cv2.imwrite(masked_image_folder_path + image_filename, camera.toImageCV(use_mask=True))
+                cv2.imwrite(mask_folder_path + image_filename, camera.toMaskCV(), png_params)
+                cv2.imwrite(masked_image_folder_path + image_filename, camera.toImageCV(use_mask=True), png_params)
 
             if camera.depth is not None:
                 np.save(depth_folder_path + image_basename + '.npy', camera.depth_with_conf.cpu().numpy())
-                cv2.imwrite(depth_vis_folder_path + image_filename, camera.toDepthVisCV(use_mask=False))
-                cv2.imwrite(masked_depth_vis_folder_path + image_filename, camera.toDepthVisCV(use_mask=True))
+                cv2.imwrite(depth_vis_folder_path + image_filename, camera.toDepthVisCV(use_mask=False), png_params)
+                cv2.imwrite(masked_depth_vis_folder_path + image_filename, camera.toDepthVisCV(use_mask=True), png_params)
 
             if camera.normal_world is not None:
                 np.save(normal_world_folder_path + image_basename + '.npy', camera.normal_world.cpu().numpy())
-                cv2.imwrite(normal_world_vis_folder_path + image_filename, camera.toNormalWorldVisCV(use_mask=False))
-                cv2.imwrite(masked_normal_world_vis_folder_path + image_filename, camera.toNormalWorldVisCV(use_mask=True))
+                cv2.imwrite(normal_world_vis_folder_path + image_filename, camera.toNormalWorldVisCV(use_mask=False), png_params)
+                cv2.imwrite(masked_normal_world_vis_folder_path + image_filename, camera.toNormalWorldVisCV(use_mask=True), png_params)
 
             if camera.normal_camera is not None:
                 np.save(normal_camera_folder_path + image_basename + '.npy', camera.normal_camera.cpu().numpy())
-                cv2.imwrite(normal_camera_vis_folder_path + image_filename, camera.toNormalCameraVisCV(use_mask=False))
-                cv2.imwrite(masked_normal_camera_vis_folder_path + image_filename, camera.toNormalCameraVisCV(use_mask=True))
+                cv2.imwrite(normal_camera_vis_folder_path + image_filename, camera.toNormalCameraVisCV(use_mask=False), png_params)
+                cv2.imwrite(masked_normal_camera_vis_folder_path + image_filename, camera.toNormalCameraVisCV(use_mask=True), png_params)
 
             return (camera_idx, image_filename, colmap_pose)
 
