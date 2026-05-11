@@ -948,22 +948,44 @@ class CameraConvertor(object):
         pts: np.ndarray,
         safe_pixel_num: int = 10,
     ) -> np.ndarray:
-        """Closed-form solver for the closest camera center under fixed orientation.
+        """求固定朝向 + 固定内参下，仅平移相机得到的最佳视角。
 
-        Given ``camera.forwardDirection``, ``camera.upDirection`` and
-        ``camera.fovx_degree`` (together with the current image size), find a
-        camera position that:
-        1. keeps every point of ``pts`` inside the image,
-        2. leaves an outer ring of ``safe_pixel_num`` empty pixels on every
-            side (so the projected point cloud never touches the border), and
-        3. is as close to the point cloud as possible along the forward axis
-            while keeping the projected point-cloud bbox centered in the
-            effective image area.
+        几何构造：
+          相机的有效图像区域被 safe_pixel_num 收缩到
+              [u_min, u_max] x [v_min, v_max]
+          对应一个新的视锥（四棱锥），它的顶点在相机位置 C，四个侧面分别由
+          四条像素边界对应的射线扫成，所以四个侧面都过 C，只需法向即可写出
+          平面方程。
+          以相机系下深度 D = -Z（朝向 -Z）为单位，四条边界的射线斜率：
+              k_left   = (u_min - cx) / fx       (典型 < 0，左侧)
+              k_right  = (u_max - cx) / fx       (典型 > 0，右侧)
+              k_bottom = (v_min - cy) / fy       (典型 < 0，下方)
+              k_top    = (v_max - cy) / fy       (典型 > 0，上方)
+          相机系下，指向视锥内部的四个侧面法向：
+              n_L_cam = ( 1, 0,  k_left )    左面：把点推向右
+              n_R_cam = (-1, 0, -k_right)    右面：把点推向左
+              n_B_cam = ( 0, 1,  k_bottom)   下面：把点推向上
+              n_T_cam = ( 0,-1, -k_top   )   上面：把点推向下
+          在世界坐标系下（用 right = R[0], up = R[1], forward = -R[2]
+          作为基），等价于：
+              N_L = right - k_left * forward
+              N_R = -right + k_right * forward
+              N_B = up - k_bottom * forward
+              N_T = -up + k_top * forward
+          点 P 在该侧面对应的半空间内的条件是 N · (P - C) >= 0。
+          把 C 写成 C = cr * right + cu * up + cf * forward，并定义每个点的
+          投影坐标 x_i = P_i · right, y_i = P_i · up, s_i = P_i · forward，
+          则四个侧面的半空间约束等价于：
+              k_left   * (s_i - cf) <= x_i - cr <= k_right * (s_i - cf)
+              k_bottom * (s_i - cf) <= y_i - cu <= k_top   * (s_i - cf)
+              s_i - cf > 0  (点位于相机前方)
 
-        The four side planes of the (shrunken) frustum become four linear
-        inequalities on the camera center expressed in the fixed
-        ``(right, up, forward)`` basis, so the optimum can be obtained
-        analytically in O(N) without any iterative search.
+        求解策略（"可行的几何最优"）：
+          仅平移有 3 自由度，一般无法让点云同时与四个侧面相切。
+          1) 沿 forward 方向把相机推到最近：cf 取尽可能大，直到水平/竖直
+             两组对面中至少一组同时相切（"binding axis"）。
+          2) 另一方向（"non-binding axis"）保留余量，再在余量内部移动相机
+             使点云投影 bbox 在 safe 区域内尽量居中。
         """
         pts = np.asarray(pts, dtype=np.float64)
         if pts.ndim != 2 or pts.shape[1] != 3 or pts.shape[0] == 0:
@@ -993,6 +1015,9 @@ class CameraConvertor(object):
                 raise ValueError('Cannot normalize near-zero camera direction.')
             return vec / norm
 
+        # =============================================================
+        # Step 1: 取相机朝向的世界基 (right, up, forward)
+        # =============================================================
         forward = _normalize(
             camera.forwardDirection.detach().cpu().numpy().astype(np.float64)
         )
@@ -1013,10 +1038,10 @@ class CameraConvertor(object):
         cx = float(camera.cx)
         cy = float(camera.cy)
 
-        # Convert pixel-space safe bounds into camera-space slopes.
-        # u_pixel = fx * X / D + cx  =>  X / D = (u_pixel - cx) / fx
-        # The four side planes of the shrunken frustum correspond to
-        # X / D in [k_left, k_right] and Y / D in [k_bottom, k_top].
+        # =============================================================
+        # Step 2: 由 safe 区域反推真实视锥四个侧面的"内法向"
+        #         (相机系/世界系都给出，便于阅读)
+        # =============================================================
         k_left = (u_min - cx) / fx
         k_right = (u_max - cx) / fx
         k_bottom = (v_min - cy) / fy
@@ -1024,18 +1049,31 @@ class CameraConvertor(object):
         if not (k_left < k_right and k_bottom < k_top):
             raise ValueError('Invalid effective frustum after applying safe pixels.')
 
+        # 世界系内法向（未单位化，但符号正确）：
+        #   N · (P - C) >= 0  <=>  P 在该侧面对应的内半空间。
+        # 这里只用它们对应的标量约束求解，故无需显式归一化。
+        # N_L = right - k_left * forward
+        # N_R = -right + k_right * forward
+        # N_B = up - k_bottom * forward
+        # N_T = -up + k_top * forward
+
+        # =============================================================
+        # Step 3: 把四个半空间约束写成 (cr, cu, cf) 上的线性不等式
+        # =============================================================
         x = pts @ right
         y = pts @ up
         s = pts @ forward
 
-        # Camera center C = cr * right + cu * up + cf * forward.
-        # Depth of point i is D_i = s_i - cf (> 0).
-        # Frustum constraints become linear in (cr, cu, cf):
+        # 等价形式（已展开 N_* · (P - C) >= 0）：
         #   k_left   * (s_i - cf) <= x_i - cr <= k_right * (s_i - cf)
         #   k_bottom * (s_i - cf) <= y_i - cu <= k_top   * (s_i - cf)
-        # For a fixed cf they collapse to interval constraints on cr and cu.
-        # The largest feasible cf is reached when those intervals shrink to
-        # a single point, which has a closed-form per-axis solution.
+        #   s_i - cf > 0
+        # 对水平方向：固定 cf，cr 必须落入区间
+        #   max_i [x_i - k_right * (s_i - cf)] <= cr
+        #                                     <= min_i [x_i - k_left * (s_i - cf)]
+        # 区间非空 <=> (k_right - k_left) * cf
+        #              <= min_i (x_i - k_left * s_i) - max_i (x_i - k_right * s_i)
+        # 给出水平方向允许的最大 cf：
         cf_x = (
             np.min(x - k_left * s) - np.max(x - k_right * s)
         ) / (k_right - k_left)
@@ -1043,14 +1081,22 @@ class CameraConvertor(object):
             np.min(y - k_bottom * s) - np.max(y - k_top * s)
         ) / (k_top - k_bottom)
 
+        # 深度限制：所有点必须在相机前方，即 cf < min_i s_i。
         scene_scale = max(float(np.max(np.ptp(pts, axis=0))), 1.0)
         eps = 1e-9 * scene_scale
-        cf = min(float(cf_x), float(cf_y), float(np.min(s)) - eps) - eps
+        cf_depth = float(np.min(s)) - eps
 
-        cr_low = float(np.max(x - k_right * s + k_right * cf))
-        cr_high = float(np.min(x - k_left * s + k_left * cf))
-        cu_low = float(np.max(y - k_top * s + k_top * cf))
-        cu_high = float(np.min(y - k_bottom * s + k_bottom * cf))
+        # 取最小者：水平/竖直/深度三者中最先收紧的那一项决定 cf。
+        # 处于该项时，对应轴的两侧侧面分别与点云相切（"两侧夹紧"）。
+        cf = min(float(cf_x), float(cf_y), cf_depth)
+
+        # =============================================================
+        # Step 4: 在该 cf 下求 cr / cu 的可行区间
+        # =============================================================
+        cr_low = float(np.max(x - k_right * (s - cf)))
+        cr_high = float(np.min(x - k_left * (s - cf)))
+        cu_low = float(np.max(y - k_top * (s - cf)))
+        cu_high = float(np.min(y - k_bottom * (s - cf)))
 
         tol = 1e-6 * scene_scale
         if cr_low > cr_high + tol or cu_low > cu_high + tol:
@@ -1069,6 +1115,13 @@ class CameraConvertor(object):
         if np.min(depth) <= 0:
             raise RuntimeError('Failed to keep all points in front of the camera.')
 
+        # =============================================================
+        # Step 5: 在 non-binding 轴上选 cr / cu 让投影 bbox 居中
+        #         投影像素：u = fx * (x_i - cr) / D_i + cx
+        #                   v = fy * (y_i - cu) / D_i + cy
+        #         depth 已固定，故 u_i 关于 cr 严格递减，bbox 中心也严格递减。
+        #         binding 轴上 (low ≈ high) 自然退化到唯一解。
+        # =============================================================
         def _projected_bbox_center(
             coord: np.ndarray,
             offset: float,
@@ -1086,10 +1139,13 @@ class CameraConvertor(object):
             principal: float,
             target_center: float,
         ) -> float:
+            if high - low <= tol:
+                return 0.5 * (low + high)
+
             low_center = _projected_bbox_center(coord, low, focal, principal)
             high_center = _projected_bbox_center(coord, high, focal, principal)
 
-            # bbox center decreases monotonically as the camera center offset grows.
+            # 单调递减：target 落在区间外则取相应端点。
             if target_center >= low_center:
                 return low
             if target_center <= high_center:
@@ -1164,7 +1220,7 @@ class CameraConvertor(object):
         )
 
         for i in range(len(camera_list)):
-            best_pose_camera_list[i].setWorldPose(best_poses[i])
+            best_pose_camera_list[i].setWorldPose(pos=best_poses[i])
         return best_pose_camera_list
 
     @staticmethod
