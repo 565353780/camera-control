@@ -2,7 +2,7 @@ import torch
 import random
 import trimesh
 import numpy as np
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from camera_control.Module.camera import Camera
 
@@ -107,6 +107,7 @@ def sampleCameras(
     device: str = 'cuda:0',
     focus_center_ratio: float=1.0,
     up_direction: Optional[List[float]] = [0, 0, 1],
+    all_camera_upper_ratio: float=0.0,
 ) -> List[Camera]:
     """
     创建围绕mesh均匀分布的相机和深度数据
@@ -131,7 +132,19 @@ def sampleCameras(
     # 使用Fibonacci球面采样生成均匀分布的相机位置
     camera_directions = sampleFibonacciDirections(candidate_camera_num)
 
-    sampled_indices = random.sample(range(candidate_camera_num), camera_num)
+    if all_camera_upper_ratio > 0 and random.random() <= all_camera_upper_ratio:
+        up = np.array(up_direction, dtype=np.float64)
+        up = up / np.linalg.norm(up)
+        projections = camera_directions @ up
+        upper_mask = projections >= 0
+        upper_indices = np.where(upper_mask)[0]
+        if len(upper_indices) >= camera_num:
+            sampled_indices = random.sample(upper_indices.tolist(), camera_num)
+        else:
+            sampled_indices = random.sample(range(candidate_camera_num), camera_num)
+    else:
+        sampled_indices = random.sample(range(candidate_camera_num), camera_num)
+
     sampled_camera_directions = camera_directions[sampled_indices]
 
     # 创建相机列表
