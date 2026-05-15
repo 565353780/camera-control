@@ -1,7 +1,7 @@
 import os
 import torch
 import numpy as np
-from typing import Optional, Union, Tuple
+from typing import List, Optional, Union, Tuple
 
 from camera_control.Method.data import toNumpy, toTensor
 
@@ -233,22 +233,23 @@ class DepthChannel(object):
         self,
         depth_min: Optional[float]=None,
         depth_max: Optional[float]=None,
+        background_color: List[float] = [255, 255, 255],
         use_mask: bool=True,
         mask_smaller_pixel_num: int = 0,
     ) -> torch.Tensor:
         """
-        将self.depth转换为可视化的RGB格式tensor图像
+        将self.depth转换为可视化的RGB格式tensor图像。
+        mask 外像素填 background_color，默认白色。
+        background_color: [R, G, B]，0–255，内部会除以 255。
 
         Returns:
             depth_vis: [H, W, 3] RGB格式的深度可视化图像，值在0-1范围内
         """
         assert self.depth is not None
 
-        # 获取有效深度值
         mask = self.toDepthMask(use_mask=use_mask, mask_smaller_pixel_num=mask_smaller_pixel_num)
         valid_depth = self.depth[mask]
 
-        # 归一化深度值
         if valid_depth.numel() > 0:
             if depth_min is None:
                 depth_min = valid_depth.min()
@@ -259,21 +260,77 @@ class DepthChannel(object):
         else:
             depth_normalized = torch.zeros_like(self.depth)
 
-        # 将无效像素的归一化深度设置为0
-        depth_normalized = torch.where(mask, depth_normalized, torch.zeros_like(depth_normalized))
+        depth_normalized = depth_normalized.clamp(0.0, 1.0)
 
-        # 转换为RGB格式（灰度图，三个通道相同）
-        depth_vis = torch.stack([depth_normalized] * 3, dim=-1)  # [H, W, 3]
+        depth_rgb = torch.stack([depth_normalized] * 3, dim=-1)  # [H, W, 3]
+
+        bg = toTensor(background_color, self.dtype, self.device) / 255.0
+        bg = bg.view(1, 1, 3) if bg.numel() == 3 else bg
+        mask_expanded = mask.unsqueeze(-1).expand_as(depth_rgb)
+        depth_vis = torch.where(mask_expanded, depth_rgb, bg.to(depth_rgb.dtype).expand_as(depth_rgb))
         return depth_vis
+
+    def toCCMVis(
+        self,
+        conf_thresh: Optional[float] = None,
+        background_color: List[float] = [255, 255, 255],
+        use_mask: bool=True,
+        mask_smaller_pixel_num: int = 0,
+    ) -> torch.Tensor:
+        """
+        将 CCM 转换为可视化的 RGB 格式 tensor 图像。
+        按公式 ccm_color = ccm + 0.5 将 CCM 坐标映射到颜色空间，
+        并 clamp 到 [0, 1]，mask 外像素填 background_color，默认白色。
+        background_color: [R, G, B]，0–255，内部会除以 255。
+
+        Returns:
+            ccm_vis: [H, W, 3] RGB 格式的 CCM 可视化图像，值在 0-1 范围内
+        """
+        ccm = self._computeCCM()
+
+        depth_mask = self.toDepthMask(
+            conf_thresh=conf_thresh,
+            use_mask=use_mask,
+            mask_smaller_pixel_num=mask_smaller_pixel_num,
+        )  # (H, W)
+
+        ccm_color = (ccm + 0.5).clamp(0.0, 1.0)
+
+        bg = toTensor(background_color, self.dtype, self.device) / 255.0
+        bg = bg.view(1, 1, 3) if bg.numel() == 3 else bg
+        mask_expanded = depth_mask.unsqueeze(-1).expand_as(ccm_color)
+        ccm_vis = torch.where(mask_expanded, ccm_color, bg.to(ccm_color.dtype).expand_as(ccm_color))
+        return ccm_vis
 
     def toDepthVisCV(
         self,
         depth_min: Optional[float]=None,
         depth_max: Optional[float]=None,
+        background_color: List[float] = [255, 255, 255],
         use_mask: bool=True,
         mask_smaller_pixel_num: int = 0,
     ) -> np.ndarray:
-        return toNumpy(self.toDepthVis(depth_min, depth_max, use_mask, mask_smaller_pixel_num) * 255.0, np.uint8)[..., ::-1]
+        return toNumpy(self.toDepthVis(
+            depth_min=depth_min,
+            depth_max=depth_max,
+            background_color=background_color,
+            use_mask=use_mask,
+            mask_smaller_pixel_num=mask_smaller_pixel_num,
+        ) * 255.0, np.uint8)[..., ::-1]
+
+    def toCCMVisCV(
+        self,
+        conf_thresh: Optional[float] = None,
+        background_color: List[float] = [255, 255, 255],
+        use_mask: bool=True,
+        mask_smaller_pixel_num: int = 0,
+    ) -> np.ndarray:
+        return toNumpy(self.toCCMVis(
+            conf_thresh=conf_thresh,
+            background_color=background_color,
+            use_mask=use_mask,
+            mask_smaller_pixel_num=mask_smaller_pixel_num,
+        ) * 255.0, np.uint8)[..., ::-1]
 
     def toDepthPoints(
         self,
