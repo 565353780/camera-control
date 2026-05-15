@@ -108,6 +108,7 @@ def sampleCameras(
     focus_center_ratio: float=1.0,
     up_direction: Optional[List[float]] = [0, 0, 1],
     all_camera_upper_ratio: float=0.0,
+    all_camera_upper_direction: List[float] = [0, 0, 1],
 ) -> List[Camera]:
     """
     创建围绕mesh均匀分布的相机和深度数据
@@ -121,6 +122,7 @@ def sampleCameras(
         fx: 焦距x
         fy: 焦距y
         up_direction: up向量, 如果不提供则随机生成up方向
+        all_camera_upper_direction: 上半球过滤的参考方向, 与up_direction解耦
 
     Returns:
         camera_list: 相机列表
@@ -132,10 +134,13 @@ def sampleCameras(
     # 使用Fibonacci球面采样生成均匀分布的相机位置
     camera_directions = sampleFibonacciDirections(candidate_camera_num)
 
-    if all_camera_upper_ratio > 0 and random.random() <= all_camera_upper_ratio:
-        up = np.array(up_direction, dtype=np.float64)
-        up = up / np.linalg.norm(up)
-        projections = camera_directions @ up
+    upper_dir = np.asarray(all_camera_upper_direction, dtype=np.float64)
+    upper_dir_norm = np.linalg.norm(upper_dir)
+    filter_by_upper = upper_dir.shape == (3,) and upper_dir_norm > 0
+
+    if filter_by_upper and all_camera_upper_ratio > 0 and random.random() <= all_camera_upper_ratio:
+        upper_dir = upper_dir / upper_dir_norm
+        projections = camera_directions @ upper_dir
         upper_mask = projections >= 0
         upper_indices = np.where(upper_mask)[0]
         if len(upper_indices) >= camera_num:
@@ -161,7 +166,9 @@ def sampleCameras(
         camera_position = look_at + camera_dist * sampled_camera_directions[i]
 
         if up_direction is None:
-            up_direction = sampleRandomUp(camera_position, look_at)
+            camera_up = sampleRandomUp(camera_position, look_at)
+        else:
+            camera_up = up_direction
 
         fovx_degree = np.random.uniform(*fovx_degree_range)
 
@@ -171,7 +178,7 @@ def sampleCameras(
             fovx_degree=fovx_degree,
             pos=camera_position,
             look_at=bbox_center,
-            up=up_direction,
+            up=camera_up,
             dtype=dtype,
             device=device,
         )
