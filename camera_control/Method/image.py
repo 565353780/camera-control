@@ -55,7 +55,7 @@ def getCroppedImage(
 
     return cropped_image
 
-def getBackgroundRemovedImage(
+def getForegroundImage(
     image: torch.Tensor,
     background_color: List[int]=[255, 255, 255],
     bg_color_diff_max: int=4,
@@ -72,13 +72,13 @@ def getBackgroundRemovedImage(
                    background-colored canvas expanded by safe_pixel_num on each side
     '''
     assert image.dim() == 3 and image.shape[2] == 3, \
-        f'[ERROR][image::getBackgroundRemovedImage] image must be HxWx3, got shape {tuple(image.shape)}'
+        f'[ERROR][image::getForegroundImage] image must be HxWx3, got shape {tuple(image.shape)}'
     assert len(background_color) == 3, \
-        f'[ERROR][image::getBackgroundRemovedImage] background_color must have 3 channels, got {len(background_color)}'
+        f'[ERROR][image::getForegroundImage] background_color must have 3 channels, got {len(background_color)}'
     assert bg_color_diff_max >= 0, \
-        f'[ERROR][image::getBackgroundRemovedImage] bg_color_diff_max must be non-negative, got {bg_color_diff_max}'
+        f'[ERROR][image::getForegroundImage] bg_color_diff_max must be non-negative, got {bg_color_diff_max}'
     assert safe_pixel_num >= 0, \
-        f'[ERROR][image::getBackgroundRemovedImage] safe_pixel_num must be non-negative, got {safe_pixel_num}'
+        f'[ERROR][image::getForegroundImage] safe_pixel_num must be non-negative, got {safe_pixel_num}'
 
     h, w = int(image.shape[0]), int(image.shape[1])
     dtype = image.dtype
@@ -92,7 +92,7 @@ def getBackgroundRemovedImage(
     fg_mask = diff_max > diff_threshold
 
     if not fg_mask.any():
-        print('[WARN][image::getBackgroundRemovedImage] foreground mask is empty, return a background-only image')
+        print('[WARN][image::getForegroundImage] foreground mask is empty, return a background-only image')
         out_image = bg.expand(safe_pixel_num, safe_pixel_num, 3).contiguous()
         return out_image
 
