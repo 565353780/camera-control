@@ -88,3 +88,75 @@ class CameraFilter(object):
     ) -> List[Camera]:
         idxs = CameraFilter.samplePolarFarCameraIdxs(camera_list, sample_camera_num)
         return [camera_list[idx] for idx in idxs]
+
+    @staticmethod
+    def sampleNearestCameraIdxs(
+        source_camera_list: List[Camera],
+        target_camera_list: List[Camera],
+    ) -> List[int]:
+        if len(source_camera_list) == 0 or len(target_camera_list) == 0:
+            return []
+
+        source_poses = torch.stack([cam.pos for cam in source_camera_list]).cpu().numpy()  # (S, 3)
+        target_poses = torch.stack([cam.pos for cam in target_camera_list]).cpu().numpy()  # (T, 3)
+
+        nearest_idxs = []
+        seen = set()
+        for t_pos in target_poses:
+            dists = np.linalg.norm(source_poses - t_pos, axis=1)
+            nearest_idx = int(np.argmin(dists))
+            if nearest_idx in seen:
+                continue
+            seen.add(nearest_idx)
+            nearest_idxs.append(nearest_idx)
+
+        return nearest_idxs
+
+    @staticmethod
+    def sampleNearestCameras(
+        source_camera_list: List[Camera],
+        target_camera_list: List[Camera],
+    ) -> List[Camera]:
+        idxs = CameraFilter.sampleNearestCameraIdxs(source_camera_list, target_camera_list)
+        return [source_camera_list[idx] for idx in idxs]
+
+    @staticmethod
+    def samplePolarNearestCameraIdxs(
+        source_camera_list: List[Camera],
+        target_camera_list: List[Camera],
+    ) -> List[int]:
+        if len(source_camera_list) == 0 or len(target_camera_list) == 0:
+            return []
+
+        def toSpherePoints(camera_list: List[Camera]) -> np.ndarray:
+            polars = np.array([cam.polar.cpu().numpy() for cam in camera_list])
+            phi = polars[:, 0]
+            theta = polars[:, 1]
+            return np.stack([
+                np.sin(phi) * np.sin(theta),
+                np.sin(phi) * np.cos(theta),
+                np.cos(phi),
+            ], axis=1)
+
+        source_pts = toSpherePoints(source_camera_list)  # (S, 3)
+        target_pts = toSpherePoints(target_camera_list)  # (T, 3)
+
+        nearest_idxs = []
+        seen = set()
+        for t_pt in target_pts:
+            dists = np.linalg.norm(source_pts - t_pt, axis=1)
+            nearest_idx = int(np.argmin(dists))
+            if nearest_idx in seen:
+                continue
+            seen.add(nearest_idx)
+            nearest_idxs.append(nearest_idx)
+
+        return nearest_idxs
+
+    @staticmethod
+    def samplePolarNearestCameras(
+        source_camera_list: List[Camera],
+        target_camera_list: List[Camera],
+    ) -> List[Camera]:
+        idxs = CameraFilter.samplePolarNearestCameraIdxs(source_camera_list, target_camera_list)
+        return [source_camera_list[idx] for idx in idxs]
