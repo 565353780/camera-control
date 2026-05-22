@@ -2,7 +2,7 @@ import torch
 import random
 import trimesh
 import numpy as np
-from typing import Callable, List, Optional
+from typing import List, Optional
 
 from camera_control.Module.camera import Camera
 
