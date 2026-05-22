@@ -55,6 +55,69 @@ def getCroppedImage(
 
     return cropped_image
 
+def getBackgroundRemovedImage(
+    image: torch.Tensor,
+    background_color: List[int]=[255, 255, 255],
+    bg_color_diff_max: int=4,
+    safe_pixel_num: int=10,
+) -> torch.Tensor:
+    '''
+    input:
+        image: HxWx3, RGB order, 0-1 float32
+        background_color: [R, G, B], 0-255 int
+        bg_color_diff_max: int, 0-255, max per-channel diff (in 0-255 scale) to be treated as background
+        safe_pixel_num: int, padding pixels around foreground bbox
+    output:
+        out_image: H'xW'x3, RGB order, 0-1 float32, foreground bbox placed at center of a
+                   background-colored canvas expanded by safe_pixel_num on each side
+    '''
+    assert image.dim() == 3 and image.shape[2] == 3, \
+        f'[ERROR][image::getBackgroundRemovedImage] image must be HxWx3, got shape {tuple(image.shape)}'
+    assert len(background_color) == 3, \
+        f'[ERROR][image::getBackgroundRemovedImage] background_color must have 3 channels, got {len(background_color)}'
+    assert bg_color_diff_max >= 0, \
+        f'[ERROR][image::getBackgroundRemovedImage] bg_color_diff_max must be non-negative, got {bg_color_diff_max}'
+    assert safe_pixel_num >= 0, \
+        f'[ERROR][image::getBackgroundRemovedImage] safe_pixel_num must be non-negative, got {safe_pixel_num}'
+
+    h, w = int(image.shape[0]), int(image.shape[1])
+    dtype = image.dtype
+    device = image.device
+
+    bg = torch.tensor(background_color, dtype=dtype, device=device) / 255.0
+    bg = bg.view(1, 1, 3)
+
+    diff_max = (image - bg).abs().max(dim=2).values
+    diff_threshold = float(bg_color_diff_max) / 255.0
+    fg_mask = diff_max > diff_threshold
+
+    if not fg_mask.any():
+        print('[WARN][image::getBackgroundRemovedImage] foreground mask is empty, return a background-only image')
+        out_image = bg.expand(safe_pixel_num, safe_pixel_num, 3).contiguous()
+        return out_image
+
+    rows = fg_mask.any(dim=1)
+    cols = fg_mask.any(dim=0)
+
+    y_indices = torch.nonzero(rows, as_tuple=False).squeeze(1)
+    x_indices = torch.nonzero(cols, as_tuple=False).squeeze(1)
+
+    y_min = int(y_indices.min().item())
+    y_max = int(y_indices.max().item())
+    x_min = int(x_indices.min().item())
+    x_max = int(x_indices.max().item())
+
+    crop = image[y_min:y_max + 1, x_min:x_max + 1, :]
+    crop_h, crop_w = crop.shape[0], crop.shape[1]
+
+    out_h = crop_h + 2 * safe_pixel_num
+    out_w = crop_w + 2 * safe_pixel_num
+
+    out_image = bg.expand(out_h, out_w, 3).contiguous().clone()
+    out_image[safe_pixel_num:safe_pixel_num + crop_h, safe_pixel_num:safe_pixel_num + crop_w, :] = crop
+
+    return out_image
+
 def getPaddingImages(
     image_list: List[torch.Tensor],
     target_width: int=1024,
