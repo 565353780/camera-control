@@ -4,6 +4,57 @@ import numpy as np
 from typing import List, Tuple
 
 
+def getCroppedImage(
+    image: torch.Tensor,
+    mask: torch.Tensor,
+    safe_pixel_num: int=10,
+) -> torch.Tensor:
+    '''
+    input:
+        image: HxWx3, RGB order, 0-1 float32
+        mask: HxW, bool/0-1, foreground region
+        safe_pixel_num: int, safety padding pixels around mask bbox
+    output:
+        cropped_image: H'xW'x3, RGB order, 0-1 float32, cropped to mask bbox with safe padding
+    '''
+    assert image.dim() == 3 and image.shape[2] == 3, \
+        f'[ERROR][image::getCroppedImage] image must be HxWx3, got shape {tuple(image.shape)}'
+    assert mask.dim() == 2, \
+        f'[ERROR][image::getCroppedImage] mask must be HxW, got shape {tuple(mask.shape)}'
+    assert image.shape[0] == mask.shape[0] and image.shape[1] == mask.shape[1], \
+        f'[ERROR][image::getCroppedImage] image and mask spatial size mismatch: ' \
+        f'image {tuple(image.shape[:2])} vs mask {tuple(mask.shape)}'
+    assert safe_pixel_num >= 0, \
+        f'[ERROR][image::getCroppedImage] safe_pixel_num must be non-negative, got {safe_pixel_num}'
+
+    h, w = int(image.shape[0]), int(image.shape[1])
+
+    bool_mask = mask.bool() if mask.dtype != torch.bool else mask
+
+    if not bool_mask.any():
+        print('[WARN][image::getCroppedImage] mask is empty, return original image')
+        return image.contiguous()
+
+    rows = bool_mask.any(dim=1)
+    cols = bool_mask.any(dim=0)
+
+    y_indices = torch.nonzero(rows, as_tuple=False).squeeze(1)
+    x_indices = torch.nonzero(cols, as_tuple=False).squeeze(1)
+
+    y_min = int(y_indices.min().item())
+    y_max = int(y_indices.max().item())
+    x_min = int(x_indices.min().item())
+    x_max = int(x_indices.max().item())
+
+    y1 = max(0, y_min - safe_pixel_num)
+    x1 = max(0, x_min - safe_pixel_num)
+    y2 = min(h, y_max + 1 + safe_pixel_num)
+    x2 = min(w, x_max + 1 + safe_pixel_num)
+
+    cropped_image = image[y1:y2, x1:x2, :].contiguous()
+
+    return cropped_image
+
 def getPaddingImages(
     image_list: List[torch.Tensor],
     target_width: int=1024,
