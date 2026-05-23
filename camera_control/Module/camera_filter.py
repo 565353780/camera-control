@@ -101,13 +101,9 @@ class CameraFilter(object):
         target_poses = torch.stack([cam.pos for cam in target_camera_list]).cpu().numpy()  # (T, 3)
 
         nearest_idxs = []
-        seen = set()
         for t_pos in target_poses:
             dists = np.linalg.norm(source_poses - t_pos, axis=1)
             nearest_idx = int(np.argmin(dists))
-            if nearest_idx in seen:
-                continue
-            seen.add(nearest_idx)
             nearest_idxs.append(nearest_idx)
 
         return nearest_idxs
@@ -142,13 +138,9 @@ class CameraFilter(object):
         target_pts = toSpherePoints(target_camera_list)  # (T, 3)
 
         nearest_idxs = []
-        seen = set()
         for t_pt in target_pts:
             dists = np.linalg.norm(source_pts - t_pt, axis=1)
             nearest_idx = int(np.argmin(dists))
-            if nearest_idx in seen:
-                continue
-            seen.add(nearest_idx)
             nearest_idxs.append(nearest_idx)
 
         return nearest_idxs
