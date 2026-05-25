@@ -10,6 +10,10 @@ from camera_control.Module.camera import Camera
 
 _NVDR_DEBUG_SYNC = os.environ.get('NVDR_DEBUG_SYNC', '0') == '1'
 _NVDR_NO_GLCTX_CACHE = os.environ.get('NVDR_NO_GLCTX_CACHE', '0') == '1'
+_NVDR_LOG_MESH = os.environ.get('NVDR_LOG_MESH', '0') == '1'
+_NVDR_CHUNK_FACE_THRESHOLD = int(os.environ.get('NVDR_CHUNK_FACE_THRESHOLD', '500000'))
+_NVDR_CHUNK_SIZE = int(os.environ.get('NVDR_CHUNK_SIZE', '262144'))
+_NVDR_OVERFLOW_MAX_SPLIT_DEPTH = int(os.environ.get('NVDR_OVERFLOW_MAX_SPLIT_DEPTH', '8'))
 
 
 def _debug_sync(device, tag: str = ''):
@@ -220,6 +224,179 @@ class NVDiffRastRenderer(object):
         return torch.where(mask, image, bg.expand_as(image))
 
     @staticmethod
+    def _is_rasterize_overflow_error(exc: BaseException) -> bool:
+        msg = str(exc).lower()
+        return any(kw in msg for kw in (
+            'subtriangle count overflow',
+            'cuda error: 700',
+            'illegal memory access',
+        ))
+
+    @staticmethod
+    def _iter_rasterize_subchunks(
+        glctx: dr.RasterizeCudaContext,
+        vertices_clip: torch.Tensor,
+        faces: torch.Tensor,
+        global_face_ids: torch.Tensor,
+        resolution: List[int],
+        face_start: int,
+        face_end: int,
+        split_depth: int = 0,
+    ):
+        if faces.shape[0] == 0:
+            return
+
+        try:
+            rast_out, rast_out_db = dr.rasterize(
+                glctx, vertices_clip, faces, resolution
+            )
+            yield faces, global_face_ids, rast_out, rast_out_db
+            return
+        except RuntimeError as exc:
+            if not NVDiffRastRenderer._is_rasterize_overflow_error(exc):
+                raise
+
+            max_split_depth = _NVDR_OVERFLOW_MAX_SPLIT_DEPTH
+            if faces.shape[0] <= 1 or split_depth >= max_split_depth:
+                raise RuntimeError(
+                    f'NVDiffRastRenderer chunked rasterize unable to split further '
+                    f'(faces=[{face_start},{face_end}), F={faces.shape[0]}, '
+                    f'split_depth={split_depth}, max_split_depth={max_split_depth}, '
+                    f'resolution={resolution}): {exc}'
+                ) from exc
+
+            mid = max(1, faces.shape[0] // 2)
+            yield from NVDiffRastRenderer._iter_rasterize_subchunks(
+                glctx,
+                vertices_clip,
+                faces[:mid].contiguous(),
+                global_face_ids[:mid].contiguous(),
+                resolution,
+                face_start,
+                face_start + mid,
+                split_depth + 1,
+            )
+            yield from NVDiffRastRenderer._iter_rasterize_subchunks(
+                glctx,
+                vertices_clip,
+                faces[mid:].contiguous(),
+                global_face_ids[mid:].contiguous(),
+                resolution,
+                face_start + mid,
+                face_end,
+                split_depth + 1,
+            )
+
+    @staticmethod
+    def _rasterize_faces_chunked(
+        glctx: dr.RasterizeCudaContext,
+        vertices_clip: torch.Tensor,
+        faces: torch.Tensor,
+        resolution: List[int],
+        chunk_size: int,
+        device: str,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """按 nvdiffrast 自身的 z/w 深度做 chunk z-buffer 合并。
+
+        第一性原理：nvdiffrast 完整 `dr.rasterize` 内部用整数化的 `z/w`
+        作为深度键（FineRaster.inl 中的 `atomicMin(pDepth, depth)`）。
+        chunk 路径要保持等价，只能用同一个 `sub_rast[..., 2:3]`
+        （即输出的 `z/w`）作合并键，否则换成 camera-space Z、view-space
+        depth 等都会因为符号/缩放不同而让“更远的面”覆盖“更近的面”，
+        从而出现大面积可见三角丢失。
+        """
+        height, width = resolution
+        rast_out = torch.zeros(
+            (1, height, width, 4), dtype=torch.float32, device=device
+        )
+        rast_out_db = torch.zeros(
+            (1, height, width, 4), dtype=torch.float32, device=device
+        )
+        z_buffer = torch.full(
+            (1, height, width, 1), float('inf'), dtype=torch.float32, device=device
+        )
+        face_buffer = torch.full(
+            (1, height, width, 1),
+            torch.iinfo(torch.int64).max,
+            dtype=torch.int64,
+            device=device,
+        )
+        depth_merge_eps = 1e-7
+        chunk_size = max(1, min(int(chunk_size), int(faces.shape[0])))
+        successful_chunks = 0
+
+        for start in range(0, faces.shape[0], chunk_size):
+            end = min(start + chunk_size, faces.shape[0])
+            block_faces = faces[start:end].contiguous()
+            block_global_ids = torch.arange(
+                start, end, device=device, dtype=torch.int64
+            )
+
+            for sub_faces, sub_global_ids, sub_rast, sub_rast_db in (
+                NVDiffRastRenderer._iter_rasterize_subchunks(
+                    glctx,
+                    vertices_clip,
+                    block_faces,
+                    block_global_ids,
+                    resolution,
+                    start,
+                    end,
+                )
+            ):
+                hit_mask = sub_rast[..., 3:4] > 0
+                if not bool(hit_mask.any().item()):
+                    continue
+
+                z = sub_rast[..., 2:3]
+                z = torch.where(
+                    hit_mask,
+                    z,
+                    torch.full_like(z, float('inf')),
+                )
+                z = torch.nan_to_num(
+                    z,
+                    nan=float('inf'),
+                    posinf=float('inf'),
+                    neginf=float('inf'),
+                )
+
+                local_tri_id = sub_rast[..., 3:4].long() - 1
+                safe_local_tri_id = local_tri_id.clamp(min=0)
+                pix_face_id = sub_global_ids[safe_local_tri_id.squeeze(-1)].unsqueeze(-1)
+                pix_face_id = pix_face_id.to(dtype=torch.int64)
+
+                better_depth = z < (z_buffer - depth_merge_eps)
+                same_depth = (z - z_buffer).abs() <= depth_merge_eps
+                better_id = pix_face_id < face_buffer
+                update = hit_mask & (better_depth | (same_depth & better_id))
+                if not bool(update.any().item()):
+                    continue
+
+                sub_rast_remapped = sub_rast.clone()
+                sub_rast_remapped[..., 3:4] = pix_face_id.to(torch.float32) + 1.0
+
+                successful_chunks += 1
+                rast_out = torch.where(update.expand_as(rast_out), sub_rast_remapped, rast_out)
+                rast_out_db = torch.where(update.expand_as(rast_out_db), sub_rast_db, rast_out_db)
+                z_buffer = torch.where(update, z, z_buffer)
+                face_buffer = torch.where(update, pix_face_id, face_buffer)
+
+        if successful_chunks == 0:
+            raise RuntimeError(
+                f'chunked rasterize produced no valid chunks '
+                f'(F={faces.shape[0]}, resolution={resolution})'
+            )
+
+        if _NVDR_LOG_MESH:
+            print(
+                f'[INFO][NVDiffRastRenderer] chunked rasterize OK '
+                f'(F={faces.shape[0]}, chunks={successful_chunks}, '
+                f'chunk_size={chunk_size})'
+            )
+
+        return rast_out, rast_out_db
+
+    @staticmethod
     def rasterize(
         mesh: Union[trimesh.Trimesh, trimesh.Scene],
         camera: Camera,
@@ -248,13 +425,18 @@ class NVDiffRastRenderer(object):
             )
 
         if faces.max() >= n_verts or faces.min() < 0:
-            bad = (faces < 0) | (faces >= n_verts)
-            n_bad = bad.sum().item()
-            faces[bad] = 0
+            bad_faces = ((faces < 0) | (faces >= n_verts)).any(dim=1)
+            n_bad = bad_faces.sum().item()
+            faces = faces[~bad_faces].contiguous()
             print(
                 f'[WARN][NVDiffRastRenderer::rasterize] '
-                f'Clamped {n_bad} out-of-bound face indices'
+                f'Removed {n_bad} faces with out-of-bound indices'
             )
+            n_faces = faces.shape[0]
+            if n_faces == 0:
+                raise ValueError(
+                    f'rasterize has no valid faces after OOB removal (V={n_verts})'
+                )
 
         if not torch.isfinite(vertices).all():
             vertices = torch.nan_to_num(vertices, nan=0.0, posinf=0.0, neginf=0.0)
@@ -272,11 +454,66 @@ class NVDiffRastRenderer(object):
                 vertices_clip, nan=0.0, posinf=1e4, neginf=-1e4
             )
 
+        resolution = [camera.height, camera.width]
+        if _NVDR_LOG_MESH:
+            print(
+                f'[INFO][NVDiffRastRenderer::rasterize] '
+                f'V={n_verts} F={n_faces} resolution={resolution} device={camera.device}'
+            )
+
         glctx = NVDiffRastRenderer.getGlctx(camera.device)
-        rast_out, rast_out_db = dr.rasterize(
-            glctx, vertices_clip, faces,
-            resolution=[camera.height, camera.width]
-        )
+        use_chunked = n_faces >= _NVDR_CHUNK_FACE_THRESHOLD
+
+        try:
+            if use_chunked:
+                if _NVDR_LOG_MESH:
+                    print(
+                        f'[INFO][NVDiffRastRenderer::rasterize] '
+                        f'using chunked rasterize (F={n_faces} >= '
+                        f'{_NVDR_CHUNK_FACE_THRESHOLD})'
+                    )
+                rast_out, rast_out_db = NVDiffRastRenderer._rasterize_faces_chunked(
+                    glctx=glctx,
+                    vertices_clip=vertices_clip,
+                    faces=faces,
+                    resolution=resolution,
+                    chunk_size=_NVDR_CHUNK_SIZE,
+                    device=camera.device,
+                )
+            else:
+                rast_out, rast_out_db = dr.rasterize(
+                    glctx, vertices_clip, faces, resolution
+                )
+        except RuntimeError as exc:
+            NVDiffRastRenderer.resetGlctx(camera.device)
+            if not NVDiffRastRenderer._is_rasterize_overflow_error(exc):
+                raise RuntimeError(
+                    f'NVDiffRastRenderer.rasterize failed '
+                    f'(V={n_verts}, F={n_faces}, resolution={resolution}, '
+                    f'device={camera.device}): {exc}'
+                ) from exc
+
+            if use_chunked:
+                raise RuntimeError(
+                    f'NVDiffRastRenderer chunked rasterize failed '
+                    f'(V={n_verts}, F={n_faces}, resolution={resolution}, '
+                    f'device={camera.device}): {exc}'
+                ) from exc
+
+            print(
+                f'[WARN][NVDiffRastRenderer::rasterize] full rasterize failed, '
+                f'retrying chunked (F={n_faces})'
+            )
+            glctx = NVDiffRastRenderer.getGlctx(camera.device)
+            rast_out, rast_out_db = NVDiffRastRenderer._rasterize_faces_chunked(
+                glctx=glctx,
+                vertices_clip=vertices_clip,
+                faces=faces,
+                resolution=resolution,
+                chunk_size=_NVDR_CHUNK_SIZE,
+                device=camera.device,
+            )
+
         _debug_sync(camera.device, 'dr.rasterize')
 
         return {

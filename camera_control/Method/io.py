@@ -86,6 +86,9 @@ def loadImage(
     return image_data
 
 _TEX_MAX_SIZE = 65536  # nvdiffrast TEX_MAX_MIP_LEVEL=16 → 2^16
+_SANITIZE_FIX_WINDING_MAX_FACES = int(
+    os.environ.get('SANITIZE_FIX_WINDING_MAX_FACES', '500000')
+)
 
 def _clamp_texture(mesh: trimesh.Trimesh, max_size: int, print_progress: bool) -> trimesh.Trimesh:
     """Resize texture images that exceed nvdiffrast's maximum dimension."""
@@ -118,6 +121,7 @@ def _clamp_texture(mesh: trimesh.Trimesh, max_size: int, print_progress: bool) -
 def _sanitize_mesh(
     mesh: trimesh.Trimesh,
     print_progress: bool=False,
+    fix_winding: Optional[bool]=None,
 ) -> Optional[trimesh.Trimesh]:
     """Remove degenerate faces, non-finite vertices, and unreferenced vertices
     so that downstream CUDA renderers (nvdiffrast) never receive bad geometry.
@@ -210,8 +214,18 @@ def _sanitize_mesh(
     # --- 7. Rebuild mesh, preserving per-vertex attributes when possible ---
     new_mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
 
-    #TODO: need to check if this is necessary
-    trimesh.repair.fix_winding(new_mesh)
+    n_faces = faces.shape[0]
+    should_fix_winding = (
+        fix_winding is True
+        or (fix_winding is None and n_faces < _SANITIZE_FIX_WINDING_MAX_FACES)
+    )
+    if should_fix_winding:
+        trimesh.repair.fix_winding(new_mesh)
+    elif fix_winding is None and print_progress:
+        print(
+            f'[INFO][io::_sanitize_mesh] Skipping fix_winding '
+            f'(F={n_faces} >= {_SANITIZE_FIX_WINDING_MAX_FACES})'
+        )
 
     # --- 7a. Migrate vertex_normals ---
     try:
@@ -307,6 +321,7 @@ def postProcessMesh(
     print_progress: bool=False,
     max_texture_size: int=_TEX_MAX_SIZE,
     uv_wrap_mode: Optional[Tuple[str, str]]=None,
+    fix_winding: Optional[bool]=None,
 ) -> Optional[trimesh.Trimesh]:
     if isinstance(mesh, trimesh.Scene):
         mesh = _extract_trimeshes_from_scene(mesh, print_progress)
@@ -319,7 +334,7 @@ def postProcessMesh(
         return None
 
     mesh = _clamp_texture(mesh, max_texture_size, print_progress)
-    mesh = _sanitize_mesh(mesh, print_progress)
+    mesh = _sanitize_mesh(mesh, print_progress, fix_winding=fix_winding)
     if mesh is None:
         return None
 

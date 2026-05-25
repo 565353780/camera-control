@@ -3,10 +3,12 @@ from camera_control.Test.uv import test as test_uv
 from camera_control.Test.pnp import test as test_pnp
 from camera_control.Test.nvdiffrast_axis import test as test_nvdiffrast_axis
 from camera_control.Test.filter import test as test_filter
+from camera_control.Test.test_nvdiffrast_chunked_rasterize import test as test_chunk_render
 
 if __name__ == '__main__':
     # test_camera_pose()
     # test_uv()
     # test_pnp()
     # test_nvdiffrast_axis()
-    test_filter()
+    #test_filter()
+    test_chunk_render()
