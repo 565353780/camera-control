@@ -29,7 +29,8 @@ class TestChunkedRasterizeDepth(unittest.TestCase):
     """覆盖 chunk merge 的深度选择是否与完整 rasterize 一致。"""
 
     def setUp(self) -> None:
-        os.environ['NVDR_CHUNK_FACE_THRESHOLD'] = '1'
+        # 0 字节阈值 = 任意 mesh 都走 chunked 分支，用来强制覆盖分块路径
+        os.environ['NVDR_CHUNK_MEM_THRESHOLD_BYTES'] = '0'
         os.environ['NVDR_CHUNK_SIZE'] = '1'
 
         import importlib
@@ -53,7 +54,7 @@ class TestChunkedRasterizeDepth(unittest.TestCase):
         )
 
     def tearDown(self) -> None:
-        for key in ('NVDR_CHUNK_FACE_THRESHOLD', 'NVDR_CHUNK_SIZE'):
+        for key in ('NVDR_CHUNK_MEM_THRESHOLD_BYTES', 'NVDR_CHUNK_SIZE'):
             os.environ.pop(key, None)
 
     def _make_two_triangle_mesh(self) -> trimesh.Trimesh:
@@ -126,14 +127,15 @@ class TestChunkedRasterizeDepth(unittest.TestCase):
 
         rast_dict_chunked = self.NVDiffRastRenderer.rasterize(mesh, self.camera)
 
-        os.environ['NVDR_CHUNK_FACE_THRESHOLD'] = '10000000'
+        # 超大阈值 = 永远不走 chunked，强制完整 rasterize 作为基线对比
+        os.environ['NVDR_CHUNK_MEM_THRESHOLD_BYTES'] = str(1 << 62)
         import importlib
 
         importlib.reload(self._nvr_module)
         full_renderer = self._nvr_module.NVDiffRastRenderer
         rast_dict_full = full_renderer.rasterize(mesh, self.camera)
 
-        os.environ['NVDR_CHUNK_FACE_THRESHOLD'] = '1'
+        os.environ['NVDR_CHUNK_MEM_THRESHOLD_BYTES'] = '0'
         importlib.reload(self._nvr_module)
         self.NVDiffRastRenderer = self._nvr_module.NVDiffRastRenderer
 

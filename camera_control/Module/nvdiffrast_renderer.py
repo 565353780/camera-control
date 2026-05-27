@@ -11,9 +11,68 @@ from camera_control.Module.camera import Camera
 _NVDR_DEBUG_SYNC = os.environ.get('NVDR_DEBUG_SYNC', '0') == '1'
 _NVDR_NO_GLCTX_CACHE = os.environ.get('NVDR_NO_GLCTX_CACHE', '0') == '1'
 _NVDR_LOG_MESH = os.environ.get('NVDR_LOG_MESH', '0') == '1'
-_NVDR_CHUNK_FACE_THRESHOLD = int(os.environ.get('NVDR_CHUNK_FACE_THRESHOLD', '500000'))
-_NVDR_CHUNK_SIZE = int(os.environ.get('NVDR_CHUNK_SIZE', '262144'))
+# 仅在显存预估占用超过该阈值（字节）时才走 chunked 路径。
+# 默认 40 GiB —— 绝大多数 mesh 都能直接整体渲染。
+_NVDR_CHUNK_MEM_THRESHOLD_BYTES = int(
+    os.environ.get('NVDR_CHUNK_MEM_THRESHOLD_BYTES', str(40 * 1024 * 1024 * 1024))
+)
+# 0 表示按显存预算自动推导 chunk_size；设为正整数则强制覆盖。
+_NVDR_CHUNK_SIZE = int(os.environ.get('NVDR_CHUNK_SIZE', '0'))
 _NVDR_OVERFLOW_MAX_SPLIT_DEPTH = int(os.environ.get('NVDR_OVERFLOW_MAX_SPLIT_DEPTH', '8'))
+
+# 经验系数：约 0.006 字节 / (face·pixel)。
+# 拟合自实测：~5M faces @ 1024×1024 ≈ 30 GiB，~7M faces @ 1024×1024 ≈ 40 GiB。
+# 同时用于显存预估和 chunk 大小反推，保持两者一致。
+_NVDR_BYTES_PER_FACE_PIXEL = 0.006
+
+
+def _estimateRasterizeMemoryBytes(num_faces: int, num_vertices: int, height: int, width: int) -> int:
+    """粗略估算 nvdiffrast 整体光栅化的显存峰值占用（字节）。
+
+    主要构成（经验估算）：
+      - vertices_clip:   V * 4 floats * 4 bytes = 16 * V
+      - rast_out + rast_out_db: 2 * H * W * 4 * 4 bytes = 32 * H * W
+      - 内部 subtriangle / bin / tile 缓冲：约 F * pixels * 系数
+        （nvdiffrast 在大 F + 大分辨率下会产生 O(F * 像素密度) 的中间数据）
+
+    这里只是用于决策是否切换到 chunk 渲染，不要求精确。
+    """
+    pixels = max(1, int(height) * int(width))
+    verts_bytes = 16 * max(0, int(num_vertices))
+    out_bytes = 32 * pixels
+    intermediate_bytes = int(_NVDR_BYTES_PER_FACE_PIXEL * float(num_faces) * float(pixels))
+    return verts_bytes + out_bytes + intermediate_bytes
+
+
+def _autoChunkSize(
+    num_faces: int,
+    num_vertices: int,
+    height: int,
+    width: int,
+    budget_bytes: int,
+) -> int:
+    """根据显存预算反推单个 chunk 最多能塞下多少 faces。
+
+    与 `_estimateRasterizeMemoryBytes` 同构：
+        budget >= 16·V + 32·H·W + α·F_chunk·H·W
+      ⇒ F_chunk_max = (budget - verts - out) / (α · pixels)
+
+    返回值至少为 1，避免极端情况下出现 chunk_size=0 死循环。
+    """
+    pixels = max(1, int(height) * int(width))
+    verts_bytes = 16 * max(0, int(num_vertices))
+    out_bytes = 32 * pixels
+    # 留 25% 余量给 z_buffer/face_buffer 等 chunk 路径自身的额外张量
+    usable = float(budget_bytes) * 0.75 - float(verts_bytes + out_bytes)
+    if usable <= 0:
+        return 1
+
+    per_face_bytes = _NVDR_BYTES_PER_FACE_PIXEL * float(pixels)
+    if per_face_bytes <= 0:
+        return max(1, int(num_faces))
+
+    estimated = int(usable / per_face_bytes)
+    return max(1, min(estimated, int(num_faces)))
 
 
 def _debug_sync(device, tag: str = ''):
@@ -387,13 +446,6 @@ class NVDiffRastRenderer(object):
                 f'(F={faces.shape[0]}, resolution={resolution})'
             )
 
-        if _NVDR_LOG_MESH:
-            print(
-                f'[INFO][NVDiffRastRenderer] chunked rasterize OK '
-                f'(F={faces.shape[0]}, chunks={successful_chunks}, '
-                f'chunk_size={chunk_size})'
-            )
-
         return rast_out, rast_out_db
 
     @staticmethod
@@ -462,22 +514,23 @@ class NVDiffRastRenderer(object):
             )
 
         glctx = NVDiffRastRenderer.getGlctx(camera.device)
-        use_chunked = n_faces >= _NVDR_CHUNK_FACE_THRESHOLD
+        estimated_mem_bytes = _estimateRasterizeMemoryBytes(
+            n_faces, n_verts, resolution[0], resolution[1]
+        )
+        use_chunked = estimated_mem_bytes >= _NVDR_CHUNK_MEM_THRESHOLD_BYTES
+        chunk_size = _NVDR_CHUNK_SIZE if _NVDR_CHUNK_SIZE > 0 else _autoChunkSize(
+            n_faces, n_verts, resolution[0], resolution[1],
+            _NVDR_CHUNK_MEM_THRESHOLD_BYTES,
+        )
 
         try:
             if use_chunked:
-                if _NVDR_LOG_MESH:
-                    print(
-                        f'[INFO][NVDiffRastRenderer::rasterize] '
-                        f'using chunked rasterize (F={n_faces} >= '
-                        f'{_NVDR_CHUNK_FACE_THRESHOLD})'
-                    )
                 rast_out, rast_out_db = NVDiffRastRenderer._rasterize_faces_chunked(
                     glctx=glctx,
                     vertices_clip=vertices_clip,
                     faces=faces,
                     resolution=resolution,
-                    chunk_size=_NVDR_CHUNK_SIZE,
+                    chunk_size=chunk_size,
                     device=camera.device,
                 )
             else:
@@ -500,17 +553,13 @@ class NVDiffRastRenderer(object):
                     f'device={camera.device}): {exc}'
                 ) from exc
 
-            print(
-                f'[WARN][NVDiffRastRenderer::rasterize] full rasterize failed, '
-                f'retrying chunked (F={n_faces})'
-            )
             glctx = NVDiffRastRenderer.getGlctx(camera.device)
             rast_out, rast_out_db = NVDiffRastRenderer._rasterize_faces_chunked(
                 glctx=glctx,
                 vertices_clip=vertices_clip,
                 faces=faces,
                 resolution=resolution,
-                chunk_size=_NVDR_CHUNK_SIZE,
+                chunk_size=chunk_size,
                 device=camera.device,
             )
 
