@@ -1494,6 +1494,54 @@ class CameraConvertor(object):
         print(f'\t total images: {camera_num}')
         if pcd is not None:
             print(f'\t total points: {len(pcd.points)}')
+
+        def _o3dMeshToTrimesh(o3d_mesh: o3d.geometry.TriangleMesh) -> Optional[trimesh.Trimesh]:
+            vertices = np.asarray(o3d_mesh.vertices)
+            triangles = np.asarray(o3d_mesh.triangles)
+            if vertices.shape[0] == 0 or triangles.shape[0] == 0:
+                return None
+            tm = trimesh.Trimesh(vertices=vertices, faces=triangles, process=False)
+            if o3d_mesh.has_vertex_colors():
+                vertex_colors = np.asarray(o3d_mesh.vertex_colors)
+                vertex_colors_uint8 = np.clip(vertex_colors * 255.0, 0, 255).astype(np.uint8)
+                rgba = np.concatenate(
+                    [vertex_colors_uint8, np.full((vertex_colors_uint8.shape[0], 1), 255, dtype=np.uint8)],
+                    axis=1,
+                )
+                tm.visual.vertex_colors = rgba
+            return tm
+
+        scene = trimesh.Scene()
+        for camera_idx, camera in enumerate(cameras):
+            camera_mesh = camera.toO3DMesh()
+            camera_axis_mesh = camera.toO3DAxisMesh()
+
+            camera_tm = _o3dMeshToTrimesh(camera_mesh)
+            if camera_tm is not None:
+                scene.add_geometry(camera_tm, node_name=f'camera_frustum_{camera_idx:04d}')
+
+            axis_tm = _o3dMeshToTrimesh(camera_axis_mesh)
+            if axis_tm is not None:
+                scene.add_geometry(axis_tm, node_name=f'camera_axis_{camera_idx:04d}')
+
+        if pcd is not None and len(pcd.points) > 0:
+            pcd_points = np.asarray(pcd.points)
+            if pcd.has_colors():
+                pcd_colors = np.asarray(pcd.colors)
+                pcd_colors_uint8 = np.clip(pcd_colors * 255.0, 0, 255).astype(np.uint8)
+                pcd_rgba = np.concatenate(
+                    [pcd_colors_uint8, np.full((pcd_colors_uint8.shape[0], 1), 255, dtype=np.uint8)],
+                    axis=1,
+                )
+                pcd_tm = trimesh.PointCloud(vertices=pcd_points, colors=pcd_rgba)
+            else:
+                pcd_tm = trimesh.PointCloud(vertices=pcd_points)
+            scene.add_geometry(pcd_tm, node_name='points3D')
+
+        visualization_file_path = save_data_folder_path + 'visualization.glb'
+        scene.export(visualization_file_path)
+        print(f'\t saved visualization to: {visualization_file_path}')
+
         return True
 
     @staticmethod
