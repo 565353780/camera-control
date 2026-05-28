@@ -1694,11 +1694,12 @@ class CameraConvertor(object):
     @staticmethod
     def toCamerasMesh(
         camera_list: List[Camera],
+        scale: float=0.1,
     ) -> o3d.geometry.TriangleMesh:
         cameras_mesh = o3d.geometry.TriangleMesh()
 
         for camera in camera_list:
-            cameras_mesh += camera.toO3DMesh()
-            cameras_mesh += camera.toO3DAxisMesh()
+            cameras_mesh += camera.toO3DMesh(far=scale)
+            cameras_mesh += camera.toO3DAxisMesh(length=scale)
 
         return cameras_mesh

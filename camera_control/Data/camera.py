@@ -820,10 +820,11 @@ class CameraData(object):
 
         return mesh_all
 
-    def toO3DAxisMesh(self) -> o3d.geometry.TriangleMesh:
+    def toO3DAxisMesh(self, length: float=1.0) -> o3d.geometry.TriangleMesh:
         axis_mesh = createAxisMesh(self.axis)
-        axis_mesh.translate(self.pos.cpu().numpy())
-        return axis_mesh
+        resized_axis_mesh = axis_mesh.scale(float(length), center=(0.0, 0.0, 0.0))
+        resized_axis_mesh.translate(self.pos.cpu().numpy())
+        return resized_axis_mesh
 
     def getWorld2NVDiffRast(
         self,
