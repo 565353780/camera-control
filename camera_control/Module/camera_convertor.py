@@ -11,7 +11,7 @@ from shutil import rmtree
 from typing import Union, List, Optional
 from concurrent.futures import ThreadPoolExecutor
 
-from camera_control.Method.pcd import toPcd
+from camera_control.Method.pcd import toPcd, toTrimeshPcd
 from camera_control.Method.data import toNumpy, toTensor
 from camera_control.Method.rotate import decompose_similarity_from_T, invert_similarity
 from camera_control.Module.camera import Camera
@@ -1300,6 +1300,7 @@ class CameraConvertor(object):
         save_data_folder_path: str,
         pcd: Union[trimesh.Trimesh, o3d.geometry.PointCloud, torch.Tensor, np.ndarray, list, str, None]=None,
         point_num_max: Optional[int]=None,
+        visualization_camera_scale: float=0.1,
     ) -> bool:
         """
         创建用于训练3DGS的COLMAP格式数据文件夹
@@ -1512,30 +1513,16 @@ class CameraConvertor(object):
             return tm
 
         scene = trimesh.Scene()
-        for camera_idx, camera in enumerate(cameras):
-            camera_mesh = camera.toO3DMesh()
-            camera_axis_mesh = camera.toO3DAxisMesh()
+        cameras_mesh = CameraConvertor.toCamerasMesh(
+            camera_list=cameras,
+            scale=visualization_camera_scale,
+        )
+        cameras_tm = _o3dMeshToTrimesh(cameras_mesh)
+        if cameras_tm is not None:
+            scene.add_geometry(cameras_tm, node_name='cameras')
 
-            camera_tm = _o3dMeshToTrimesh(camera_mesh)
-            if camera_tm is not None:
-                scene.add_geometry(camera_tm, node_name=f'camera_frustum_{camera_idx:04d}')
-
-            axis_tm = _o3dMeshToTrimesh(camera_axis_mesh)
-            if axis_tm is not None:
-                scene.add_geometry(axis_tm, node_name=f'camera_axis_{camera_idx:04d}')
-
-        if pcd is not None and len(pcd.points) > 0:
-            pcd_points = np.asarray(pcd.points)
-            if pcd.has_colors():
-                pcd_colors = np.asarray(pcd.colors)
-                pcd_colors_uint8 = np.clip(pcd_colors * 255.0, 0, 255).astype(np.uint8)
-                pcd_rgba = np.concatenate(
-                    [pcd_colors_uint8, np.full((pcd_colors_uint8.shape[0], 1), 255, dtype=np.uint8)],
-                    axis=1,
-                )
-                pcd_tm = trimesh.PointCloud(vertices=pcd_points, colors=pcd_rgba)
-            else:
-                pcd_tm = trimesh.PointCloud(vertices=pcd_points)
+        pcd_tm = toTrimeshPcd(pcd)
+        if pcd_tm is not None:
             scene.add_geometry(pcd_tm, node_name='points3D')
 
         visualization_file_path = save_data_folder_path + 'visualization.glb'
