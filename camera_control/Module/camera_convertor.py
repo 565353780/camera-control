@@ -1379,6 +1379,8 @@ class CameraConvertor(object):
         depth_folder_path = save_data_folder_path + 'depths/'
         depth_vis_folder_path = save_data_folder_path + 'depths_vis/'
         masked_depth_vis_folder_path = save_data_folder_path + 'masked_depths_vis/'
+        ccm_vis_folder_path = save_data_folder_path + 'ccms_vis/'
+        masked_ccm_vis_folder_path = save_data_folder_path + 'masked_ccms_vis/'
 
         normal_world_folder_path = save_data_folder_path + 'normal_worlds/'
         normal_world_vis_folder_path = save_data_folder_path + 'normal_worlds_vis/'
@@ -1398,6 +1400,8 @@ class CameraConvertor(object):
         os.makedirs(depth_folder_path, exist_ok=True)
         os.makedirs(depth_vis_folder_path, exist_ok=True)
         os.makedirs(masked_depth_vis_folder_path, exist_ok=True)
+        os.makedirs(ccm_vis_folder_path, exist_ok=True)
+        os.makedirs(masked_ccm_vis_folder_path, exist_ok=True)
 
         os.makedirs(normal_world_folder_path, exist_ok=True)
         os.makedirs(normal_world_vis_folder_path, exist_ok=True)
@@ -1448,6 +1452,8 @@ class CameraConvertor(object):
                 np.save(depth_folder_path + image_basename + '.npy', camera.depth_with_conf.cpu().numpy())
                 cv2.imwrite(depth_vis_folder_path + image_filename, camera.toDepthVisCV(use_mask=False), png_params)
                 cv2.imwrite(masked_depth_vis_folder_path + image_filename, camera.toDepthVisCV(use_mask=True), png_params)
+                cv2.imwrite(ccm_vis_folder_path + image_filename, camera.toCCMVisCV(use_mask=False), png_params)
+                cv2.imwrite(masked_ccm_vis_folder_path + image_filename, camera.toCCMVisCV(use_mask=True), png_params)
 
             if camera.normal_world is not None:
                 np.save(normal_world_folder_path + image_basename + '.npy', camera.normal_world.cpu().numpy())
