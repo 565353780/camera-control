@@ -25,7 +25,7 @@ class CameraFilter(object):
             return selected_indices
 
         poses = [camera.pos for camera in camera_list]  # list of torch.Tensor([x, y, z])
-        poses_np = torch.stack(poses).cpu().numpy()  # shape (N,3)
+        poses_np = torch.stack(poses).detach().cpu().numpy()  # shape (N,3)
 
         available = list(range(1, len(poses)))
         for _ in range(sample_camera_num-1):
@@ -57,7 +57,10 @@ class CameraFilter(object):
         if sample_camera_num >= n:
             return list(range(n))
 
-        polars = np.array([cam.polar for cam in camera_list])
+        polars = np.stack(
+            [cam.polar.detach().cpu().numpy() for cam in camera_list],
+            axis=0,
+        )
         phi = polars[:, 0]
         theta = polars[:, 1]
 
@@ -97,8 +100,8 @@ class CameraFilter(object):
         if len(source_camera_list) == 0 or len(target_camera_list) == 0:
             return []
 
-        source_poses = torch.stack([cam.pos for cam in source_camera_list]).cpu().numpy()  # (S, 3)
-        target_poses = torch.stack([cam.pos for cam in target_camera_list]).cpu().numpy()  # (T, 3)
+        source_poses = torch.stack([cam.pos for cam in source_camera_list]).detach().cpu().numpy()  # (S, 3)
+        target_poses = torch.stack([cam.pos for cam in target_camera_list]).detach().cpu().numpy()  # (T, 3)
 
         nearest_idxs = []
         for t_pos in target_poses:
@@ -125,7 +128,10 @@ class CameraFilter(object):
             return []
 
         def toSpherePoints(camera_list: List[Camera]) -> np.ndarray:
-            polars = np.array([cam.polar.cpu().numpy() for cam in camera_list])
+            polars = np.stack(
+                [cam.polar.detach().cpu().numpy() for cam in camera_list],
+                axis=0,
+            )
             phi = polars[:, 0]
             theta = polars[:, 1]
             return np.stack([
