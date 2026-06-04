@@ -167,53 +167,87 @@ class TestBoundaryMesh(unittest.TestCase):
         self.assertTrue(int(faces.min().item()) >= 0)
 
 
-class TestFreeEvidence(unittest.TestCase):
-    """非候选体素的 FREE 判定（需要构造带 depth 的相机，CPU 即可）。"""
+class TestVoxelCenters(unittest.TestCase):
+    """voxel 中心坐标（纯逻辑，CPU）。"""
 
-    def _make_camera_seeing_plane(self, plane_depth: float) -> Camera:
-        """相机位于 (0,0,2) 看向 -Z，整幅 depth 都是恒定 plane_depth。
-
-        plane_depth 是相机前方正距离；plane 在世界 z = 2 - plane_depth。
-        """
-        camera = Camera(
-            width=16,
-            height=16,
-            fovx_degree=60.0,
-            pos=[0.0, 0.0, 2.0],
-            look_at=[0.0, 0.0, 0.0],
-            up=[0.0, 1.0, 0.0],
-            device='cpu',
-        )
-        depth = torch.full((16, 16), float(plane_depth), dtype=torch.float32)
-        camera.loadDepth(depth)
-        return camera
-
-    def test_voxels_in_front_of_surface_are_free(self):
+    def test_centers_match_voxelization_convention(self):
         R = 8
-        # 表面在相机前方 2.4（世界 z = -0.4），整个 [-0.5,0.5]^3 体素都在表面前方。
-        camera = self._make_camera_seeing_plane(plane_depth=2.4)
+        centers = VolumeMarker.createVoxelCenters(R, torch.float32, 'cpu')
+        self.assertEqual(tuple(centers.shape), (R, R, R, 3))
 
-        free_any, observed_any = VolumeMarker._computeFreeEvidence(
-            [camera], R, 'cpu',
+        # voxel (2, 3, 5) 中心反体素化应回到自身。
+        c = centers[2, 3, 5]
+        occ = VolumeMarker._voxelizePoints(c.reshape(1, 3), R, 'cpu')
+        self.assertTrue(bool(occ[2, 3, 5]))
+        self.assertEqual(int(occ.sum().item()), 1)
+
+    def test_centers_in_unit_cube(self):
+        R = 4
+        centers = VolumeMarker.createVoxelCenters(R, torch.float32, 'cpu')
+        self.assertTrue(torch.all(centers >= -0.5))
+        self.assertTrue(torch.all(centers <= 0.5))
+
+
+class TestSampleRenderedDepth(unittest.TestCase):
+    """渲染深度采样 + 前/后/背景分类（纯逻辑，CPU）。
+
+    这是新 FREE 判定的核心：voxel 中心相对候选 mesh 渲染表面深度的位置，
+    决定该视角是 FREE（更近 / 背景）还是无信息（被遮挡）。
+    """
+
+    def _make_depth(self, H, W, surface_depth, hit_value=True):
+        rendered = torch.full((H, W), float(surface_depth), dtype=torch.float32)
+        hit = torch.full((H, W), bool(hit_value), dtype=torch.bool)
+        return rendered, hit
+
+    def test_voxel_in_front_of_surface_is_free(self):
+        H = W = 8
+        rendered, hit = self._make_depth(H, W, surface_depth=5.0)
+        # 一个落在画面中心的 voxel UV，深度 2.0 < 表面 5.0 -> 更近。
+        uv = torch.tensor([[0.5, 0.5]], dtype=torch.float32)
+        sampled, surface_hit, background = VolumeMarker._sampleRenderedDepth(
+            rendered, hit, uv, H, W,
         )
+        self.assertTrue(bool(surface_hit[0]))
+        self.assertFalse(bool(background[0]))
+        self.assertAlmostEqual(float(sampled[0]), 5.0, places=5)
+        # in_front 判定（与 _renderClassify 内一致）：point_depth < sampled - eps
+        self.assertTrue(2.0 < float(sampled[0]))
 
-        # 至少存在被观测到且判为 FREE 的体素（投影落在画面内的中心区域）。
-        self.assertTrue(bool(observed_any.any()))
-        self.assertTrue(bool(free_any.any()))
-        # FREE 的体素必然先 observed。
-        self.assertTrue(bool((free_any & observed_any).any()))
-        self.assertFalse(bool((free_any & (~observed_any)).any()))
-
-    def test_background_rays_count_as_free(self):
-        R = 8
-        # 全背景 depth=0：画面内的体素 8 角都是背景射线 -> FREE。
-        camera = self._make_camera_seeing_plane(plane_depth=0.0)
-
-        free_any, observed_any = VolumeMarker._computeFreeEvidence(
-            [camera], R, 'cpu',
+    def test_voxel_behind_surface_not_free(self):
+        H = W = 8
+        rendered, hit = self._make_depth(H, W, surface_depth=2.0)
+        uv = torch.tensor([[0.5, 0.5]], dtype=torch.float32)
+        sampled, surface_hit, background = VolumeMarker._sampleRenderedDepth(
+            rendered, hit, uv, H, W,
         )
-        self.assertTrue(bool(observed_any.any()))
-        self.assertTrue(bool(free_any.any()))
+        self.assertTrue(bool(surface_hit[0]))
+        # voxel 深度 5.0 > 表面 2.0 -> 被遮挡，不应判 FREE。
+        self.assertFalse(5.0 < float(sampled[0]))
+
+    def test_background_pixel_is_free(self):
+        H = W = 8
+        rendered, hit = self._make_depth(H, W, surface_depth=0.0, hit_value=False)
+        uv = torch.tensor([[0.5, 0.5]], dtype=torch.float32)
+        sampled, surface_hit, background = VolumeMarker._sampleRenderedDepth(
+            rendered, hit, uv, H, W,
+        )
+        self.assertFalse(bool(surface_hit[0]))
+        self.assertTrue(bool(background[0]))
+
+    def test_out_of_frame_is_neither(self):
+        H = W = 8
+        rendered, hit = self._make_depth(H, W, surface_depth=2.0)
+        uv = torch.tensor(
+            [[1.5, 0.5], [float('nan'), 0.5]], dtype=torch.float32,
+        )
+        sampled, surface_hit, background = VolumeMarker._sampleRenderedDepth(
+            rendered, hit, uv, H, W,
+        )
+        self.assertFalse(bool(surface_hit[0]))
+        self.assertFalse(bool(background[0]))
+        self.assertFalse(bool(surface_hit[1]))
+        self.assertFalse(bool(background[1]))
 
 
 class TestMarkVisibleNoCamera(unittest.TestCase):
@@ -310,6 +344,52 @@ class TestMarkVisibleRender(unittest.TestCase):
         labels = VolumeMarker.markVisible([camera], R, points=pts)
 
         self.assertEqual(int(labels[idx].item()), VolumeMarker.VALID)
+
+    def test_voxels_closer_than_valid_are_free_not_unknown(self):
+        """核心回归：单视角下，比 VALID voxel 更靠近相机的 voxel 必为 FREE。
+
+        相机在 +Z 看向 -Z，世界 z 越大越靠近相机。把唯一的候选体素放在远处
+        （小 z 索引），那么沿同一条视线、位于它与相机之间（大 z 索引）的所有
+        非候选 voxel 都应是 FREE，绝不能是 UNKNOWN。
+        """
+        R = 16
+        device = 'cuda:0'
+
+        valid_idx = (8, 8, 3)  # 远处候选体素
+        pts = torch.from_numpy(
+            np.stack([_voxel_center(valid_idx, R)]).astype(np.float32),
+        ).to(device)
+
+        camera = self._make_front_camera(R)
+        labels = VolumeMarker.markVisible([camera], R, points=pts)
+
+        self.assertEqual(int(labels[valid_idx].item()), VolumeMarker.VALID)
+
+        # 同一条视线上、比 VALID 更靠近相机的非候选 voxel（z 索引更大）必为 FREE。
+        for k in range(valid_idx[2] + 1, R):
+            label = int(labels[valid_idx[0], valid_idx[1], k].item())
+            self.assertEqual(
+                label, VolumeMarker.FREE,
+                f'voxel (8,8,{k}) 比 VALID (8,8,3) 更靠近相机，应为 FREE，'
+                f'实际 label={label}',
+            )
+
+        # 不应在整个体积中出现「比某个 VALID 更近却 UNKNOWN」的矛盾：
+        # 这里直接断言不存在 UNKNOWN 落在 VALID 前方的视线段上。
+        front_segment = labels[valid_idx[0], valid_idx[1], valid_idx[2] + 1:]
+        self.assertFalse(
+            bool((front_segment == VolumeMarker.UNKNOWN).any().item()),
+            'VALID 前方视线段不应出现 UNKNOWN',
+        )
+
+    def test_no_candidate_means_all_free(self):
+        """无候选体素（points 为空）时，整个空间应为 FREE。"""
+        R = 8
+        device = 'cuda:0'
+        camera = self._make_front_camera(R)
+        empty_pts = torch.zeros((0, 3), dtype=torch.float32, device=device)
+        labels = VolumeMarker.markVisible([camera], R, points=empty_pts)
+        self.assertTrue(torch.all(labels == VolumeMarker.FREE))
 
 
 def test():

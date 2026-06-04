@@ -19,7 +19,7 @@ if __name__ == '__main__':
 
     visible_volume = VolumeMarker.markVisible(
         camera_list=camera_list,
-        volume_resolution=16,
+        volume_resolution=64,
         points=gs_points,
     )
 
@@ -27,13 +27,15 @@ if __name__ == '__main__':
 
     o3d.io.write_triangle_mesh(colmap_data_folder_path + 'vis_volume_label.ply', mesh)
 
+    '''
     for i in range(len(camera_list)):
         visible_volume = VolumeMarker.markVisible(
             camera_list=[camera_list[i]],
-            volume_resolution=16,
+            volume_resolution=64,
             points=gs_points,
         )
 
         mesh = toVisibleVolumeMesh(visible_volume)
 
         o3d.io.write_triangle_mesh(colmap_data_folder_path + f'vis_volume_label_{i}.ply', mesh)
+    '''

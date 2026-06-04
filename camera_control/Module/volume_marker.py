@@ -291,29 +291,91 @@ class VolumeMarker(object):
         return vertices, faces, triangle_to_voxel
 
     # ------------------------------------------------------------------
-    # 用 nvdiffrast 确认真正可见的候选体素
+    # 用 nvdiffrast 渲染候选 mesh，统一产出 VALID 与 FREE 证据
     # ------------------------------------------------------------------
     @staticmethod
-    def _renderVisibleVoxels(
+    def _sampleRenderedDepth(
+        rendered_depth: torch.Tensor,
+        hit_mask: torch.Tensor,
+        uv: torch.Tensor,
+        height: int,
+        width: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """在候选 mesh 渲染出的 depth 图上，按 voxel 中心 UV 做最近邻采样。
+
+        Args:
+            rendered_depth: (H, W) 渲染 mesh 的相机前方正距离，背景为 0。
+            hit_mask: (H, W) bool，像素是否命中 mesh。
+            uv: (N, 2) voxel 中心归一化 UV [0, 1]，与 camera UV 约定一致。
+            height/width: 渲染图分辨率。
+
+        Returns:
+            sampled_depth: (N,) 采样到的渲染表面深度（背景/越界处为 0）。
+            surface_hit:   (N,) bool，UV 在画面内且该像素命中 mesh 表面。
+            background:    (N,) bool，UV 在画面内但该像素是背景（无 mesh）。
+        """
+        in_frame = (
+            torch.isfinite(uv).all(dim=-1)
+            & (uv[:, 0] >= 0.0) & (uv[:, 0] <= 1.0)
+            & (uv[:, 1] >= 0.0) & (uv[:, 1] <= 1.0)
+        )
+
+        uv_safe = torch.where(
+            in_frame.unsqueeze(-1), uv, torch.zeros_like(uv),
+        )
+
+        u_nearest = (uv_safe[:, 0] * width).long().clamp(0, width - 1)
+        v_nearest = ((1.0 - uv_safe[:, 1]) * height).long().clamp(0, height - 1)
+
+        raw_depth = rendered_depth[v_nearest, u_nearest]
+        pix_hit = hit_mask[v_nearest, u_nearest]
+
+        surface_hit = in_frame & pix_hit
+        background = in_frame & (~pix_hit)
+
+        sampled_depth = torch.where(
+            surface_hit, raw_depth, torch.zeros_like(raw_depth),
+        )
+        return sampled_depth, surface_hit, background
+
+    @staticmethod
+    def _renderClassify(
         camera_list: List[Camera],
         vertices: torch.Tensor,
         faces: torch.Tensor,
         triangle_to_voxel: torch.Tensor,
         R: int,
         device: str,
-    ) -> torch.Tensor:
-        """渲染候选体素并集边界 mesh，返回各相机可见的候选体素并集 (R, R, R) bool。
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """渲染候选体素并集边界 mesh，一次性产出 VALID 与 FREE 证据。
 
-        对每个相机渲染稳定遮挡关系的 depth（关闭抗锯齿），从 rasterize 输出
-        中读取被击中的 face id，映射回 voxel flat index 标记为可见。
+        对每个相机渲染稳定遮挡关系的 depth（关闭抗锯齿），同时得到：
+          - 被击中的 face id -> 真正可见的候选体素（VALID）。
+          - voxel 中心相对渲染表面深度的位置 -> 自由空间证据（FREE）。
+
+        FREE 判定（第一性原理）：候选 mesh 是该视角的占据几何「地面真值」。
+        一个 voxel 在某相机下属于自由空间，当且仅当从相机到该 voxel 中心的
+        视线在到达占据表面之前就经过了它，即：
+          - voxel 中心投影像素命中 mesh，且 voxel 深度 < 渲染表面深度（更近）；
+          - 或 voxel 中心投影像素是背景（整条视线无占据）。
+        这保证了「比任意 VALID/占据表面更靠近相机且视线无遮挡」的 voxel 必为
+        FREE —— 不会再出现比 VALID 更近却 UNKNOWN 的矛盾。
+
+        Returns:
+            visible_candidate: (R, R, R) bool，跨视角可见候选体素并集。
+            free_any:          (R, R, R) bool，至少一个视角给出 FREE 证据。
+            observed_any:      (R, R, R) bool，voxel 中心至少被一个相机看到
+                               （投影落在画面内且在相机前方）。
         """
         visible = torch.zeros((R, R, R), dtype=torch.bool, device=device)
+        free_any = torch.zeros((R, R, R), dtype=torch.bool, device=device)
+        observed_any = torch.zeros((R, R, R), dtype=torch.bool, device=device)
 
         if faces.shape[0] == 0:
-            return visible
+            return visible, free_any, observed_any
 
         # 延迟导入：nvdiffrast 仅在真正渲染时才需要，使纯 CPU 逻辑
-        # （体素化 / 边界 mesh / FREE 判定）在无 nvdiffrast 环境也能使用。
+        # （体素化 / 边界 mesh）在无 nvdiffrast 环境也能使用。
         from camera_control.Module.nvdiffrast_renderer import NVDiffRastRenderer
 
         # nvdiffrast 不读取 visual，传入纯几何 trimesh 即可。
@@ -338,18 +400,50 @@ class VolumeMarker(object):
                 enable_lighting=False,
             )
 
-            # rasterize_output[..., 3] 是 1-based triangle id，0 为背景。
             rast_out = render_result['rasterize_output']  # (H, W, 4)
+            rendered_depth = render_result['depth']  # (H, W) 相机前方正距离
+
+            height, width = int(rendered_depth.shape[0]), int(rendered_depth.shape[1])
+            hit_mask = rast_out[..., 3] > 0  # (H, W)
+
+            # --- VALID：命中 face -> voxel ---
             tri_id = rast_out[..., 3].reshape(-1).long()  # (H*W,)
             hit = tri_id > 0
-            if not bool(hit.any()):
-                continue
+            if bool(hit.any()):
+                local_face_id = (tri_id[hit] - 1).to(device)
+                hit_voxel_flat = triangle_to_voxel[local_face_id].unique()
+                visible_flat[hit_voxel_flat] = True
 
-            local_face_id = (tri_id[hit] - 1).to(device)
-            hit_voxel_flat = triangle_to_voxel[local_face_id].unique()
-            visible_flat[hit_voxel_flat] = True
+            # --- FREE：voxel 中心 vs 渲染表面深度 ---
+            centers = VolumeMarker.createVoxelCenters(
+                R, camera.dtype, camera.device,
+            ).reshape(-1, 3)  # (R^3, 3)
 
-        return visible_flat.reshape(R, R, R)
+            uv = camera.project_points_to_uv(centers)  # (R^3, 2)
+
+            centers_homo = torch.cat(
+                [centers, torch.ones_like(centers[..., :1])], dim=-1,
+            )
+            point_depth = -(centers_homo @ camera.world2camera.T)[..., 2]  # (R^3,)
+
+            sampled_depth, surface_hit, background = \
+                VolumeMarker._sampleRenderedDepth(
+                    rendered_depth, hit_mask, uv, height, width,
+                )
+
+            eps = torch.clamp(point_depth.abs() * 1e-4, min=1e-6)
+            # voxel 中心明确位于渲染表面前方（更靠近相机）。
+            in_front = surface_hit & (point_depth < sampled_depth - eps)
+            voxel_free = (in_front | background).reshape(R, R, R).to(device)
+
+            # observed：投影落在画面内（surface_hit 或 background 都意味着
+            # voxel 中心在相机前方且 UV 在画面内）。
+            observed = (surface_hit | background).reshape(R, R, R).to(device)
+
+            free_any = free_any | voxel_free
+            observed_any = observed_any | observed
+
+        return visible_flat.reshape(R, R, R), free_any, observed_any
 
     # ------------------------------------------------------------------
     # FREE / UNKNOWN 判定（非候选体素）
@@ -372,122 +466,22 @@ class VolumeMarker(object):
         return vertices
 
     @staticmethod
-    def sampleVertexDepth(
-        camera: Camera,
-        uv: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        复刻 DepthChannel.queryUVPoints 的最近邻 depth 采样逻辑，但跳过 3D 反投影，
-        以最高效的方式得到每个顶点采样到的 render depth 及其状态。
-
-        uv: (N, 2) 归一化 [0, 1]，与 camera UV 约定一致。
-        返回:
-            sampled_depth:   (N,) 采样到的 render depth（背景/越界处为 0）。
-            depth_positive:  (N,) bool，UV 在画面内且采到正深度表面（depth 有效）。
-            depth_background: (N,) bool，UV 在画面内但该像素无物体（depth≈0，背景射线）。
-        """
-        in_frame = (
-            torch.isfinite(uv).all(dim=-1)
-            & (uv[:, 0] >= 0.0) & (uv[:, 0] <= 1.0)
-            & (uv[:, 1] >= 0.0) & (uv[:, 1] <= 1.0)
-        )
-
-        uv_safe = torch.where(
-            in_frame.unsqueeze(-1), uv, torch.zeros_like(uv),
-        )
-
-        u_nearest = (uv_safe[:, 0] * camera.depth_width).long().clamp(
-            0, camera.depth_width - 1,
-        )
-        v_nearest = ((1.0 - uv_safe[:, 1]) * camera.depth_height).long().clamp(
-            0, camera.depth_height - 1,
-        )
-
-        raw_depth = camera.depth[v_nearest, u_nearest]
-        depth_valid = camera.valid_depth_mask[v_nearest, u_nearest]
-
-        is_background = in_frame & (~depth_valid) & (raw_depth <= 1e-5)
-
-        depth_positive = in_frame & depth_valid
-        sampled_depth = torch.where(
-            depth_positive, raw_depth, torch.zeros_like(raw_depth),
-        )
-        return sampled_depth, depth_positive, is_background
-
-    @staticmethod
-    def _stackCorners(vertex_field: torch.Tensor) -> torch.Tensor:
-        """
-        将 (R+1, R+1, R+1) 的顶点场转换为 (R, R, R, 8) 的 voxel 8 顶点堆叠。
-        顶点 (i, j, k) 是 voxel (i, j, k) 的一个角。
-        """
-        corners = [
-            vertex_field[di:di + (vertex_field.shape[0] - 1),
-                         dj:dj + (vertex_field.shape[1] - 1),
-                         dk:dk + (vertex_field.shape[2] - 1)]
-            for di in (0, 1)
-            for dj in (0, 1)
-            for dk in (0, 1)
-        ]
-        return torch.stack(corners, dim=-1)
-
-    @staticmethod
-    def _computeFreeEvidence(
-        camera_list: List[Camera],
-        R: int,
+    def createVoxelCenters(
+        volume_resolution: int,
+        dtype,
         device: str,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """基于角点 depth 采样，统计每个 voxel 的 FREE 与 observed 证据。
-
-        FREE 证据：某相机下 voxel 的 8 个角点都位于正深度表面前方，或都落在
-        背景射线（depth≈0）上，则该 voxel 在该相机下属于自由空间。
-
-        Returns:
-            free_any:    (R, R, R) bool，至少一个相机给出 FREE 证据。
-            observed_any:(R, R, R) bool，至少一个相机的 8 角全部给出可解释观测。
+    ) -> torch.Tensor:
         """
-        free_any = torch.zeros((R, R, R), dtype=torch.bool, device=device)
-        observed_any = torch.zeros((R, R, R), dtype=torch.bool, device=device)
-
-        grid_shape = (R + 1, R + 1, R + 1)
-
-        for camera in camera_list:
-            vertices = VolumeMarker.createGridVertices(
-                R, camera.dtype, camera.device,
-            )
-            flat_vertices = vertices.reshape(-1, 3)
-
-            uv = camera.project_points_to_uv(flat_vertices)  # (N, 2)
-
-            vertices_homo = torch.cat(
-                [flat_vertices, torch.ones_like(flat_vertices[..., :1])], dim=-1,
-            )
-            point_depth = -(vertices_homo @ camera.world2camera.T)[..., 2]  # (N,)
-
-            sampled_depth, depth_positive, depth_background = \
-                VolumeMarker.sampleVertexDepth(camera, uv)
-
-            eps = torch.clamp(point_depth.abs() * 1e-4, min=1e-6)
-            diff = point_depth - sampled_depth
-
-            observed = depth_positive | depth_background
-            front_surface = depth_positive & (diff < -eps)
-            front = front_surface | depth_background
-
-            observed_v = observed.reshape(grid_shape).to(device)
-            front_v = front.reshape(grid_shape).to(device)
-
-            corners_observed = VolumeMarker._stackCorners(observed_v)
-            corners_front = VolumeMarker._stackCorners(front_v)
-
-            voxel_observed = corners_observed.all(dim=-1)  # (R, R, R)
-            all_front = corners_front.all(dim=-1)
-
-            voxel_free = voxel_observed & all_front
-
-            free_any = free_any | voxel_free
-            observed_any = observed_any | voxel_observed
-
-        return free_any, observed_any
+        在 [-0.5, 0.5] 之间创建 R^3 个 voxel 的中心点。
+        voxel (i, j, k) 中心 = -0.5 + (idx + 0.5) / R。
+        返回: (R, R, R, 3)，按 (x, y, z) 的 ij 顺序排列。
+        """
+        coords = (
+            torch.arange(volume_resolution, dtype=dtype, device=device) + 0.5
+        ) / volume_resolution - 0.5
+        xs, ys, zs = torch.meshgrid(coords, coords, coords, indexing='ij')
+        centers = torch.stack([xs, ys, zs], dim=-1)
+        return centers
 
     # ------------------------------------------------------------------
     # 主入口
@@ -507,14 +501,21 @@ class VolumeMarker(object):
                - 否则用所有 camera.toCCM(use_mask=False) 的并集体素化。
           2. 边界 mesh：对候选体素并集构造只含外露面的立方体表面 mesh，并记录
              每个三角对应的 voxel。
-          3. 可见性渲染：从每个相机用 nvdiffrast 渲染该 mesh 的 depth（关闭抗
-             锯齿），读取被击中的 face id，映射回 voxel —— 这些是真正能被某个
-             相机看到的候选体素，标为 VALID。
-          4. 被所有视角的渲染 depth 完全遮挡的候选体素（误标注 VALID），保持
-             UNKNOWN，后续不再改写。
-          5. FREE / UNKNOWN：仅对非候选体素，沿用基于角点 depth 的 FREE 判定：
-             8 角全在表面前方或全为背景射线 -> FREE；其余既非 FREE 又非候选的
-             voxel 保持 UNKNOWN。从未被任何相机观测到的非候选 voxel -> FREE。
+          3. 单次渲染、统一判定（_renderClassify）：从每个相机用 nvdiffrast
+             渲染该 mesh 的 depth（关闭抗锯齿），同源得到两类证据：
+               - face id 命中 -> 真正可见的候选体素 -> VALID；
+               - voxel 中心相对渲染表面深度的位置 -> FREE / 遮挡。
+             候选 mesh 是该视角的占据几何「地面真值」，因此遮挡关系自洽：
+               * voxel 中心在渲染表面前方（更近）或投影到背景 -> 该视角 FREE；
+               * voxel 中心在渲染表面后方（被遮挡）-> 该视角无信息。
+             这从根本上消除「比某个 VALID 更靠近相机却被判 UNKNOWN」的矛盾。
+          4. 标签合并：
+               - 候选且任一视角可见 -> VALID；
+               - 候选但被所有视角完全遮挡 -> UNKNOWN（不被 FREE 改写）；
+               - 非候选且任一视角 FREE -> FREE；
+               - 非候选且从未被任何相机观测到 -> FREE（无物体信息）；
+               - 其余非候选（被遮挡、无 FREE 证据）-> UNKNOWN。
+             若不存在任何候选体素，则空间无占据，整体为 FREE。
 
         返回: (R, R, R) 的 int64 tensor，编码 UNKNOWN=-1, FREE=0, VALID=1。
         """
@@ -555,34 +556,25 @@ class VolumeMarker(object):
             (R, R, R), VolumeMarker.UNKNOWN, dtype=torch.int64, device=device,
         )
 
-        # --- 2 & 3. 边界 mesh + 渲染可见候选体素 ---
-        if bool(candidate.any()):
-            vertices, faces, triangle_to_voxel = \
-                VolumeMarker._buildVoxelBoundaryMesh(candidate, R)
+        non_candidate = ~candidate
 
-            visible_candidate = VolumeMarker._renderVisibleVoxels(
+        # --- 无候选体素：空间无占据，整体为 FREE ---
+        if not bool(candidate.any()):
+            return torch.full(
+                (R, R, R), VolumeMarker.FREE, dtype=torch.int64, device=device,
+            )
+
+        # --- 2 & 3. 边界 mesh + 单次渲染同源产出 VALID/FREE/observed ---
+        vertices, faces, triangle_to_voxel = \
+            VolumeMarker._buildVoxelBoundaryMesh(candidate, R)
+
+        visible_candidate, free_any, observed_any = \
+            VolumeMarker._renderClassify(
                 camera_list, vertices, faces, triangle_to_voxel, R, device,
             )
 
-            # 可见候选 -> VALID；其余候选（被完全遮挡）保持 UNKNOWN。
-            labels = torch.where(
-                visible_candidate,
-                torch.full_like(labels, VolumeMarker.VALID),
-                labels,
-            )
-        else:
-            visible_candidate = torch.zeros(
-                (R, R, R), dtype=torch.bool, device=device,
-            )
-
-        # --- 4 & 5. 仅对非候选体素判定 FREE / UNKNOWN ---
-        free_any, observed_any = VolumeMarker._computeFreeEvidence(
-            camera_list, R, device,
-        )
-
-        non_candidate = ~candidate
-
-        # 非候选 + 有 FREE 证据 -> FREE。
+        # --- 4. 标签合并 ---
+        # 非候选 + 任一视角 FREE -> FREE。
         free_update = non_candidate & free_any
         labels = torch.where(
             free_update,
@@ -590,11 +582,18 @@ class VolumeMarker(object):
             labels,
         )
 
-        # 非候选 + 从未被任何相机观测到 -> FREE（一定没有物体信息）。
+        # 非候选 + 从未被任何相机观测到 -> FREE（视线外，一定无物体信息）。
         never_seen = non_candidate & (~observed_any)
         labels = torch.where(
             never_seen,
             torch.full_like(labels, VolumeMarker.FREE),
+            labels,
+        )
+
+        # 候选且任一视角可见 -> VALID（最后覆盖，确保不被 FREE 降级）。
+        labels = torch.where(
+            visible_candidate,
+            torch.full_like(labels, VolumeMarker.VALID),
             labels,
         )
 
