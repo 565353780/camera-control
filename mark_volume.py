@@ -1,3 +1,4 @@
+import numpy as np
 import open3d as o3d
 
 from camera_control.Method.render import toVisibleVolumeMesh
@@ -7,23 +8,32 @@ from camera_control.Module.volume_marker import VolumeMarker
 
 if __name__ == '__main__':
     colmap_data_folder_path = '/home/lichanghao/chLi/MMVideoReconV1/JJ/20260427_164113_431091/08_colmap_gs_1024/'
+    gs_file_path = '/home/lichanghao/chLi/MMVideoReconV1/JJ/20260427_164113_431091/gs_normalized.ply'
 
     camera_list = CameraConvertor.loadColmapDataFolder(colmap_data_folder_path)
-    camera_list = [camera_list[0]]
 
-    ccm = camera_list[0].toCCM()
-    ccm_points = ccm[camera_list[0].toDepthMask()]
-    ccm_pcd = o3d.geometry.PointCloud()
-    ccm_pcd.points = o3d.utility.Vector3dVector(
-        ccm_points.detach().cpu().numpy().astype("float64")
-    )
-    o3d.io.write_point_cloud(colmap_data_folder_path + 'camera_0_ccm.ply', ccm_pcd, write_ascii=True)
+    for camera in camera_list:
+        camera.to(device='cuda:0')
+
+    gs_points = np.asarray(o3d.io.read_point_cloud(gs_file_path).points)
 
     visible_volume = VolumeMarker.markVisible(
         camera_list=camera_list,
         volume_resolution=16,
+        points=gs_points,
     )
 
     mesh = toVisibleVolumeMesh(visible_volume)
 
     o3d.io.write_triangle_mesh(colmap_data_folder_path + 'vis_volume_label.ply', mesh)
+
+    for i in range(len(camera_list)):
+        visible_volume = VolumeMarker.markVisible(
+            camera_list=[camera_list[i]],
+            volume_resolution=16,
+            points=gs_points,
+        )
+
+        mesh = toVisibleVolumeMesh(visible_volume)
+
+        o3d.io.write_triangle_mesh(colmap_data_folder_path + f'vis_volume_label_{i}.ply', mesh)
