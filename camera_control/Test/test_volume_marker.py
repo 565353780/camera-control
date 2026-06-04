@@ -107,6 +107,146 @@ class TestCandidateVoxelization(unittest.TestCase):
             )
 
 
+class TestMeshVoxelization(unittest.TestCase):
+    """三角网格按分辨率求占用（open3d 表面体采样 + 体素化，需 open3d）。"""
+
+    def test_triangle_overlap_single_voxel(self):
+        # 一个完全位于 voxel (2,2,2) 内部的小三角形，仅占据该体素。
+        R = 4
+        c = _voxel_center((2, 2, 2), R)  # voxel 中心
+        d = 0.5 / R * 0.5  # 远小于半个体素
+        verts = torch.tensor(
+            [
+                [c[0] - d, c[1] - d, c[2]],
+                [c[0] + d, c[1] - d, c[2]],
+                [c[0], c[1] + d, c[2]],
+            ],
+            dtype=torch.float32,
+        )
+        faces = torch.tensor([[0, 1, 2]], dtype=torch.int64)
+        occ = VolumeMarker._voxelizeMesh(verts, faces, R, 'cpu')
+        self.assertTrue(bool(occ[2, 2, 2]))
+        self.assertEqual(int(occ.sum().item()), 1)
+
+    def test_triangle_spanning_multiple_voxels(self):
+        # 一个横跨多个体素的大三角形：占据的体素数应明显多于 1，且为表面占用。
+        R = 8
+        verts = torch.tensor(
+            [
+                [-0.4, -0.4, 0.0],
+                [0.4, -0.4, 0.0],
+                [0.0, 0.4, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+        faces = torch.tensor([[0, 1, 2]], dtype=torch.int64)
+        occ = VolumeMarker._voxelizeMesh(verts, faces, R, 'cpu')
+        self.assertGreater(int(occ.sum().item()), 1)
+        # 三角形位于 z=0 平面，只应占据 z 方向跨 0 的那一层体素（k=R/2-1 或 R/2）。
+        occupied_k = torch.nonzero(occ).unique(dim=0)[:, 2].unique()
+        self.assertTrue(set(occupied_k.tolist()).issubset({R // 2 - 1, R // 2}))
+
+    def test_mesh_voxelization_is_surface_not_filled(self):
+        # 用一个轴对齐 box mesh：表面体素化应是空心壳，内部体素不被占据。
+        import trimesh as _tm
+
+        R = 16
+        box = _tm.creation.box(extents=(0.5, 0.5, 0.5))  # 居中 [-0.25,0.25]^3
+        verts = torch.as_tensor(np.asarray(box.vertices), dtype=torch.float32)
+        faces = torch.as_tensor(np.asarray(box.faces), dtype=torch.int64)
+        occ = VolumeMarker._voxelizeMesh(verts, faces, R, 'cpu')
+
+        # 几何中心 voxel 必为空（表面占用而非实心填充）。
+        center_idx = R // 2
+        self.assertFalse(bool(occ[center_idx, center_idx, center_idx]))
+        self.assertGreater(int(occ.sum().item()), 0)
+
+    def test_geometry_dispatch_trimesh_mesh_uses_mesh_voxelization(self):
+        import trimesh as _tm
+
+        R = 8
+        box = _tm.creation.box(extents=(0.4, 0.4, 0.4))
+        occ = VolumeMarker._geometryToOccupancy(box, R, torch.float32, 'cpu')
+        self.assertEqual(tuple(occ.shape), (R, R, R))
+        self.assertGreater(int(occ.sum().item()), 0)
+        # mesh 为空心壳：中心体素应为空。
+        self.assertFalse(bool(occ[R // 2, R // 2, R // 2]))
+
+    def test_geometry_dispatch_pointcloud_uses_point_voxelization(self):
+        import trimesh as _tm
+
+        R = 8
+        pc = _tm.points.PointCloud(
+            np.stack([_voxel_center((3, 4, 5), R)]).astype(np.float64),
+        )
+        occ = VolumeMarker._geometryToOccupancy(pc, R, torch.float32, 'cpu')
+        self.assertTrue(bool(occ[3, 4, 5]))
+        self.assertEqual(int(occ.sum().item()), 1)
+
+    def test_geometry_dispatch_numpy_points(self):
+        R = 8
+        pts = np.stack([_voxel_center((1, 2, 6), R)]).astype(np.float32)
+        occ = VolumeMarker._geometryToOccupancy(pts, R, torch.float32, 'cpu')
+        self.assertTrue(bool(occ[1, 2, 6]))
+        self.assertEqual(int(occ.sum().item()), 1)
+
+    def test_is_triangle_mesh_classification(self):
+        import trimesh as _tm
+
+        box = _tm.creation.box(extents=(0.4, 0.4, 0.4))
+        self.assertTrue(VolumeMarker._isTriangleMesh(box))
+        pc = _tm.points.PointCloud(np.zeros((3, 3)))
+        self.assertFalse(VolumeMarker._isTriangleMesh(pc))
+        self.assertFalse(VolumeMarker._isTriangleMesh(np.zeros((3, 3))))
+
+    def test_sample_count_grows_with_resolution_and_area(self):
+        # 采样点数应随分辨率与面积单调不减（密度保证的基础）。
+        n_lo = VolumeMarker._meshSampleCount(area=1.0, R=8, K=3)
+        n_hi = VolumeMarker._meshSampleCount(area=1.0, R=32, K=3)
+        self.assertGreaterEqual(n_hi, n_lo)
+        n_small = VolumeMarker._meshSampleCount(area=0.1, R=16, K=3)
+        n_large = VolumeMarker._meshSampleCount(area=10.0, R=16, K=3)
+        self.assertGreaterEqual(n_large, n_small)
+        # 上限生效。
+        capped = VolumeMarker._meshSampleCount(area=1e12, R=64, K=3)
+        self.assertLessEqual(capped, VolumeMarker.MESH_SAMPLE_MAX_POINTS)
+
+    def test_axis_aligned_quad_covers_all_crossed_voxels(self):
+        """完整覆盖回归：一个 z=const 的平面四边形（两三角形）应激活其 xy
+        投影范围内、该 z 所在层的全部体素，不漏任何被网格穿过的体素。
+        """
+        R = 16
+        # 平面位于某个体素层中心 z，避免落在体素边界产生歧义。
+        k = 6
+        z = (k + 0.5) / R - 0.5
+        # xy 覆盖 [lo, hi]，恰好对应体素 i,j ∈ [i_lo, i_hi]。
+        i_lo, i_hi = 3, 11
+        lo = (i_lo) / R - 0.5 + 1e-3
+        hi = (i_hi + 1) / R - 0.5 - 1e-3
+        verts = torch.tensor(
+            [
+                [lo, lo, z],
+                [hi, lo, z],
+                [hi, hi, z],
+                [lo, hi, z],
+            ],
+            dtype=torch.float32,
+        )
+        faces = torch.tensor([[0, 1, 2], [0, 2, 3]], dtype=torch.int64)
+        occ = VolumeMarker._voxelizeMesh(verts, faces, R, 'cpu')
+
+        # 该 z 层 [i_lo, i_hi] x [i_lo, i_hi] 的每个体素都应被激活。
+        for i in range(i_lo, i_hi + 1):
+            for j in range(i_lo, i_hi + 1):
+                self.assertTrue(
+                    bool(occ[i, j, k]),
+                    f'voxel ({i},{j},{k}) 被网格穿过却未被采样覆盖',
+                )
+        # 不应越出到相邻 z 层（平面 z 固定）。
+        occupied_k = torch.nonzero(occ)[:, 2].unique().tolist()
+        self.assertEqual(occupied_k, [k])
+
+
 class TestBoundaryMesh(unittest.TestCase):
     """候选体素并集边界 mesh 与 triangle->voxel 映射（纯逻辑，CPU）。"""
 
@@ -379,7 +519,7 @@ class TestMarkVisibleCpuCandidate(unittest.TestCase):
         R = 4
         camera = self._make_cpu_camera(depth_value=0.0)
         empty_pts = torch.zeros((0, 3), dtype=torch.float32)
-        labels = VolumeMarker.markVisible([camera], R, points=empty_pts)
+        labels = VolumeMarker.markVisible([camera], R, geometry=empty_pts)
         self.assertTrue(torch.all(labels == VolumeMarker.FREE))
 
 
@@ -421,7 +561,7 @@ class TestMarkVisibleRender(unittest.TestCase):
         ).to(device)
 
         camera = self._make_front_camera(R)
-        labels = VolumeMarker.markVisible([camera], R, points=pts)
+        labels = VolumeMarker.markVisible([camera], R, geometry=pts)
 
         self.assertEqual(int(labels[front_idx].item()), VolumeMarker.VALID)
         # 后面体素被前面完全遮挡，保持 UNKNOWN（不会被改成 VALID 或 FREE）。
@@ -450,7 +590,7 @@ class TestMarkVisibleRender(unittest.TestCase):
         )
         cam_back.loadDepth(torch.zeros((128, 128), dtype=torch.float32, device=device))
 
-        labels = VolumeMarker.markVisible([cam_front, cam_back], R, points=pts)
+        labels = VolumeMarker.markVisible([cam_front, cam_back], R, geometry=pts)
 
         self.assertEqual(int(labels[front_idx].item()), VolumeMarker.VALID)
         self.assertEqual(int(labels[back_idx].item()), VolumeMarker.VALID)
@@ -465,7 +605,7 @@ class TestMarkVisibleRender(unittest.TestCase):
         ).to(device)
 
         camera = self._make_front_camera(R)
-        labels = VolumeMarker.markVisible([camera], R, points=pts)
+        labels = VolumeMarker.markVisible([camera], R, geometry=pts)
 
         self.assertEqual(int(labels[idx].item()), VolumeMarker.VALID)
 
@@ -485,7 +625,7 @@ class TestMarkVisibleRender(unittest.TestCase):
         ).to(device)
 
         camera = self._make_front_camera(R)
-        labels = VolumeMarker.markVisible([camera], R, points=pts)
+        labels = VolumeMarker.markVisible([camera], R, geometry=pts)
 
         self.assertEqual(int(labels[valid_idx].item()), VolumeMarker.VALID)
 
@@ -512,7 +652,7 @@ class TestMarkVisibleRender(unittest.TestCase):
         device = 'cuda:0'
         camera = self._make_front_camera(R)
         empty_pts = torch.zeros((0, 3), dtype=torch.float32, device=device)
-        labels = VolumeMarker.markVisible([camera], R, points=empty_pts)
+        labels = VolumeMarker.markVisible([camera], R, geometry=empty_pts)
         self.assertTrue(torch.all(labels == VolumeMarker.FREE))
 
 

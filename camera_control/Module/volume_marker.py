@@ -2,6 +2,7 @@ import os
 import torch
 import trimesh
 import numpy as np
+import open3d as o3d
 
 from typing import List, Optional, Tuple, Union
 
@@ -171,6 +172,203 @@ class VolumeMarker(object):
                 f'points last dim must be >= 3, got {points.shape}'
             )
         return points[:, :3].contiguous()
+
+    # ------------------------------------------------------------------
+    # geometry 输入归一化：自动判别 点云 / 三角网格 / numpy / tensor / 文件
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _isTriangleMesh(geometry) -> bool:
+        """判断输入是否为「带三角面」的网格（open3d / trimesh）。
+
+        只有真正含有三角面拓扑的对象才走 mesh 体素化路径；裸点云
+        （PointCloud / numpy / tensor）一律走点体素化路径。
+        """
+        if isinstance(geometry, o3d.geometry.TriangleMesh):
+            return len(geometry.triangles) > 0
+        if isinstance(geometry, trimesh.Trimesh):
+            return geometry.faces is not None and len(geometry.faces) > 0
+        return False
+
+    @staticmethod
+    def _meshVerticesFaces(
+        geometry,
+        dtype,
+        device: str,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """从 open3d / trimesh 三角网格取出 (V,3) 顶点与 (F,3) 面索引张量。"""
+        if isinstance(geometry, o3d.geometry.TriangleMesh):
+            vertices_np = np.asarray(geometry.vertices)
+            faces_np = np.asarray(geometry.triangles)
+        elif isinstance(geometry, trimesh.Trimesh):
+            vertices_np = np.asarray(geometry.vertices)
+            faces_np = np.asarray(geometry.faces)
+        else:
+            raise TypeError(
+                '[ERROR][VolumeMarker::_meshVerticesFaces] '
+                f'unsupported mesh type: {type(geometry)}'
+            )
+
+        vertices = torch.as_tensor(
+            np.ascontiguousarray(vertices_np), dtype=dtype, device=device,
+        )
+        faces = torch.as_tensor(
+            np.ascontiguousarray(faces_np), dtype=torch.int64, device=device,
+        )
+        return vertices, faces
+
+    # 体采样相对体素的过采样倍率：在 K*R 分辨率下采样，确保采样点最大间距
+    # 远小于体素边长，从而网格穿过的每个体素都被至少一个采样点覆盖。
+    MESH_SAMPLE_OVERSAMPLE_K: int = 3
+    # 采样点数上限，避免巨大网格 + 高分辨率时点数爆炸（仍足以覆盖体素）。
+    MESH_SAMPLE_MAX_POINTS: int = 8_000_000
+
+    @staticmethod
+    def _meshSurfaceArea(vertices: torch.Tensor, faces: torch.Tensor) -> float:
+        """三角网格总表面积（用于按目标点间距估算采样点数）。"""
+        tris = vertices[faces]  # (F, 3, 3)
+        e0 = tris[:, 1] - tris[:, 0]
+        e1 = tris[:, 2] - tris[:, 0]
+        cross = torch.cross(e0, e1, dim=-1)
+        return float(0.5 * cross.norm(dim=-1).sum().item())
+
+    @staticmethod
+    def _meshSampleCount(area: float, R: int, K: int) -> int:
+        """按目标点间距 d = 1/(K*R) 估算面积均匀采样所需点数。
+
+        第一性原理：要让网格穿过的每个体素（边长 1/R）都被采样点覆盖，采样点
+        在面上的间距需远小于体素边长。取目标间距 d = 1/(K*R)，单位面积约需
+        1/d^2 个点，再乘安全系数 2 抵抗均匀采样的局部稀疏与边角缺口。
+        """
+        d = 1.0 / (K * R)
+        n = int(np.ceil(area / (d * d) * 2.0))
+        # 至少给足一个 K*R 网格量级的点；并限制上限。
+        n = max(n, (K * R) ** 2)
+        return int(min(n, VolumeMarker.MESH_SAMPLE_MAX_POINTS))
+
+    @staticmethod
+    def _voxelizeMesh(
+        vertices: torch.Tensor,
+        faces: torch.Tensor,
+        R: int,
+        device: str,
+    ) -> torch.Tensor:
+        """把三角网格按体素分辨率 R 求占用，返回 (R,R,R) bool 占据 mask。
+
+        实现（面向性能的体采样近似）：用 open3d 在网格表面做面积均匀采样，
+        采样分辨率取体素分辨率的 K 倍（点间距 ~ 1/(K*R) 远小于体素边长
+        1/R），再把稠密采样点体素化。当 K 足够大时，网格穿过的每个体素都至少
+        含一个采样点，从而等价于「网格表面真实占用」，但避免了逐三角形精确
+        相交测试的开销，对大网格 + 高分辨率显著更快。
+
+        坐标约定与体素网格一致：体素覆盖 [-0.5, 0.5]^3，
+        voxel index = floor((point + 0.5) * R)。
+        """
+        if faces.numel() == 0 or vertices.numel() == 0:
+            return torch.zeros((R, R, R), dtype=torch.bool, device=device)
+
+        K = VolumeMarker.MESH_SAMPLE_OVERSAMPLE_K
+
+        vertices_np = vertices.detach().cpu().numpy().astype(np.float64)
+        faces_np = faces.detach().cpu().numpy().astype(np.int32)
+
+        area = VolumeMarker._meshSurfaceArea(
+            vertices.to(torch.float64), faces,
+        )
+        if area <= 0.0:
+            # 退化（零面积）网格：直接用顶点当点云体素化。
+            return VolumeMarker._voxelizePoints(
+                vertices.to(torch.float32), R, device,
+            )
+
+        num_points = VolumeMarker._meshSampleCount(area, R, K)
+
+        o3d_mesh = o3d.geometry.TriangleMesh(
+            o3d.utility.Vector3dVector(vertices_np),
+            o3d.utility.Vector3iVector(faces_np),
+        )
+        sampled = o3d_mesh.sample_points_uniformly(number_of_points=num_points)
+        points = torch.from_numpy(
+            np.ascontiguousarray(np.asarray(sampled.points)),
+        ).to(dtype=torch.float32, device=device)
+
+        return VolumeMarker._voxelizePoints(points, R, device)
+
+    @staticmethod
+    def _geometryToOccupancy(
+        geometry,
+        R: int,
+        dtype,
+        device: str,
+    ) -> torch.Tensor:
+        """把任意支持的 geometry 自动转成 (R,R,R) bool 候选占据体素。
+
+        类型分发（第一性原理：先看是否含三角面拓扑）：
+          - open3d.TriangleMesh / trimesh.Trimesh（含面）-> 网格体素化：用
+            open3d 在表面按 K*R 分辨率做面积均匀采样再体素化，覆盖网格穿过的
+            所有体素，不走「直接取顶点当点云」的稀疏近似；
+          - open3d.PointCloud / trimesh.PointCloud / numpy / tensor / 文件路径
+            -> 点体素化（点落在哪个体素）；
+          - 字符串文件路径：用 trimesh.load 加载后再按上面规则判别；含面则当
+            mesh，否则取顶点当点云。
+        """
+        if isinstance(geometry, str):
+            geometry = VolumeMarker._loadGeometryFile(geometry)
+
+        if VolumeMarker._isTriangleMesh(geometry):
+            vertices, faces = VolumeMarker._meshVerticesFaces(
+                geometry, dtype, device,
+            )
+            return VolumeMarker._voxelizeMesh(vertices, faces, R, device)
+
+        points = VolumeMarker._geometryToPoints(geometry, dtype, device)
+        return VolumeMarker._voxelizePoints(points, R, device)
+
+    @staticmethod
+    def _geometryToPoints(
+        geometry,
+        dtype,
+        device: str,
+    ) -> torch.Tensor:
+        """把「点云类」geometry 统一成 (N,3) 点张量。
+
+        支持 open3d.PointCloud / trimesh.PointCloud / numpy / tensor，其余
+        交给 _normalizePoints（含越界裁剪与列截断）。
+        """
+        if isinstance(geometry, o3d.geometry.PointCloud):
+            geometry = np.asarray(geometry.points)
+        elif isinstance(geometry, trimesh.points.PointCloud):
+            geometry = np.asarray(geometry.vertices)
+        return VolumeMarker._normalizePoints(geometry, dtype, device)
+
+    @staticmethod
+    def _loadGeometryFile(geometry_file_path: str):
+        """加载几何文件，保留 mesh / 点云拓扑信息以便后续类型分发。
+
+        含三角面则返回 trimesh.Trimesh（走 mesh 体素化），否则返回顶点 numpy
+        数组（走点体素化）。.npy/.npz/.txt 等纯数组沿用 _loadPointsFile。
+        """
+        ext = os.path.splitext(geometry_file_path)[1].lower()
+        if ext in ('.npy', '.npz', '.txt', '.xyz', '.csv'):
+            return VolumeMarker._loadPointsFile(geometry_file_path)
+
+        if not os.path.exists(geometry_file_path):
+            raise FileNotFoundError(
+                '[ERROR][VolumeMarker::_loadGeometryFile] '
+                f'geometry file not exist: {geometry_file_path}'
+            )
+
+        loaded = trimesh.load(geometry_file_path, process=False)
+        if isinstance(loaded, trimesh.Trimesh) and len(loaded.faces) > 0:
+            return loaded
+        if isinstance(loaded, trimesh.Scene):
+            meshes = [
+                g for g in loaded.geometry.values()
+                if isinstance(g, trimesh.Trimesh) and len(g.faces) > 0
+            ]
+            if len(meshes) > 0:
+                return trimesh.util.concatenate(meshes)
+        # 退回到点云顶点。
+        return VolumeMarker._loadPointsFile(geometry_file_path)
 
     @staticmethod
     def _requireDepthLoaded(camera_list: List[Camera], caller: str) -> None:
@@ -608,14 +806,25 @@ class VolumeMarker(object):
     def markVisible(
         camera_list: List[Camera],
         volume_resolution: int,
-        points: Optional[Union[np.ndarray, torch.Tensor, str]] = None,
+        geometry: Optional[Union[
+        o3d.geometry.TriangleMesh,
+        o3d.geometry.PointCloud,
+        trimesh.PointCloud,
+        trimesh.Trimesh,
+        np.ndarray,
+        torch.Tensor,
+    ]] = None,
     ) -> torch.Tensor:
         """基于候选占据 + 立方体 mesh 渲染对空间体素打标签。
 
         算法（第一性原理重构）：
           1. 候选占据：
-               - 若提供 points（数组/张量/文件路径），优先用 points 体素化得到
-                 候选 VALID voxel；
+               - 若提供 geometry，按其真实类型转成候选占据体素：
+                   * 三角网格（open3d.TriangleMesh / trimesh.Trimesh，含面）->
+                     用 open3d 在表面按 volume_resolution 的 K 倍分辨率做面积
+                     均匀采样得到稠密点云再体素化，覆盖网格穿过的所有体素；
+                   * 点云 / numpy / tensor / 点云文件 -> 点体素化（点落在哪个
+                     体素）；
                - 否则用所有 camera.toCCM(use_mask=False) 的并集体素化。
           2. 边界 mesh：对候选体素并集构造只含外露面的立方体表面 mesh，并记录
              每个三角对应的 voxel。
@@ -650,14 +859,15 @@ class VolumeMarker(object):
         VolumeMarker._requireDepthLoaded(camera_list, 'markVisible')
 
         # --- 1. 候选占据体素 ---
-        if points is not None:
-            candidate_points = VolumeMarker._normalizePoints(points, dtype, device)
+        if geometry is not None:
+            candidate = VolumeMarker._geometryToOccupancy(
+                geometry, R, dtype, device,
+            )
         else:
             candidate_points = VolumeMarker._collectCandidatePoints(
                 camera_list, dtype, device,
             )
-
-        candidate = VolumeMarker._voxelizePoints(candidate_points, R, device)
+            candidate = VolumeMarker._voxelizePoints(candidate_points, R, device)
 
         # --- 无候选体素：空间无占据，整体为 FREE ---
         if not bool(candidate.any()):

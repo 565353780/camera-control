@@ -141,21 +141,22 @@ def create_line_set(
 
 def toVisibleVolumeMesh(
     labels: Union[torch.Tensor, np.ndarray],
-    sphere_radius_ratio: float = 0.25,
-    sphere_resolution: int = 6,
+    tetra_radius_ratio: float = 0.25,
 ) -> o3d.geometry.TriangleMesh:
     """
     将 VolumeMarker.markVisible 输出的 (R, R, R) 标签可视化为单个 TriangleMesh。
 
-    可视化方式：在每个 Valid / Unknown voxel 的 center 放一个球面，
-    球半径为 0.25 * (voxel 边长) = 0.25 / R（voxel 在 [-0.5, 0.5] 内均匀划分）。
+    可视化方式：在每个 Valid / Unknown voxel 的 center 放一个四面体（4 顶点、
+    4 三角面），相比球面可把导出数据量减小一个数量级以上。四面体外接半径为
+    tetra_radius_ratio * (voxel 边长) = tetra_radius_ratio / R
+    （voxel 在 [-0.5, 0.5] 内均匀划分）。
     - Valid   -> 绿色
     - Unknown -> 灰色
     - Free    -> 不绘制
 
     Args:
         labels: (R, R, R) int 张量，编码 UNKNOWN=-1, FREE=0, VALID=1。
-        sphere_resolution: 球面三角化分辨率，越大越精细。
+        tetra_radius_ratio: 四面体外接球半径相对 voxel 边长的比例。
 
     Returns:
         合并后的单个 o3d.geometry.TriangleMesh。
@@ -172,7 +173,7 @@ def toVisibleVolumeMesh(
 
     R = int(labels.shape[0])
     voxel_size = 1.0 / R
-    radius = sphere_radius_ratio * voxel_size
+    radius = tetra_radius_ratio * voxel_size
 
     # voxel (i, j, k) 中心：-0.5 + (idx + 0.5) / R
     idx = (np.arange(R, dtype=np.float64) + 0.5) / R - 0.5
@@ -182,12 +183,29 @@ def toVisibleVolumeMesh(
         (VISIBLE_LABEL_UNKNOWN, np.array(VISIBLE_COLOR_UNKNOWN, dtype=np.float64)),
     ]
 
-    # 单位球模板：所有球共用同一套局部顶点/面，仅平移到各 voxel center。
-    unit_sphere = o3d.geometry.TriangleMesh.create_sphere(
-        radius=radius, resolution=sphere_resolution,
+    # 正四面体模板：以 voxel center 为中心、外接球半径为 radius 的 4 个顶点。
+    # 4 个顶点取自正方体的交替角点，天然构成正四面体；中心即原点。
+    tetra_unit = np.array(
+        [
+            [1.0, 1.0, 1.0],
+            [1.0, -1.0, -1.0],
+            [-1.0, 1.0, -1.0],
+            [-1.0, -1.0, 1.0],
+        ],
+        dtype=np.float64,
     )
-    template_vertices = np.asarray(unit_sphere.vertices, dtype=np.float64)  # (V, 3)
-    template_faces = np.asarray(unit_sphere.triangles, dtype=np.int64)  # (F, 3)
+    tetra_unit /= np.sqrt(3.0)  # 归一化到外接球半径 1
+    template_vertices = tetra_unit * radius  # (4, 3)
+    # 4 个三角面（顶点顺序使外法线朝外，便于着色/法线计算）。
+    template_faces = np.array(
+        [
+            [0, 1, 2],
+            [0, 3, 1],
+            [0, 2, 3],
+            [1, 3, 2],
+        ],
+        dtype=np.int64,
+    )
     num_template_vertices = template_vertices.shape[0]
 
     all_vertices = []
