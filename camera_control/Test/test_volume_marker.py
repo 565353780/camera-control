@@ -250,6 +250,87 @@ class TestSampleRenderedDepth(unittest.TestCase):
         self.assertFalse(bool(background[1]))
 
 
+class TestVoxelHelpers(unittest.TestCase):
+    """重构抽出的体素/网格原子函数（纯逻辑，CPU）。"""
+
+    def test_require_positive_resolution_ok(self):
+        self.assertEqual(VolumeMarker._requirePositiveResolution(7, 'x'), 7)
+        # 浮点也应被 int 化。
+        self.assertEqual(VolumeMarker._requirePositiveResolution(4.0, 'x'), 4)
+
+    def test_require_positive_resolution_raises(self):
+        for bad in (0, -1, -5):
+            with self.assertRaises(ValueError):
+                VolumeMarker._requirePositiveResolution(bad, 'x')
+
+    def test_empty_labels_value_dtype_device(self):
+        R = 3
+        free = VolumeMarker._emptyLabels(R, VolumeMarker.FREE)
+        unknown = VolumeMarker._emptyLabels(R, VolumeMarker.UNKNOWN, 'cpu')
+        self.assertEqual(tuple(free.shape), (R, R, R))
+        self.assertEqual(free.dtype, torch.int64)
+        self.assertTrue(torch.all(free == VolumeMarker.FREE))
+        self.assertTrue(torch.all(unknown == VolumeMarker.UNKNOWN))
+
+    def test_voxel_indices_to_flat_matches_manual_formula(self):
+        R = 8
+        idx = torch.tensor([[2, 3, 5], [0, 0, 0], [7, 7, 7]])
+        flat = VolumeMarker._voxelIndicesToFlat(idx, R)
+        expected = (idx[:, 0] * R + idx[:, 1]) * R + idx[:, 2]
+        self.assertTrue(torch.equal(flat, expected))
+
+    def test_points_to_voxel_indices_clamps_into_range(self):
+        R = 4
+        # +0.5 应落在最后一个体素（clamp 到 R-1），-0.5 落在第 0 个。
+        pts = torch.tensor(
+            [[0.5, 0.5, 0.5], [-0.5, -0.5, -0.5]], dtype=torch.float32,
+        )
+        idx = VolumeMarker._pointsToVoxelIndices(pts, R)
+        self.assertTrue(torch.equal(idx[0], torch.tensor([R - 1, R - 1, R - 1])))
+        self.assertTrue(torch.equal(idx[1], torch.tensor([0, 0, 0])))
+
+    def test_finite_in_bounds_includes_boundaries(self):
+        pts = torch.tensor(
+            [
+                [0.5, 0.5, 0.5],    # 上边界 -> 内
+                [-0.5, -0.5, -0.5],  # 下边界 -> 内
+                [0.51, 0.0, 0.0],   # 越界
+                [float('nan'), 0.0, 0.0],  # 非有限
+            ],
+            dtype=torch.float32,
+        )
+        mask = VolumeMarker._finiteInBounds(pts)
+        self.assertTrue(bool(mask[0]))
+        self.assertTrue(bool(mask[1]))
+        self.assertFalse(bool(mask[2]))
+        self.assertFalse(bool(mask[3]))
+
+    def test_make_ijk_grid_shape_and_ordering(self):
+        coords = torch.tensor([0.0, 1.0, 2.0])
+        grid = VolumeMarker._makeIjkGrid(coords)
+        self.assertEqual(tuple(grid.shape), (3, 3, 3, 3))
+        # (x, y, z) ij 顺序：grid[i, j, k] == (coords[i], coords[j], coords[k])。
+        self.assertTrue(torch.equal(grid[1, 2, 0], torch.tensor([1.0, 2.0, 0.0])))
+
+
+class TestVoxelizeBoundary(unittest.TestCase):
+    """体素化在 ±0.5 边界上的稳定性（纯逻辑，CPU）。"""
+
+    def test_boundary_points_clamp_into_volume(self):
+        R = 4
+        pts = torch.tensor(
+            [
+                [0.5, 0.5, 0.5],
+                [-0.5, -0.5, -0.5],
+            ],
+            dtype=torch.float32,
+        )
+        occ = VolumeMarker._voxelizePoints(pts, R, 'cpu')
+        self.assertEqual(int(occ.sum().item()), 2)
+        self.assertTrue(bool(occ[R - 1, R - 1, R - 1]))
+        self.assertTrue(bool(occ[0, 0, 0]))
+
+
 class TestMarkVisibleNoCamera(unittest.TestCase):
     def test_empty_camera_list_returns_all_free(self):
         R = 5
@@ -257,6 +338,49 @@ class TestMarkVisibleNoCamera(unittest.TestCase):
         self.assertEqual(tuple(labels.shape), (R, R, R))
         self.assertTrue(torch.all(labels == VolumeMarker.FREE))
         self.assertEqual(labels.dtype, torch.int64)
+
+    def test_non_positive_resolution_raises(self):
+        for bad in (0, -3):
+            with self.assertRaises(ValueError):
+                VolumeMarker.markVisible([], bad)
+
+
+class TestMarkVisibleCpuCandidate(unittest.TestCase):
+    """无需渲染即可在 CPU 验证的候选/深度路径。"""
+
+    def _make_cpu_camera(self, depth_value: float) -> Camera:
+        camera = Camera(
+            width=8, height=8, fovx_degree=60.0,
+            pos=[0.0, 0.0, 3.0], look_at=[0.0, 0.0, 0.0], up=[0.0, 1.0, 0.0],
+            device='cpu',
+        )
+        depth = torch.full((8, 8), float(depth_value), dtype=torch.float32)
+        camera.loadDepth(depth)
+        return camera
+
+    def test_missing_depth_raises(self):
+        camera = Camera(
+            width=8, height=8, fovx_degree=60.0,
+            pos=[0.0, 0.0, 3.0], look_at=[0.0, 0.0, 0.0], up=[0.0, 1.0, 0.0],
+            device='cpu',
+        )
+        with self.assertRaises(ValueError):
+            VolumeMarker.markVisible([camera], 4)
+
+    def test_points_none_with_no_valid_depth_is_all_free(self):
+        # depth 全 0 -> valid_depth_mask 全 False -> CCM 候选为空 -> 全 FREE。
+        R = 4
+        camera = self._make_cpu_camera(depth_value=0.0)
+        labels = VolumeMarker.markVisible([camera], R)
+        self.assertEqual(tuple(labels.shape), (R, R, R))
+        self.assertTrue(torch.all(labels == VolumeMarker.FREE))
+
+    def test_empty_points_is_all_free(self):
+        R = 4
+        camera = self._make_cpu_camera(depth_value=0.0)
+        empty_pts = torch.zeros((0, 3), dtype=torch.float32)
+        labels = VolumeMarker.markVisible([camera], R, points=empty_pts)
+        self.assertTrue(torch.all(labels == VolumeMarker.FREE))
 
 
 @unittest.skipUnless(

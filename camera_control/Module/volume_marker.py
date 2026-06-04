@@ -22,6 +22,65 @@ class VolumeMarker(object):
         return
 
     # ------------------------------------------------------------------
+    # 体素 / 网格基础原子函数
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _requirePositiveResolution(volume_resolution: int, caller: str) -> int:
+        """校验体素分辨率为正，返回 int 化后的 R。"""
+        if volume_resolution <= 0:
+            raise ValueError(
+                f'[ERROR][VolumeMarker::{caller}] '
+                f'volume_resolution must be positive, got {volume_resolution}'
+            )
+        return int(volume_resolution)
+
+    @staticmethod
+    def _emptyLabels(
+        R: int,
+        value: int,
+        device: Optional[str] = None,
+    ) -> torch.Tensor:
+        """创建 (R, R, R) 的 int64 标签张量，统一全 FREE/UNKNOWN 初始化。"""
+        if device is None:
+            return torch.full((R, R, R), value, dtype=torch.int64)
+        return torch.full((R, R, R), value, dtype=torch.int64, device=device)
+
+    @staticmethod
+    def _finiteInBounds(
+        points: torch.Tensor,
+        lower: float = -0.5,
+        upper: float = 0.5,
+    ) -> torch.Tensor:
+        """返回 (N,) bool：点的前三维有限且落在 [lower, upper] 立方体内。"""
+        finite = torch.isfinite(points).all(dim=-1)
+        return (
+            finite
+            & (points[:, 0] >= lower) & (points[:, 0] <= upper)
+            & (points[:, 1] >= lower) & (points[:, 1] <= upper)
+            & (points[:, 2] >= lower) & (points[:, 2] <= upper)
+        )
+
+    @staticmethod
+    def _pointsToVoxelIndices(points: torch.Tensor, R: int) -> torch.Tensor:
+        """把点体素化为 (N, 3) 的 long 体素索引（已 clamp 到 [0, R-1]）。
+
+        坐标约定：体素覆盖 [-0.5, 0.5]^3，
+        voxel index = floor((point + 0.5) * R)，(x, y, z) 对应 (i, j, k)。
+        """
+        return torch.floor((points + 0.5) * R).long().clamp(0, R - 1)
+
+    @staticmethod
+    def _voxelIndicesToFlat(indices: torch.Tensor, R: int) -> torch.Tensor:
+        """把 (..., 3) 的 (i, j, k) 体素索引压成 flat = (i * R + j) * R + k。"""
+        return (indices[..., 0] * R + indices[..., 1]) * R + indices[..., 2]
+
+    @staticmethod
+    def _makeIjkGrid(coords: torch.Tensor) -> torch.Tensor:
+        """对一维坐标做 (x, y, z) 的 ij meshgrid 并 stack 成 (L, L, L, 3)。"""
+        xs, ys, zs = torch.meshgrid(coords, coords, coords, indexing='ij')
+        return torch.stack([xs, ys, zs], dim=-1)
+
+    # ------------------------------------------------------------------
     # 候选占据体素
     # ------------------------------------------------------------------
     @staticmethod
@@ -114,6 +173,16 @@ class VolumeMarker(object):
         return points[:, :3].contiguous()
 
     @staticmethod
+    def _requireDepthLoaded(camera_list: List[Camera], caller: str) -> None:
+        """确保每个相机都已加载 depth 与 valid_depth_mask。"""
+        for camera in camera_list:
+            if camera.depth is None or camera.valid_depth_mask is None:
+                raise ValueError(
+                    f'[ERROR][VolumeMarker::{caller}] '
+                    'camera missing depth or valid_depth_mask; call loadDepth first.'
+                )
+
+    @staticmethod
     def _voxelizePoints(
         points: torch.Tensor,
         R: int,
@@ -130,18 +199,12 @@ class VolumeMarker(object):
             return occupancy
 
         points = points.to(device)
-        finite = torch.isfinite(points).all(dim=-1)
-        inside = (
-            finite
-            & (points[:, 0] >= -0.5) & (points[:, 0] <= 0.5)
-            & (points[:, 1] >= -0.5) & (points[:, 1] <= 0.5)
-            & (points[:, 2] >= -0.5) & (points[:, 2] <= 0.5)
-        )
+        inside = VolumeMarker._finiteInBounds(points)
         if not bool(inside.any()):
             return occupancy
 
-        idx = torch.floor((points[inside] + 0.5) * R).long().clamp(0, R - 1)
-        flat_idx = (idx[:, 0] * R + idx[:, 1]) * R + idx[:, 2]
+        idx = VolumeMarker._pointsToVoxelIndices(points[inside], R)
+        flat_idx = VolumeMarker._voxelIndicesToFlat(idx, R)
 
         occ_flat = occupancy.reshape(-1)
         occ_flat[flat_idx.unique()] = True
@@ -154,13 +217,10 @@ class VolumeMarker(object):
         device: str,
     ) -> torch.Tensor:
         """合并所有相机 toCCM(use_mask=False) 的真实表面点，返回 (N, 3)。"""
+        VolumeMarker._requireDepthLoaded(camera_list, '_collectCandidatePoints')
+
         all_points: List[torch.Tensor] = []
         for camera in camera_list:
-            if camera.depth is None or camera.valid_depth_mask is None:
-                raise ValueError(
-                    '[ERROR][VolumeMarker::_collectCandidatePoints] '
-                    'camera missing depth or valid_depth_mask; call loadDepth first.'
-                )
             ccm = camera.toCCM(use_mask=False)  # (H, W, 3)
             points = ccm[camera.valid_depth_mask]  # (P, 3)
             if points.numel() > 0:
@@ -174,6 +234,94 @@ class VolumeMarker(object):
     # ------------------------------------------------------------------
     # 候选体素并集的边界 mesh
     # ------------------------------------------------------------------
+    # 6 个面方向：邻居偏移 + 该面 4 个角点（单位立方体局部坐标 0/1）。
+    # 角点顺序保证三角化后外法线朝向 candidate 外侧（这里只用于遮挡，
+    # nvdiffrast 不做背面剔除，朝向不影响命中判定，仅保持几何闭合）。
+    _FACE_DEFS = (
+        # +x 面
+        ((1, 0, 0), ((1, 0, 0), (1, 1, 0), (1, 1, 1), (1, 0, 1))),
+        # -x 面
+        ((-1, 0, 0), ((0, 0, 0), (0, 0, 1), (0, 1, 1), (0, 1, 0))),
+        # +y 面
+        ((0, 1, 0), ((0, 1, 0), (0, 1, 1), (1, 1, 1), (1, 1, 0))),
+        # -y 面
+        ((0, -1, 0), ((0, 0, 0), (1, 0, 0), (1, 0, 1), (0, 0, 1))),
+        # +z 面
+        ((0, 0, 1), ((0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1))),
+        # -z 面
+        ((0, 0, -1), ((0, 0, 0), (0, 1, 0), (1, 1, 0), (1, 0, 0))),
+    )
+
+    @staticmethod
+    def _emptyBoundaryMesh(
+        device,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """空候选时返回统一的空 (vertices, faces, triangle_to_voxel)。"""
+        return (
+            torch.zeros((0, 3), dtype=torch.float32, device=device),
+            torch.zeros((0, 3), dtype=torch.int64, device=device),
+            torch.zeros((0,), dtype=torch.int64, device=device),
+        )
+
+    @staticmethod
+    def _exposedFacesForDirection(
+        candidate: torch.Tensor,
+        occ_idx: torch.Tensor,
+        base: torch.Tensor,
+        voxel_flat: torch.Tensor,
+        offset: Tuple[int, int, int],
+        corners,
+        R: int,
+        voxel_size: float,
+    ) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+        """为单个面方向取出所有外露 quad 及其对应 voxel flat index。
+
+        外露面 = 该方向邻居越界或为空体素。返回 (quad_verts, quad_voxel)，
+        若该方向无外露面返回 None。
+        """
+        device = candidate.device
+        i, j, k = occ_idx[:, 0], occ_idx[:, 1], occ_idx[:, 2]
+        dx, dy, dz = offset
+
+        ni, nj, nk = i + dx, j + dy, k + dz
+        out_of_grid = (
+            (ni < 0) | (ni >= R)
+            | (nj < 0) | (nj >= R)
+            | (nk < 0) | (nk >= R)
+        )
+        neighbor_occupied = candidate[
+            ni.clamp(0, R - 1), nj.clamp(0, R - 1), nk.clamp(0, R - 1),
+        ] & (~out_of_grid)
+
+        exposed = ~neighbor_occupied  # (M,)
+        if not bool(exposed.any()):
+            return None
+
+        sel_base = base[exposed]  # (E, 3)
+        sel_voxel = voxel_flat[exposed]  # (E,)
+
+        corner_offsets = torch.tensor(
+            corners, dtype=torch.float32, device=device,
+        ) * voxel_size  # (4, 3)
+
+        quad = sel_base.unsqueeze(1) + corner_offsets.unsqueeze(0)  # (E, 4, 3)
+        return quad, sel_voxel
+
+    @staticmethod
+    def _quadsToTriangles(
+        Q: int,
+        device,
+    ) -> torch.Tensor:
+        """为 Q 个 quad 生成 (Q*2, 3) 三角面索引（顶点按每 quad 4 个连续排布）。"""
+        quad_offset = torch.arange(Q, device=device, dtype=torch.int64) * 4
+        tri0 = torch.stack(
+            [quad_offset + 0, quad_offset + 1, quad_offset + 2], dim=-1,
+        )
+        tri1 = torch.stack(
+            [quad_offset + 0, quad_offset + 2, quad_offset + 3], dim=-1,
+        )
+        return torch.stack([tri0, tri1], dim=1).reshape(-1, 3)  # (Q*2, 3)
+
     @staticmethod
     def _buildVoxelBoundaryMesh(
         candidate: torch.Tensor,
@@ -196,96 +344,36 @@ class VolumeMarker(object):
         """
         device = candidate.device
         occ_idx = torch.nonzero(candidate, as_tuple=False)  # (M, 3) -> (i, j, k)
-        M = occ_idx.shape[0]
-
-        empty = (
-            torch.zeros((0, 3), dtype=torch.float32, device=device),
-            torch.zeros((0, 3), dtype=torch.int64, device=device),
-            torch.zeros((0,), dtype=torch.int64, device=device),
-        )
-        if M == 0:
-            return empty
+        if occ_idx.shape[0] == 0:
+            return VolumeMarker._emptyBoundaryMesh(device)
 
         voxel_size = 1.0 / R
-
-        # 6 个面方向：邻居偏移 + 该面 4 个角点（单位立方体局部坐标 0/1）。
-        # 角点顺序保证三角化后外法线朝向 candidate 外侧（这里只用于遮挡，
-        # nvdiffrast 不做背面剔除，朝向不影响命中判定，仅保持几何闭合）。
-        face_defs = [
-            # +x 面
-            ((1, 0, 0), [(1, 0, 0), (1, 1, 0), (1, 1, 1), (1, 0, 1)]),
-            # -x 面
-            ((-1, 0, 0), [(0, 0, 0), (0, 0, 1), (0, 1, 1), (0, 1, 0)]),
-            # +y 面
-            ((0, 1, 0), [(0, 1, 0), (0, 1, 1), (1, 1, 1), (1, 1, 0)]),
-            # -y 面
-            ((0, -1, 0), [(0, 0, 0), (1, 0, 0), (1, 0, 1), (0, 0, 1)]),
-            # +z 面
-            ((0, 0, 1), [(0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1)]),
-            # -z 面
-            ((0, 0, -1), [(0, 0, 0), (0, 1, 0), (1, 1, 0), (1, 0, 0)]),
-        ]
-
         base = (occ_idx.to(torch.float32) - 0.5 * R) * voxel_size  # voxel 最小角世界坐标
-        i = occ_idx[:, 0]
-        j = occ_idx[:, 1]
-        k = occ_idx[:, 2]
-        voxel_flat = (i * R + j) * R + k  # (M,)
+        voxel_flat = VolumeMarker._voxelIndicesToFlat(occ_idx, R)  # (M,)
 
         all_quad_verts: List[torch.Tensor] = []
         all_quad_voxel: List[torch.Tensor] = []
 
-        for (dx, dy, dz), corners in face_defs:
-            ni = i + dx
-            nj = j + dy
-            nk = k + dz
-
-            out_of_grid = (
-                (ni < 0) | (ni >= R)
-                | (nj < 0) | (nj >= R)
-                | (nk < 0) | (nk >= R)
+        for offset, corners in VolumeMarker._FACE_DEFS:
+            face = VolumeMarker._exposedFacesForDirection(
+                candidate, occ_idx, base, voxel_flat,
+                offset, corners, R, voxel_size,
             )
-
-            ni_c = ni.clamp(0, R - 1)
-            nj_c = nj.clamp(0, R - 1)
-            nk_c = nk.clamp(0, R - 1)
-            neighbor_occupied = candidate[ni_c, nj_c, nk_c] & (~out_of_grid)
-
-            exposed = ~neighbor_occupied  # (M,)
-            if not bool(exposed.any()):
+            if face is None:
                 continue
-
-            sel_base = base[exposed]  # (E, 3)
-            sel_voxel = voxel_flat[exposed]  # (E,)
-
-            corner_offsets = torch.tensor(
-                corners, dtype=torch.float32, device=device,
-            ) * voxel_size  # (4, 3)
-
-            # (E, 4, 3)
-            quad = sel_base.unsqueeze(1) + corner_offsets.unsqueeze(0)
+            quad, sel_voxel = face
             all_quad_verts.append(quad)
             all_quad_voxel.append(sel_voxel)
 
         if len(all_quad_verts) == 0:
-            return empty
+            return VolumeMarker._emptyBoundaryMesh(device)
 
         quad_verts = torch.cat(all_quad_verts, dim=0)  # (Q, 4, 3)
         quad_voxel = torch.cat(all_quad_voxel, dim=0)  # (Q,)
         Q = quad_verts.shape[0]
 
         vertices = quad_verts.reshape(-1, 3)  # (Q*4, 3)
-
-        # 每个 quad -> 2 个三角，顶点索引基于 quad 在 vertices 中的偏移。
-        quad_offset = torch.arange(Q, device=device, dtype=torch.int64) * 4
-        tri0 = torch.stack(
-            [quad_offset + 0, quad_offset + 1, quad_offset + 2], dim=-1,
-        )
-        tri1 = torch.stack(
-            [quad_offset + 0, quad_offset + 2, quad_offset + 3], dim=-1,
-        )
-        faces = torch.stack([tri0, tri1], dim=1).reshape(-1, 3)  # (Q*2, 3)
-
+        faces = VolumeMarker._quadsToTriangles(Q, device)  # (Q*2, 3)
         triangle_to_voxel = quad_voxel.repeat_interleave(2)  # (Q*2,)
 
         return vertices, faces, triangle_to_voxel
@@ -339,6 +427,28 @@ class VolumeMarker(object):
         return sampled_depth, surface_hit, background
 
     @staticmethod
+    def _projectCentersForCamera(
+        camera: Camera,
+        centers_flat: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """把 voxel 中心投影到某相机，返回 (uv, point_depth)。
+
+        Args:
+            centers_flat: (N, 3) voxel 中心世界坐标（与相机同 dtype/device）。
+
+        Returns:
+            uv:          (N, 2) 归一化 UV [0, 1]，与 camera UV 约定一致。
+            point_depth: (N,) voxel 中心在相机坐标系下的前方正深度。
+        """
+        uv = camera.project_points_to_uv(centers_flat)  # (N, 2)
+
+        centers_homo = torch.cat(
+            [centers_flat, torch.ones_like(centers_flat[..., :1])], dim=-1,
+        )
+        point_depth = -(centers_homo @ camera.world2camera.T)[..., 2]  # (N,)
+        return uv, point_depth
+
+    @staticmethod
     def _renderClassify(
         camera_list: List[Camera],
         vertices: torch.Tensor,
@@ -388,14 +498,25 @@ class VolumeMarker(object):
         visible_flat = visible.reshape(-1)
         triangle_to_voxel = triangle_to_voxel.to(device)
 
+        # voxel 中心只依赖 (R, dtype, device)，跨相机复用以避免每个相机重复
+        # 创建 R^3 个中心点。
+        centers_cache: dict = {}
+        # 同一 device 上的 float32 顶点张量也跨相机复用。
+        vertices_cache: dict = {}
+
         for camera in camera_list:
+            vertices_tensor = vertices_cache.get(camera.device)
+            if vertices_tensor is None:
+                vertices_tensor = vertices.to(
+                    dtype=torch.float32, device=camera.device,
+                )
+                vertices_cache[camera.device] = vertices_tensor
+
             render_result = NVDiffRastRenderer.render(
                 mesh=mesh,
                 camera=camera,
                 render_types=['depth'],
-                vertices_tensor=vertices.to(
-                    dtype=torch.float32, device=camera.device,
-                ),
+                vertices_tensor=vertices_tensor,
                 enable_antialias=False,
                 enable_lighting=False,
             )
@@ -415,16 +536,17 @@ class VolumeMarker(object):
                 visible_flat[hit_voxel_flat] = True
 
             # --- FREE：voxel 中心 vs 渲染表面深度 ---
-            centers = VolumeMarker.createVoxelCenters(
-                R, camera.dtype, camera.device,
-            ).reshape(-1, 3)  # (R^3, 3)
+            cache_key = (camera.dtype, camera.device)
+            centers_flat = centers_cache.get(cache_key)
+            if centers_flat is None:
+                centers_flat = VolumeMarker.createVoxelCenters(
+                    R, camera.dtype, camera.device,
+                ).reshape(-1, 3)  # (R^3, 3)
+                centers_cache[cache_key] = centers_flat
 
-            uv = camera.project_points_to_uv(centers)  # (R^3, 2)
-
-            centers_homo = torch.cat(
-                [centers, torch.ones_like(centers[..., :1])], dim=-1,
+            uv, point_depth = VolumeMarker._projectCentersForCamera(
+                camera, centers_flat,
             )
-            point_depth = -(centers_homo @ camera.world2camera.T)[..., 2]  # (R^3,)
 
             sampled_depth, surface_hit, background = \
                 VolumeMarker._sampleRenderedDepth(
@@ -461,9 +583,7 @@ class VolumeMarker(object):
         coords = torch.linspace(
             -0.5, 0.5, volume_resolution + 1, dtype=dtype, device=device,
         )
-        xs, ys, zs = torch.meshgrid(coords, coords, coords, indexing='ij')
-        vertices = torch.stack([xs, ys, zs], dim=-1)
-        return vertices
+        return VolumeMarker._makeIjkGrid(coords)
 
     @staticmethod
     def createVoxelCenters(
@@ -479,9 +599,7 @@ class VolumeMarker(object):
         coords = (
             torch.arange(volume_resolution, dtype=dtype, device=device) + 0.5
         ) / volume_resolution - 0.5
-        xs, ys, zs = torch.meshgrid(coords, coords, coords, indexing='ij')
-        centers = torch.stack([xs, ys, zs], dim=-1)
-        return centers
+        return VolumeMarker._makeIjkGrid(coords)
 
     # ------------------------------------------------------------------
     # 主入口
@@ -519,28 +637,17 @@ class VolumeMarker(object):
 
         返回: (R, R, R) 的 int64 tensor，编码 UNKNOWN=-1, FREE=0, VALID=1。
         """
-        if volume_resolution <= 0:
-            raise ValueError(
-                '[ERROR][VolumeMarker::markVisible] '
-                f'volume_resolution must be positive, got {volume_resolution}'
-            )
-
-        R = int(volume_resolution)
+        R = VolumeMarker._requirePositiveResolution(volume_resolution, 'markVisible')
 
         if len(camera_list) == 0:
             # 没有任何视角，整个空间一定没有物体信息。
-            return torch.full((R, R, R), VolumeMarker.FREE, dtype=torch.int64)
+            return VolumeMarker._emptyLabels(R, VolumeMarker.FREE)
 
         ref_camera = camera_list[0]
         device = ref_camera.device
         dtype = ref_camera.dtype
 
-        for camera in camera_list:
-            if camera.depth is None or camera.valid_depth_mask is None:
-                raise ValueError(
-                    '[ERROR][VolumeMarker::markVisible] '
-                    'camera missing depth or valid_depth_mask; call loadDepth first.'
-                )
+        VolumeMarker._requireDepthLoaded(camera_list, 'markVisible')
 
         # --- 1. 候选占据体素 ---
         if points is not None:
@@ -552,17 +659,12 @@ class VolumeMarker(object):
 
         candidate = VolumeMarker._voxelizePoints(candidate_points, R, device)
 
-        labels = torch.full(
-            (R, R, R), VolumeMarker.UNKNOWN, dtype=torch.int64, device=device,
-        )
-
-        non_candidate = ~candidate
-
         # --- 无候选体素：空间无占据，整体为 FREE ---
         if not bool(candidate.any()):
-            return torch.full(
-                (R, R, R), VolumeMarker.FREE, dtype=torch.int64, device=device,
-            )
+            return VolumeMarker._emptyLabels(R, VolumeMarker.FREE, device)
+
+        labels = VolumeMarker._emptyLabels(R, VolumeMarker.UNKNOWN, device)
+        non_candidate = ~candidate
 
         # --- 2 & 3. 边界 mesh + 单次渲染同源产出 VALID/FREE/observed ---
         vertices, faces, triangle_to_voxel = \
@@ -574,18 +676,11 @@ class VolumeMarker(object):
             )
 
         # --- 4. 标签合并 ---
-        # 非候选 + 任一视角 FREE -> FREE。
-        free_update = non_candidate & free_any
+        # 非候选 -> FREE，当且仅当任一视角给出 FREE 证据，或从未被任何相机
+        # 观测到（视线外，一定无物体信息）。两段 FREE 写入合并为一次。
+        free_update = non_candidate & (free_any | (~observed_any))
         labels = torch.where(
             free_update,
-            torch.full_like(labels, VolumeMarker.FREE),
-            labels,
-        )
-
-        # 非候选 + 从未被任何相机观测到 -> FREE（视线外，一定无物体信息）。
-        never_seen = non_candidate & (~observed_any)
-        labels = torch.where(
-            never_seen,
             torch.full_like(labels, VolumeMarker.FREE),
             labels,
         )
