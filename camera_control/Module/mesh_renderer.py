@@ -37,6 +37,10 @@ class MeshRenderer(object):
         vertices_tensor: Optional[torch.Tensor] = None,
         enable_antialias: bool=True,
         safe_pixel_num: Optional[int]=None,
+        random_lighting: bool=False,
+        lighting: Optional[dict]=None,
+        light_seed: Optional[int]=None,
+        light_kwargs: Optional[dict]=None,
     ) -> List[Camera]:
         camera_list = sampleCameras(
             mesh=mesh,
@@ -59,6 +63,11 @@ class MeshRenderer(object):
                 safe_pixel_num=safe_pixel_num,
             )
 
+        # 每物体采样一套世界系随机光照，所有视图共享 -> 多视图光照一致
+        if lighting is None and random_lighting:
+            lighting = NVDiffRastRenderer.sampleRandomLighting(
+                space='world', seed=light_seed, **(light_kwargs or {}))
+
         print('[INFO][MeshRenderer::sampleRenderData]')
         print('\t start sample render data...')
         for i in trange(len(camera_list)):
@@ -71,6 +80,7 @@ class MeshRenderer(object):
                 bg_color=bg_color,
                 vertices_tensor=vertices_tensor,
                 enable_antialias=enable_antialias,
+                lighting=lighting,
             )
 
             camera.image_id = f'{i:06d}.png'
@@ -103,6 +113,10 @@ class MeshRenderer(object):
         focus_center_ratio: float=1.0,
         up_direction: Optional[List[float]] = [0, 0, 1],
         enable_antialias: bool=True,
+        random_lighting: bool=False,
+        lighting: Optional[dict]=None,
+        light_seed: Optional[int]=None,
+        light_kwargs: Optional[dict]=None,
     ) -> bool:
         camera_list = MeshRenderer.sampleRenderData(
             mesh=mesh,
@@ -118,6 +132,10 @@ class MeshRenderer(object):
             focus_center_ratio=focus_center_ratio,
             up_direction=up_direction,
             enable_antialias=enable_antialias,
+            random_lighting=random_lighting,
+            lighting=lighting,
+            light_seed=light_seed,
+            light_kwargs=light_kwargs,
         )
 
         # 处理有/无顶点颜色、纹理等多种情况
@@ -164,6 +182,10 @@ class MeshRenderer(object):
         focus_center_ratio: float=1.0,
         up_direction: Optional[List[float]] = [0, 0, 1],
         enable_antialias: bool=True,
+        random_lighting: bool=False,
+        lighting: Optional[dict]=None,
+        light_seed: Optional[int]=None,
+        light_kwargs: Optional[dict]=None,
     ) -> bool:
         if os.path.exists(save_data_folder_path):
             rmtree(save_data_folder_path)
@@ -192,6 +214,10 @@ class MeshRenderer(object):
             focus_center_ratio=focus_center_ratio,
             up_direction=up_direction,
             enable_antialias=enable_antialias,
+            random_lighting=random_lighting,
+            lighting=lighting,
+            light_seed=light_seed,
+            light_kwargs=light_kwargs,
         )
 
         first_camera = camera_list[0]
@@ -250,6 +276,10 @@ class MeshRenderer(object):
         focus_center_ratio: float=1.0,
         up_direction: Optional[List[float]] = [0, 0, 1],
         enable_antialias: bool=True,
+        random_lighting: bool=False,
+        lighting: Optional[dict]=None,
+        light_seed: Optional[int]=None,
+        light_kwargs: Optional[dict]=None,
     ) -> bool:
         camera_list = MeshRenderer.sampleRenderData(
             mesh=mesh,
@@ -265,6 +295,10 @@ class MeshRenderer(object):
             focus_center_ratio=focus_center_ratio,
             up_direction=up_direction,
             enable_antialias=enable_antialias,
+            random_lighting=random_lighting,
+            lighting=lighting,
+            light_seed=light_seed,
+            light_kwargs=light_kwargs,
         )
 
         images = []

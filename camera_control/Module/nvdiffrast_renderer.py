@@ -218,6 +218,51 @@ class NVDiffRastRenderer(object):
         return vertex_normals
 
     @staticmethod
+    def sampleRandomLighting(
+        num_lights: int = 2,
+        ambient_range=(0.2, 0.4),
+        diffuse_total_range=(0.7, 1.0),
+        space: str = 'world',
+        upper_bias: float = 0.35,
+        seed: Optional[int] = None,
+    ) -> dict:
+        """采样一套随机（灰度·多光源）光照参数。
+
+        返回 dict: {'lights': [{'direction': [x, y, z], 'intensity': float}, ...],
+                    'ambient': float, 'space': 'world'|'camera'}
+
+        - 灰度：每个方向光只贡献亮度 intensity * max(0, n·l)，不带颜色，保持 albedo 色调。
+        - space='world'：方向定义在世界系。配合「每物体采样一次、所有视图共享同一 dict」
+          即可获得多视图一致的光照（同一表面点在不同视角亮度一致）。
+        - 多个光源的 diffuse 强度之和归一化到 diffuse_total_range，避免过曝；第 0 个为主光
+          (key)，分得更大权重，其余为补光 (fill)。
+        - upper_bias>0 时把光源方向往「上方」(world +Z，与默认 up_direction=[0,0,1] 一致) 偏，
+          避免纯底光的非自然观感。
+        - 传 seed 可复现（每物体一套时建议用物体索引/名做 seed）。
+        """
+        rng = np.random.default_rng(seed)
+        n = max(1, int(num_lights))
+        ambient = float(rng.uniform(*ambient_range))
+        total = float(rng.uniform(*diffuse_total_range))
+
+        raw = rng.uniform(0.0, 1.0, size=n)
+        raw[0] += 1.0  # 主光权重更大
+        weights = raw / raw.sum() * total
+
+        lights = []
+        for i in range(n):
+            d = rng.normal(size=3)
+            d = d / (np.linalg.norm(d) + 1e-8)
+            if upper_bias > 0.0:
+                d[2] = abs(d[2]) + upper_bias  # 推向上半球
+                d = d / (np.linalg.norm(d) + 1e-8)
+            lights.append({
+                'direction': d.astype(float).tolist(),
+                'intensity': float(weights[i]),
+            })
+        return {'lights': lights, 'ambient': ambient, 'space': space}
+
+    @staticmethod
     def _computeShading(
         mesh: Union[trimesh.Trimesh, trimesh.Scene],
         camera: 'Camera',
@@ -228,8 +273,9 @@ class NVDiffRastRenderer(object):
         light_direction: Union[torch.Tensor, np.ndarray, list]=[1, 1, 1],
         ambient_weight: float = 0.3,
         diffuse_weight: float = 0.7,
+        lighting: Optional[dict] = None,
     ) -> torch.Tensor:
-        """计算 Lambertian shading 系数。
+        """计算 Lambertian shading 系数（lighting 非空时走多光源灰度，支持 world/camera 空间）。
 
         Args:
             mesh: 原始网格，用于读取预计算的 vertex_normals。
@@ -256,12 +302,33 @@ class NVDiffRastRenderer(object):
 
         normals_interp, _ = dr.interpolate(vertex_normals.unsqueeze(0), rast_out, faces)
         _debug_sync(camera.device, 'dr.interpolate[normals]')
-        normals_interp = torch.nn.functional.normalize(normals_interp, dim=-1, eps=1e-8)
+        normals_world = torch.nn.functional.normalize(normals_interp, dim=-1, eps=1e-8)
 
+        # --- 多光源·灰度 path（random_lighting / 显式 lighting spec 时启用）---
+        if lighting is not None:
+            space = lighting.get('space', 'world')
+            ambient = float(lighting.get('ambient', 0.3))
+            lights = lighting.get('lights', [])
+            # world 空间：法线本就在世界系，直接用 -> 多视图一致；
+            # camera 空间：转到相机系，光随相机走（与 legacy 一致）。
+            normals_used = (torch.matmul(normals_world, camera.R.T)
+                            if space == 'camera' else normals_world)
+            shading = torch.full(
+                normals_used.shape[:-1], ambient,
+                dtype=normals_used.dtype, device=camera.device,
+            )
+            for one in lights:
+                d = toTensor(one['direction'], torch.float32, camera.device)
+                d = torch.nn.functional.normalize(d, dim=0, eps=1e-8)
+                ndotl = torch.clamp(torch.sum(normals_used * d, dim=-1), min=0.0)
+                shading = shading + float(one.get('intensity', 1.0)) * ndotl
+            return torch.clamp(shading, 0.0, 1.0)
+
+        # --- legacy：单方向光（相机空间）---
         light_dir = toTensor(light_direction, torch.float32, camera.device)
         light_dir = torch.nn.functional.normalize(light_dir, dim=0, eps=1e-8)
 
-        normals_cam = torch.matmul(normals_interp, camera.R.T)
+        normals_cam = torch.matmul(normals_world, camera.R.T)
         diffuse = torch.clamp(
             torch.sum(normals_cam * light_dir, dim=-1), min=0.0, max=1.0
         )
@@ -623,6 +690,7 @@ class NVDiffRastRenderer(object):
         enable_lighting: bool = True,
         ambient_weight: float = 0.3,
         diffuse_weight: float = 0.7,
+        lighting: Optional[dict] = None,
         rasterize_dict: Optional[dict] = None,
     ) -> dict:
         """
@@ -662,7 +730,7 @@ class NVDiffRastRenderer(object):
             shading = NVDiffRastRenderer._computeShading(
                 mesh, camera, rast_out, faces, vertices,
                 vertices_tensor, light_direction,
-                ambient_weight, diffuse_weight,
+                ambient_weight, diffuse_weight, lighting,
             )
             image = image * shading.unsqueeze(-1)
 
@@ -671,6 +739,76 @@ class NVDiffRastRenderer(object):
         if enable_antialias and NVDiffRastRenderer._hasVisiblePixels(rast_out):
             image = dr.antialias(image.contiguous(), rast_out, vertices_clip, faces)
             _debug_sync(camera.device, 'dr.antialias[vertexColor]')
+
+        return {
+            'rgb': image[0],
+            'rasterize_output': rast_out[0],
+            'bary_derivs': rast_out_db[0] if rast_out_db is not None else torch.zeros_like(rast_out[0]),
+        }
+
+    @staticmethod
+    def renderMatcap(
+        mesh: Union[trimesh.Trimesh, trimesh.Scene],
+        camera: Camera,
+        matcap: Union[torch.Tensor, np.ndarray],
+        bg_color: list = [255, 255, 255],
+        vertices_tensor: Optional[torch.Tensor] = None,
+        enable_antialias: bool = True,
+        flip_x: bool = False,
+        flip_y: bool = True,
+        rasterize_dict: Optional[dict] = None,
+    ) -> dict:
+        """Matcap (material-capture) shading: sample a matcap image by the camera-space
+        surface normal. Reproduces the Blender solid-view matcap look (e.g. plaster/clay):
+        the whole "studio lighting + matte material" is baked into the matcap sphere image,
+        sampled as matcap[(1 - n.y)/2, (n.x + 1)/2].
+
+        Args:
+            matcap: [Hm, Wm, 3] image (np.ndarray or tensor), values in 0-1 or 0-255.
+            flip_x / flip_y: flip the sampling axes to match the matcap's convention.
+        """
+        import torch.nn.functional as F
+
+        if rasterize_dict is None:
+            rasterize_dict = NVDiffRastRenderer.rasterize(mesh, camera, vertices_tensor)
+        vertices = rasterize_dict['vertices']
+        faces = rasterize_dict['faces']
+        rast_out = rasterize_dict['rast_out']
+        rast_out_db = rasterize_dict['rast_out_db']
+        vertices_clip = rasterize_dict['vertices_clip']
+
+        if vertices_tensor is not None:
+            vn = NVDiffRastRenderer._computeVertexNormals(vertices, faces)
+        else:
+            mn = np.asarray(mesh.vertex_normals)
+            if mn.shape[0] == vertices.shape[0]:
+                vn = toTensor(mn, torch.float32, camera.device)
+            else:
+                vn = NVDiffRastRenderer._computeVertexNormals(vertices, faces)
+
+        normals_interp, _ = dr.interpolate(vn.unsqueeze(0), rast_out, faces)
+        normals_interp = torch.nn.functional.normalize(normals_interp, dim=-1, eps=1e-8)
+        n_cam = torch.matmul(normals_interp, camera.R.T)            # [1, H, W, 3] camera space
+
+        u = n_cam[..., 0]
+        v = n_cam[..., 1]
+        if flip_x:
+            u = -u
+        if flip_y:
+            v = -v
+        grid = torch.stack([u, v], dim=-1).clamp(-1.0, 1.0)        # [1, H, W, 2] in [-1, 1]
+
+        mat = toTensor(matcap, torch.float32, camera.device)
+        if mat.max() > 1.5:
+            mat = mat / 255.0
+        mat = mat[..., :3].permute(2, 0, 1).unsqueeze(0).contiguous()  # [1, 3, Hm, Wm]
+        samp = F.grid_sample(mat, grid, mode='bilinear',
+                             align_corners=False, padding_mode='border')  # [1, 3, H, W]
+        image = samp.permute(0, 2, 3, 1).contiguous()              # [1, H, W, 3]
+
+        image = NVDiffRastRenderer._applyBackground(image, rast_out, bg_color, camera.device)
+        if enable_antialias and NVDiffRastRenderer._hasVisiblePixels(rast_out):
+            image = dr.antialias(image.contiguous(), rast_out, vertices_clip, faces)
 
         return {
             'rgb': image[0],
@@ -713,6 +851,7 @@ class NVDiffRastRenderer(object):
         enable_lighting: bool = True,
         ambient_weight: float = 0.3,
         diffuse_weight: float = 0.7,
+        lighting: Optional[dict] = None,
         rasterize_dict: Optional[dict] = None,
     ) -> dict:
         """
@@ -741,6 +880,7 @@ class NVDiffRastRenderer(object):
                 enable_lighting=enable_lighting,
                 ambient_weight=ambient_weight,
                 diffuse_weight=diffuse_weight,
+                lighting=lighting,
                 rasterize_dict=rasterize_dict,
             )
 
@@ -785,7 +925,7 @@ class NVDiffRastRenderer(object):
             shading = NVDiffRastRenderer._computeShading(
                 mesh, camera, rast_out, faces, vertices,
                 vertices_tensor, light_direction,
-                ambient_weight, diffuse_weight,
+                ambient_weight, diffuse_weight, lighting,
             )
             image = image * shading.unsqueeze(-1)
 
@@ -941,10 +1081,21 @@ class NVDiffRastRenderer(object):
         enable_lighting: bool = True,
         ambient_weight: float = 0.3,
         diffuse_weight: float = 0.7,
+        lighting: Optional[dict] = None,
+        random_lighting: bool = False,
+        light_seed: Optional[int] = None,
+        light_kwargs: Optional[dict] = None,
         rasterize_dict: Optional[dict] = None,
     ) -> dict:
         """
         组合渲染接口，根据 render_types 一次性输出多种结果。
+
+        随机光照（灰度·多光源）：
+          - lighting: 显式光照 spec（见 sampleRandomLighting 返回格式）。给定时直接使用。
+          - random_lighting=True 且 lighting=None：本次调用内采样一套。注意——若在多视图循环里
+            逐相机调用 render()，每个视图会采到不同的光；要「每物体一套、所有视图共享」，
+            请在循环外采样一次（如 sampleRenderData 所做）并把同一 lighting 传进来。
+          - light_seed / light_kwargs: 透传给 sampleRandomLighting。
 
         render_types 可包含：
           - 'mask'  : 输出 'mask'（以及内部用于合成的光栅结果）
@@ -961,6 +1112,11 @@ class NVDiffRastRenderer(object):
         # 先确保有统一的光栅化结果，供所有子渲染函数复用
         if rasterize_dict is None:
             rasterize_dict = NVDiffRastRenderer.rasterize(mesh, camera, vertices_tensor)
+
+        # 本次调用内采样随机光照（多视图一致请在外部采样并通过 lighting 传入）
+        if lighting is None and random_lighting:
+            lighting = NVDiffRastRenderer.sampleRandomLighting(
+                seed=light_seed, **(light_kwargs or {}))
 
         results: dict = {}
 
@@ -988,6 +1144,7 @@ class NVDiffRastRenderer(object):
                 enable_lighting=enable_lighting,
                 ambient_weight=ambient_weight,
                 diffuse_weight=diffuse_weight,
+                lighting=lighting,
                 rasterize_dict=rasterize_dict,
             )
             results['rgb'] = tex_out['rgb']
