@@ -1069,6 +1069,64 @@ class NVDiffRastRenderer(object):
         }
 
     @staticmethod
+    def renderGray(
+        mesh: Union[trimesh.Trimesh, trimesh.Scene],
+        camera: Camera,
+        ibl: Optional[dict] = None,
+        material: Optional[dict] = None,
+        ibl_hdr_path: Optional[str] = None,
+        pbr_seed: Optional[int] = None,
+        exposure: float = 1.2,
+        bg_color: list = [255, 255, 255],
+        vertices_tensor: Optional[torch.Tensor] = None,
+        rasterize_dict: Optional[dict] = None,
+    ) -> dict:
+        """PBR + IBL 灰模渲染：Cook-Torrance GGX under an HDR env with a randomly
+        sampled gray material — TEXTURE-INDEPENDENT (the mesh's own texture/UV is
+        ignored). Thin wrapper over the atomic shader
+        ``camera_control.Method.pbr_ibl.render_pbr_ibl``.
+
+        IBL env + material are prepared once per object; they follow the same
+        convention as ``lighting`` in :meth:`render`:
+          - 显式传入 ``ibl`` (``prepare_ibl`` 的返回) + ``material`` (``sample_material``
+            的返回) 时直接使用 —— 多视图一致请在循环外各准备一次再传进来。
+          - 未传则按 ``ibl_hdr_path`` (.hdr/.exr) / ``pbr_seed`` 在本次调用内现建；注意
+            逐相机调用会各采一套材质，多视图将不一致（与 random_lighting 同理）。
+
+        Returns:
+            dict: rgb [H,W,3] in [0,1], rasterize_output [H,W,4], bary_derivs [H,W,4]
+        """
+        from camera_control.Method.pbr_ibl import (
+            prepare_ibl, sample_material, render_pbr_ibl,
+        )
+
+        if rasterize_dict is None:
+            rasterize_dict = NVDiffRastRenderer.rasterize(mesh, camera, vertices_tensor)
+
+        if ibl is None:
+            if not ibl_hdr_path:
+                raise ValueError(
+                    "renderGray needs either a prepared `ibl` or an `ibl_hdr_path` "
+                    "(.hdr/.exr) to build the IBL env from")
+            ibl = prepare_ibl(ibl_hdr_path, camera.device)
+        if material is None:
+            material = sample_material(pbr_seed, camera.device)
+
+        rgb = render_pbr_ibl(
+            mesh, camera, ibl, material,
+            exposure=exposure, rasterize_dict=rasterize_dict,
+            bg_color=bg_color, vertices_tensor=vertices_tensor,
+        )
+
+        rast_out = rasterize_dict['rast_out']
+        rast_out_db = rasterize_dict['rast_out_db']
+        return {
+            'rgb': rgb,
+            'rasterize_output': rast_out[0],
+            'bary_derivs': rast_out_db[0] if rast_out_db is not None else torch.zeros_like(rast_out[0]),
+        }
+
+    @staticmethod
     def render(
         mesh: Union[trimesh.Trimesh, trimesh.Scene],
         camera: Camera,
@@ -1085,6 +1143,11 @@ class NVDiffRastRenderer(object):
         random_lighting: bool = False,
         light_seed: Optional[int] = None,
         light_kwargs: Optional[dict] = None,
+        ibl: Optional[dict] = None,
+        material: Optional[dict] = None,
+        ibl_hdr_path: Optional[str] = None,
+        pbr_seed: Optional[int] = None,
+        pbr_exposure: float = 1.2,
         rasterize_dict: Optional[dict] = None,
     ) -> dict:
         """
@@ -1097,9 +1160,16 @@ class NVDiffRastRenderer(object):
             请在循环外采样一次（如 sampleRenderData 所做）并把同一 lighting 传进来。
           - light_seed / light_kwargs: 透传给 sampleRandomLighting。
 
+        PBR 灰模（render_types 含 'gray'）：
+          - ibl / material: 显式传入预备好的 IBL env (prepare_ibl) 与材质
+            (sample_material)。多视图一致请在外部各准备一次再传入（与 lighting 同理）。
+          - ibl_hdr_path / pbr_seed: 未传 ibl/material 时据此在本次调用内现建。
+          - pbr_exposure: PBR 曝光，透传给 renderGray。
+
         render_types 可包含：
           - 'mask'  : 输出 'mask'（以及内部用于合成的光栅结果）
           - 'rgb'   : 使用 renderTexture，输出 'rgb'
+          - 'gray'  : 使用 renderGray (PBR+IBL 灰模, 纹理无关)，输出 'gray'
           - 'depth' : 使用 renderDepth，输出 'depth' 与 'rgb_depth'
           - 'normal': 使用 renderNormal，输出
                       'normal_world', 'normal_camera',
@@ -1148,6 +1218,22 @@ class NVDiffRastRenderer(object):
                 rasterize_dict=rasterize_dict,
             )
             results['rgb'] = tex_out['rgb']
+
+        # 灰模渲染：PBR + IBL（灰材质，纹理无关），主 rgb 写到 'gray'
+        if 'gray' in render_types:
+            gray_out = NVDiffRastRenderer.renderGray(
+                mesh=mesh,
+                camera=camera,
+                ibl=ibl,
+                material=material,
+                ibl_hdr_path=ibl_hdr_path,
+                pbr_seed=pbr_seed,
+                exposure=pbr_exposure,
+                bg_color=bg_color,
+                vertices_tensor=vertices_tensor,
+                rasterize_dict=rasterize_dict,
+            )
+            results['gray'] = gray_out['rgb']
 
         # 深度渲染，depth + depth 可视化 rgb
         #FIXME: depth should not antialias
