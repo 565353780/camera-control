@@ -55,8 +55,13 @@ class DepthChannel(object):
         conf: Union[torch.Tensor, np.ndarray, list, None]=None,
     ) -> bool:
         depth = toTensor(depth, self.dtype, self.device)
+        # 兼容 (1, H, W) / (H, W, 1) 等带单通道维度的形状，squeeze 掉 size 为 1 的维度
+        if depth.ndim > 2:
+            depth = depth.squeeze()
         if depth.ndim == 1:
             raise ValueError("loadDepth: depth 至少需要 2 维 (H, W)")
+        if depth.ndim != 2:
+            raise ValueError(f"loadDepth: 无法将 depth 转换为 2 维 (H, W)，当前 shape: {tuple(depth.shape)}")
         h, w = int(depth.shape[0]), int(depth.shape[1])
         depth = depth.reshape(h, w)
         self.depth_height = h
