@@ -1090,25 +1090,25 @@ class NVDiffRastRenderer(object):
         convention as ``lighting`` in :meth:`render`:
           - 显式传入 ``ibl`` (``prepare_ibl`` 的返回) + ``material`` (``sample_material``
             的返回) 时直接使用 —— 多视图一致请在循环外各准备一次再传进来。
-          - 未传则按 ``ibl_hdr_path`` (.hdr/.exr) / ``pbr_seed`` 在本次调用内现建；注意
-            逐相机调用会各采一套材质，多视图将不一致（与 random_lighting 同理）。
+          - 未传则按 ``ibl_hdr_path`` (.hdr/.exr 文件或目录) / ``pbr_seed`` 在本次调用内现建；
+            ``ibl_hdr_path`` 亦可省略 —— 此时自动 fallback 到 camera-control 自带的内置 HDR
+            资产（无需外部设置）。注意逐相机调用会各采一套材质，多视图将不一致。
 
         Returns:
             dict: rgb [H,W,3] in [0,1], rasterize_output [H,W,4], bary_derivs [H,W,4]
         """
         from camera_control.Method.pbr_ibl import (
-            prepare_ibl, sample_material, render_pbr_ibl,
+            prepare_ibl, sample_material, render_pbr_ibl, resolveIblHdrPath,
         )
 
         if rasterize_dict is None:
             rasterize_dict = NVDiffRastRenderer.rasterize(mesh, camera, vertices_tensor)
 
         if ibl is None:
-            if not ibl_hdr_path:
-                raise ValueError(
-                    "renderGray needs either a prepared `ibl` or an `ibl_hdr_path` "
-                    "(.hdr/.exr) to build the IBL env from")
-            ibl = prepare_ibl(ibl_hdr_path, camera.device)
+            # 自包含：未显式给 ibl/ibl_hdr_path 时，自动 fallback 到 camera-control
+            # 自带的内置 HDR 资产（resolveIblHdrPath 内部按 __file__ 定位绝对路径）。
+            hdr_path = resolveIblHdrPath(ibl_hdr_path)
+            ibl = prepare_ibl(hdr_path, camera.device)
         if material is None:
             material = sample_material(pbr_seed, camera.device)
 
@@ -1163,7 +1163,8 @@ class NVDiffRastRenderer(object):
         PBR 灰模（render_types 含 'gray'）：
           - ibl / material: 显式传入预备好的 IBL env (prepare_ibl) 与材质
             (sample_material)。多视图一致请在外部各准备一次再传入（与 lighting 同理）。
-          - ibl_hdr_path / pbr_seed: 未传 ibl/material 时据此在本次调用内现建。
+          - ibl_hdr_path / pbr_seed: 未传 ibl/material 时据此在本次调用内现建；ibl_hdr_path
+            省略时自动 fallback 到 camera-control 自带的内置 HDR 资产（无需外部设置）。
           - pbr_exposure: PBR 曝光，透传给 renderGray。
 
         render_types 可包含：

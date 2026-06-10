@@ -10,22 +10,75 @@ Usage (precompute env once per scene, material once per object, then per camera)
     rgb = render_pbr_ibl(mesh, camera, ibl, mat, rasterize_dict=rd)   # [H,W,3] in [0,1]
 """
 import os
+import glob
 import math
+import random
 import numpy as np
 import cv2
 import torch
 import torch.nn.functional as F
 import nvdiffrast.torch as dr
 
+# 渲染器所属仓库自带的 IBL HDR 资产支持的扩展名（equirect HDR / EXR）。
+IBL_HDR_EXTENSIONS = ('.hdr', '.exr')
+
 
 def getIblDataDir() -> str:
-    """IBL HDR 资产目录（随 camera-control 仓库分发）。
+    """内置 IBL HDR 资产目录（随 camera-control 仓库分发）。
 
-    资产放在 ``camera_control/Data/ibl/``（渲染器所属仓库自带渲染资产），调用方
-    （如 flux-mv 的 trainer / sampler）统一从这里取，不再各自在自己仓库里存一份。
+    资产放在 ``camera_control/Data/ibl/``（渲染器所属仓库自带渲染资产）。库自身
+    通过 :func:`resolveIblHdrPath` 自动定位绝对路径并加载，调用方无需关心其位置。
+    路径基于本文件 ``__file__`` 推导，因此无论仓库被放在哪里、被谁导入都成立。
     """
     return os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'Data', 'ibl')
+
+
+def listIblHdrFiles(ibl_dir: str = None) -> list:
+    """列出目录下所有可用的 HDR/EXR 资产文件（绝对路径，已排序）。
+
+    *ibl_dir* 为 ``None`` 时使用内置资产目录 :func:`getIblDataDir`。
+    """
+    if ibl_dir is None:
+        ibl_dir = getIblDataDir()
+    files = []
+    for ext in IBL_HDR_EXTENSIONS:
+        files += glob.glob(os.path.join(ibl_dir, '*' + ext))
+    return sorted(os.path.abspath(p) for p in files)
+
+
+def resolveIblHdrPath(ibl_hdr_path=None, seed: int = None) -> str:
+    """把任意 IBL 入参解析成一个具体、可加载的 HDR 文件绝对路径。
+
+    这是渲染 PBR 灰模时定位环境贴图的单一原子入口，自包含、无外部依赖：
+
+      - ``None``        -> fallback 到内置资产目录（camera-control 自带），从中选一张。
+      - 目录            -> 从目录内的 ``.hdr/.exr`` 中选一张（随机环境增强）。
+      - 文件            -> 直接使用（校验存在性）。
+
+    目录场景下默认随机挑选（环境光增强）；传入 *seed* 可得到可复现的选择。
+
+    Returns:
+        str: HDR 文件的绝对路径。
+
+    Raises:
+        FileNotFoundError: 解析后找不到任何可用的 HDR/EXR 文件。
+    """
+    if not ibl_hdr_path:
+        ibl_hdr_path = getIblDataDir()
+
+    if os.path.isdir(ibl_hdr_path):
+        files = listIblHdrFiles(ibl_hdr_path)
+        if not files:
+            raise FileNotFoundError(
+                f"no {'/'.join(IBL_HDR_EXTENSIONS)} IBL asset found under {ibl_hdr_path!r}")
+        rng = random.Random(seed) if seed is not None else random
+        return rng.choice(files)
+
+    path = os.path.abspath(ibl_hdr_path)
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"IBL HDR file not found: {ibl_hdr_path!r}")
+    return path
 
 
 def load_env(path):
