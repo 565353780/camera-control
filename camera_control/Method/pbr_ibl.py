@@ -9,12 +9,23 @@ Usage (precompute env once per scene, material once per object, then per camera)
     mat = sample_material(seed, device)
     rgb = render_pbr_ibl(mesh, camera, ibl, mat, rasterize_dict=rd)   # [H,W,3] in [0,1]
 """
+import os
 import math
 import numpy as np
 import cv2
 import torch
 import torch.nn.functional as F
 import nvdiffrast.torch as dr
+
+
+def getIblDataDir() -> str:
+    """IBL HDR 资产目录（随 camera-control 仓库分发）。
+
+    资产放在 ``camera_control/Data/ibl/``（渲染器所属仓库自带渲染资产），调用方
+    （如 flux-mv 的 trainer / sampler）统一从这里取，不再各自在自己仓库里存一份。
+    """
+    return os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'Data', 'ibl')
 
 
 def load_env(path):
