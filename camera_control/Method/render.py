@@ -3,11 +3,17 @@ import numpy as np
 import open3d as o3d
 from typing import Union
 
+from typing import Tuple
+
 from camera_control.Config.visible import (
     VISIBLE_LABEL_UNKNOWN,
     VISIBLE_LABEL_VALID,
+    VISIBLE_LABEL_FREE_1N,
+    VISIBLE_LABEL_FREE_2N,
     VISIBLE_COLOR_VALID,
     VISIBLE_COLOR_UNKNOWN,
+    VISIBLE_COLOR_FREE_1N,
+    VISIBLE_COLOR_FREE_2N,
 )
 
 
@@ -139,6 +145,38 @@ def create_line_set(
     line_set.paint_uniform_color(color)
     return line_set
 
+def _tetraTemplate(radius: float) -> Tuple[np.ndarray, np.ndarray]:
+    """生成以原点为中心、外接球半径为 radius 的正四面体模板。
+
+    4 个顶点取自正方体的交替角点，天然构成正四面体；面索引顶点顺序使
+    外法线朝外，便于着色/法线计算。
+
+    Returns:
+        vertices: (4, 3) float64 顶点。
+        faces: (4, 3) int64 三角面索引。
+    """
+    tetra_unit = np.array(
+        [
+            [1.0, 1.0, 1.0],
+            [1.0, -1.0, -1.0],
+            [-1.0, 1.0, -1.0],
+            [-1.0, -1.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+    tetra_unit /= np.sqrt(3.0)  # 归一化到外接球半径 1
+    faces = np.array(
+        [
+            [0, 1, 2],
+            [0, 3, 1],
+            [0, 2, 3],
+            [1, 3, 2],
+        ],
+        dtype=np.int64,
+    )
+    return tetra_unit * radius, faces
+
+
 def toVisibleVolumeMesh(
     labels: Union[torch.Tensor, np.ndarray],
     tetra_radius_ratio: float = 0.25,
@@ -146,17 +184,19 @@ def toVisibleVolumeMesh(
     """
     将 VolumeMarker.markVisible 输出的 (R, R, R) 标签可视化为单个 TriangleMesh。
 
-    可视化方式：在每个 Valid / Unknown voxel 的 center 放一个四面体（4 顶点、
-    4 三角面），相比球面可把导出数据量减小一个数量级以上。四面体外接半径为
-    tetra_radius_ratio * (voxel 边长) = tetra_radius_ratio / R
-    （voxel 在 [-0.5, 0.5] 内均匀划分）。
-    - Valid   -> 绿色
-    - Unknown -> 灰色
+    可视化方式：在每个非 FREE voxel 的 center 放一个四面体（4 顶点、4 三角面），
+    相比球面可把导出数据量减小一个数量级以上。四面体外接半径以
+    tetra_radius_ratio * (voxel 边长) 为基准，按标签分级缩放，便于清晰分辨：
+    - Valid   -> 绿色，最大尺寸（1.0 倍基准）
+    - Unknown -> 灰色，中等尺寸（0.7 倍）
+    - Free_1N -> 浅蓝，较小尺寸（0.45 倍）
+    - Free_2N -> 浅橙，最小尺寸（0.28 倍）
     - Free    -> 不绘制
 
     Args:
-        labels: (R, R, R) int 张量，编码 UNKNOWN=-1, FREE=0, VALID=1。
-        tetra_radius_ratio: 四面体外接球半径相对 voxel 边长的比例。
+        labels: (R, R, R) int 张量，编码 UNKNOWN=-1, FREE=0, VALID=1,
+            FREE_1N=2, FREE_2N=3。
+        tetra_radius_ratio: 基准四面体外接球半径相对 voxel 边长的比例。
 
     Returns:
         合并后的单个 o3d.geometry.TriangleMesh。
@@ -173,50 +213,31 @@ def toVisibleVolumeMesh(
 
     R = int(labels.shape[0])
     voxel_size = 1.0 / R
-    radius = tetra_radius_ratio * voxel_size
 
     # voxel (i, j, k) 中心：-0.5 + (idx + 0.5) / R
     idx = (np.arange(R, dtype=np.float64) + 0.5) / R - 0.5
 
-    label_color_pairs = [
-        (VISIBLE_LABEL_VALID, np.array(VISIBLE_COLOR_VALID, dtype=np.float64)),
-        (VISIBLE_LABEL_UNKNOWN, np.array(VISIBLE_COLOR_UNKNOWN, dtype=np.float64)),
+    # 配置驱动：(label, color, radius_ratio_scale)，FREE 不绘制。
+    label_render_configs = [
+        (VISIBLE_LABEL_VALID, VISIBLE_COLOR_VALID, 1.0),
+        (VISIBLE_LABEL_UNKNOWN, VISIBLE_COLOR_UNKNOWN, 0.7),
+        (VISIBLE_LABEL_FREE_1N, VISIBLE_COLOR_FREE_1N, 0.45),
+        (VISIBLE_LABEL_FREE_2N, VISIBLE_COLOR_FREE_2N, 0.28),
     ]
-
-    # 正四面体模板：以 voxel center 为中心、外接球半径为 radius 的 4 个顶点。
-    # 4 个顶点取自正方体的交替角点，天然构成正四面体；中心即原点。
-    tetra_unit = np.array(
-        [
-            [1.0, 1.0, 1.0],
-            [1.0, -1.0, -1.0],
-            [-1.0, 1.0, -1.0],
-            [-1.0, -1.0, 1.0],
-        ],
-        dtype=np.float64,
-    )
-    tetra_unit /= np.sqrt(3.0)  # 归一化到外接球半径 1
-    template_vertices = tetra_unit * radius  # (4, 3)
-    # 4 个三角面（顶点顺序使外法线朝外，便于着色/法线计算）。
-    template_faces = np.array(
-        [
-            [0, 1, 2],
-            [0, 3, 1],
-            [0, 2, 3],
-            [1, 3, 2],
-        ],
-        dtype=np.int64,
-    )
-    num_template_vertices = template_vertices.shape[0]
 
     all_vertices = []
     all_faces = []
     all_colors = []
     vertex_offset = 0
 
-    for label_value, color in label_color_pairs:
+    for label_value, color, radius_scale in label_render_configs:
         ii, jj, kk = np.where(labels == label_value)
         if ii.size == 0:
             continue
+
+        radius = radius_scale * tetra_radius_ratio * voxel_size
+        template_vertices, template_faces = _tetraTemplate(radius)
+        num_template_vertices = template_vertices.shape[0]
 
         centers = np.stack([idx[ii], idx[jj], idx[kk]], axis=-1)  # (M, 3)
         M = centers.shape[0]
@@ -225,14 +246,16 @@ def toVisibleVolumeMesh(
         verts = template_vertices[None, :, :] + centers[:, None, :]
         verts = verts.reshape(-1, 3)
 
-        # (M, F, 3): 每份面索引加上对应球的顶点偏移。
+        # (M, F, 3): 每份面索引加上对应四面体的顶点偏移。
         face_offsets = (
             vertex_offset + np.arange(M, dtype=np.int64) * num_template_vertices
         )
         faces = template_faces[None, :, :] + face_offsets[:, None, None]
         faces = faces.reshape(-1, 3)
 
-        colors = np.tile(color, (verts.shape[0], 1))
+        colors = np.tile(
+            np.asarray(color, dtype=np.float64), (verts.shape[0], 1),
+        )
 
         all_vertices.append(verts)
         all_faces.append(faces)

@@ -10,6 +10,9 @@ from camera_control.Config.visible import (
     VISIBLE_LABEL_UNKNOWN,
     VISIBLE_LABEL_FREE,
     VISIBLE_LABEL_VALID,
+    VISIBLE_LABEL_FREE_1N,
+    VISIBLE_LABEL_FREE_2N,
+    visibleLabelFreeKN,
 )
 from camera_control.Module.camera import Camera
 
@@ -18,9 +21,16 @@ class VolumeMarker(object):
     UNKNOWN: int = VISIBLE_LABEL_UNKNOWN
     FREE: int = VISIBLE_LABEL_FREE
     VALID: int = VISIBLE_LABEL_VALID
+    FREE_1N: int = VISIBLE_LABEL_FREE_1N
+    FREE_2N: int = VISIBLE_LABEL_FREE_2N
 
     def __init__(self) -> None:
         return
+
+    @staticmethod
+    def freeLabelKN(k: int) -> int:
+        """FREE_KN 标签编码（K >= 1），转发 Config.visible.visibleLabelFreeKN。"""
+        return visibleLabelFreeKN(k)
 
     # ------------------------------------------------------------------
     # 体素 / 网格基础原子函数
@@ -766,6 +776,97 @@ class VolumeMarker(object):
         return visible_flat.reshape(R, R, R), free_any, observed_any
 
     # ------------------------------------------------------------------
+    # L1 距离场 / FREE_KN 分层（高效并行原子函数）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _dilateMask6(mask: torch.Tensor) -> torch.Tensor:
+        """对 (R, R, R) bool mask 做一次 6-邻域膨胀，返回新 mask。
+
+        实现为 6 个方向的切片平移按位或，纯张量运算，无 padding 拷贝，
+        CPU / GPU 通用且全并行。
+        """
+        out = mask.clone()
+        out[1:, :, :] |= mask[:-1, :, :]
+        out[:-1, :, :] |= mask[1:, :, :]
+        out[:, 1:, :] |= mask[:, :-1, :]
+        out[:, :-1, :] |= mask[:, 1:, :]
+        out[:, :, 1:] |= mask[:, :, :-1]
+        out[:, :, :-1] |= mask[:, :, 1:]
+        return out
+
+    @staticmethod
+    def computeL1DistanceToMask(
+        source_mask: torch.Tensor,
+        max_distance: int,
+    ) -> torch.Tensor:
+        """计算每个 voxel 到 source_mask 的 L1（6-邻域逐步）距离，截断于 max_distance。
+
+        第一性原理：L1 距离为 k 的 voxel 集合 = source 做 k 次 6-邻域膨胀的
+        波前（新增层）。逐层膨胀即逐层写入距离，每层一次张量平移 + 逻辑或，
+        复杂度 O(max_distance * R^3)，无任何逐 voxel Python 循环，K 任意可扩展。
+
+        Args:
+            source_mask: (R, R, R) bool，距离源（距离 0）。
+            max_distance: 距离上限（>= 0）。
+
+        Returns:
+            (R, R, R) int64 距离场：source 处为 0，波前层依次为 1..max_distance，
+            超出 max_distance 的 voxel 为 -1（哨兵）。
+        """
+        if max_distance < 0:
+            raise ValueError(
+                '[ERROR][VolumeMarker::computeL1DistanceToMask] '
+                f'max_distance must be >= 0, got {max_distance}'
+            )
+
+        distance = torch.full_like(source_mask, -1, dtype=torch.int64)
+        distance[source_mask] = 0
+
+        reached = source_mask
+        for k in range(1, max_distance + 1):
+            new = VolumeMarker._dilateMask6(reached) & (~reached)
+            if not bool(new.any()):
+                break
+            distance[new] = k
+            reached = reached | new
+
+        return distance
+
+    @staticmethod
+    def markFreeNeighborLevels(
+        labels: torch.Tensor,
+        max_k: int = 2,
+    ) -> torch.Tensor:
+        """把 FREE voxel 按到 VALID 的 L1 距离分层改写为 FREE_KN（K=1..max_k）。
+
+        只改写 labels == FREE 且距离恰为 k 的 voxel 为 freeLabelKN(k)；
+        UNKNOWN / VALID 不动，距离 > max_k 的 FREE voxel 保持 FREE。
+
+        Args:
+            labels: (R, R, R) int64 标签场（UNKNOWN/FREE/VALID 编码）。
+            max_k: 分层上限（>= 0，0 表示不分层，原样返回副本）。
+
+        Returns:
+            (R, R, R) int64 新标签场（不修改输入）。
+        """
+        labels = labels.clone()
+        if max_k <= 0:
+            return labels
+
+        valid_mask = labels == VolumeMarker.VALID
+        if not bool(valid_mask.any()):
+            return labels
+
+        distance = VolumeMarker.computeL1DistanceToMask(valid_mask, max_k)
+
+        free_mask = labels == VolumeMarker.FREE
+        for k in range(1, max_k + 1):
+            level = free_mask & (distance == k)
+            labels[level] = VolumeMarker.freeLabelKN(k)
+
+        return labels
+
+    # ------------------------------------------------------------------
     # FREE / UNKNOWN 判定（非候选体素）
     # ------------------------------------------------------------------
     @staticmethod
@@ -814,6 +915,7 @@ class VolumeMarker(object):
         np.ndarray,
         torch.Tensor,
     ]] = None,
+        free_neighbor_levels: int = 2,
     ) -> torch.Tensor:
         """基于候选占据 + 立方体 mesh 渲染对空间体素打标签。
 
@@ -843,8 +945,13 @@ class VolumeMarker(object):
                - 非候选且从未被任何相机观测到 -> FREE（无物体信息）；
                - 其余非候选（被遮挡、无 FREE 证据）-> UNKNOWN。
              若不存在任何候选体素，则空间无占据，整体为 FREE。
+          5. FREE_KN 分层（markFreeNeighborLevels）：FREE voxel 中到最近
+             VALID 的 L1 距离恰为 k（k=1..free_neighbor_levels）的改写为
+             FREE_KN = VALID + k；其余 FREE 保持不变。free_neighbor_levels=0
+             可关闭，调成 3/4 即得 FREE_3N/4N。
 
-        返回: (R, R, R) 的 int64 tensor，编码 UNKNOWN=-1, FREE=0, VALID=1。
+        返回: (R, R, R) 的 int64 tensor，编码 UNKNOWN=-1, FREE=0, VALID=1,
+        FREE_1N=2, FREE_2N=3（FREE_KN = VALID + K）。
         """
         R = VolumeMarker._requirePositiveResolution(volume_resolution, 'markVisible')
 
@@ -900,6 +1007,11 @@ class VolumeMarker(object):
             visible_candidate,
             torch.full_like(labels, VolumeMarker.VALID),
             labels,
+        )
+
+        # --- 5. FREE_KN 分层 ---
+        labels = VolumeMarker.markFreeNeighborLevels(
+            labels, max_k=free_neighbor_levels,
         )
 
         return labels

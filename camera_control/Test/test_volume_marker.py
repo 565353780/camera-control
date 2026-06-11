@@ -471,6 +471,93 @@ class TestVoxelizeBoundary(unittest.TestCase):
         self.assertTrue(bool(occ[0, 0, 0]))
 
 
+class TestFreeNeighborLevels(unittest.TestCase):
+    """L1 距离场与 FREE_KN 分层改标（纯逻辑，CPU）。"""
+
+    def test_dilate_mask6_single_voxel(self):
+        R = 4
+        mask = torch.zeros((R, R, R), dtype=torch.bool)
+        mask[1, 1, 1] = True
+        out = VolumeMarker._dilateMask6(mask)
+        # 自身 + 6 个邻居。
+        self.assertEqual(int(out.sum().item()), 7)
+        for d in ((0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0),
+                  (0, -1, 0), (0, 0, 1), (0, 0, -1)):
+            self.assertTrue(bool(out[1 + d[0], 1 + d[1], 1 + d[2]]))
+
+    def test_dilate_mask6_respects_boundaries(self):
+        R = 3
+        mask = torch.zeros((R, R, R), dtype=torch.bool)
+        mask[0, 0, 0] = True
+        out = VolumeMarker._dilateMask6(mask)
+        # 角点只有 3 个有效邻居。
+        self.assertEqual(int(out.sum().item()), 4)
+
+    def test_compute_l1_distance_to_mask(self):
+        R = 5
+        source = torch.zeros((R, R, R), dtype=torch.bool)
+        source[2, 2, 2] = True
+        dist = VolumeMarker.computeL1DistanceToMask(source, 2)
+        self.assertEqual(dist.dtype, torch.int64)
+        self.assertEqual(int(dist[2, 2, 2].item()), 0)
+        self.assertEqual(int(dist[3, 2, 2].item()), 1)
+        self.assertEqual(int(dist[2, 1, 2].item()), 1)
+        self.assertEqual(int(dist[4, 2, 2].item()), 2)
+        self.assertEqual(int(dist[3, 3, 2].item()), 2)
+        # 超过 max_distance -> -1 哨兵。
+        self.assertEqual(int(dist[2, 2, 0].item()), 2)
+        self.assertEqual(int(dist[0, 0, 0].item()), -1)
+
+    def test_compute_l1_distance_negative_max_raises(self):
+        source = torch.zeros((2, 2, 2), dtype=torch.bool)
+        with self.assertRaises(ValueError):
+            VolumeMarker.computeL1DistanceToMask(source, -1)
+
+    def test_mark_free_neighbor_levels_basic(self):
+        R = 5
+        labels = torch.full((R, R, R), VolumeMarker.FREE, dtype=torch.int64)
+        labels[2, 2, 2] = VolumeMarker.VALID
+        # 与 VALID 距离 1 的位置设一个 UNKNOWN，确认不被改写。
+        labels[2, 2, 3] = VolumeMarker.UNKNOWN
+
+        out = VolumeMarker.markFreeNeighborLevels(labels, max_k=2)
+
+        # VALID / UNKNOWN 不动。
+        self.assertEqual(int(out[2, 2, 2].item()), VolumeMarker.VALID)
+        self.assertEqual(int(out[2, 2, 3].item()), VolumeMarker.UNKNOWN)
+        # 距离 1 的 FREE -> FREE_1N。
+        self.assertEqual(int(out[3, 2, 2].item()), VolumeMarker.FREE_1N)
+        self.assertEqual(int(out[2, 1, 2].item()), VolumeMarker.FREE_1N)
+        # 距离 2 的 FREE -> FREE_2N（含被 UNKNOWN 挡在中间的纯 L1 路径）。
+        self.assertEqual(int(out[4, 2, 2].item()), VolumeMarker.FREE_2N)
+        self.assertEqual(int(out[2, 2, 4].item()), VolumeMarker.FREE_2N)
+        # 距离 > 2 的 FREE 保持 FREE。
+        self.assertEqual(int(out[0, 0, 0].item()), VolumeMarker.FREE)
+        # 输入不被原地修改。
+        self.assertEqual(int(labels[3, 2, 2].item()), VolumeMarker.FREE)
+
+    def test_mark_free_neighbor_levels_zero_k_is_identity(self):
+        R = 3
+        labels = torch.full((R, R, R), VolumeMarker.FREE, dtype=torch.int64)
+        labels[1, 1, 1] = VolumeMarker.VALID
+        out = VolumeMarker.markFreeNeighborLevels(labels, max_k=0)
+        self.assertTrue(torch.equal(out, labels))
+
+    def test_mark_free_neighbor_levels_no_valid_is_identity(self):
+        R = 3
+        labels = torch.full((R, R, R), VolumeMarker.FREE, dtype=torch.int64)
+        labels[0, 0, 0] = VolumeMarker.UNKNOWN
+        out = VolumeMarker.markFreeNeighborLevels(labels, max_k=2)
+        self.assertTrue(torch.equal(out, labels))
+
+    def test_free_label_kn_encoding(self):
+        self.assertEqual(VolumeMarker.freeLabelKN(1), VolumeMarker.FREE_1N)
+        self.assertEqual(VolumeMarker.freeLabelKN(2), VolumeMarker.FREE_2N)
+        self.assertEqual(VolumeMarker.freeLabelKN(3), VolumeMarker.VALID + 3)
+        with self.assertRaises(ValueError):
+            VolumeMarker.freeLabelKN(0)
+
+
 class TestMarkVisibleNoCamera(unittest.TestCase):
     def test_empty_camera_list_returns_all_free(self):
         R = 5

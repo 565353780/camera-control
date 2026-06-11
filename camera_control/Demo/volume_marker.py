@@ -1,16 +1,14 @@
 import numpy as np
 import open3d as o3d
 
-from camera_control.Method.io import loadMeshFile
 from camera_control.Method.render import toVisibleVolumeMesh
 from camera_control.Module.camera_convertor import CameraConvertor
 from camera_control.Module.volume_marker import VolumeMarker
 
 
 def demo_mark_volume():
-    colmap_data_folder_path = '/home/lichanghao/chLi/MMVideoReconV1/JJ/20260427_164113_431091/08_colmap_gs_1024/'
+    colmap_data_folder_path = '/home/lichanghao/chLi/MMVideoReconV1/JJ/20260427_164113_431091/08_colmap_gs/'
     gs_file_path = '/home/lichanghao/chLi/MMVideoReconV1/JJ/20260427_164113_431091/gs_normalized.ply'
-    mesh_file_path = '/home/lichanghao/chLi/MMVideoReconV1/JJ/20260427_164113_431091/gen_mesh_s1_post_deform.glb'
 
     camera_list = CameraConvertor.loadColmapDataFolder(colmap_data_folder_path)
 
@@ -21,25 +19,14 @@ def demo_mark_volume():
 
     visible_volume = VolumeMarker.markVisible(
         camera_list=camera_list,
-        volume_resolution=64,
+        volume_resolution=16,
         geometry=gs_points,
+        free_neighbor_levels=2,
     )
 
     mesh = toVisibleVolumeMesh(visible_volume)
 
     o3d.io.write_triangle_mesh(colmap_data_folder_path + 'vis_volume_label_pcd.ply', mesh)
-
-    mesh = loadMeshFile(mesh_file_path)
-
-    visible_volume = VolumeMarker.markVisible(
-        camera_list=camera_list,
-        volume_resolution=64,
-        geometry=mesh,
-    )
-
-    mesh = toVisibleVolumeMesh(visible_volume)
-
-    o3d.io.write_triangle_mesh(colmap_data_folder_path + 'vis_volume_label_mesh.ply', mesh)
 
     for i in range(len(camera_list)):
         visible_volume = VolumeMarker.markVisible(
