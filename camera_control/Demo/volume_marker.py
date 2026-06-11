@@ -21,7 +21,6 @@ def demo_mark_volume():
         camera_list=camera_list,
         volume_resolution=16,
         geometry=gs_points,
-        free_neighbor_levels=2,
     )
 
     mesh = toVisibleVolumeMesh(visible_volume)
