@@ -135,6 +135,29 @@ class Camera(
         DepthChannel.update(self)
         return True
 
+    def _syncNormalCameraFromWorld(self) -> bool:
+        """
+        由世界系法线派生相机系法线：n_camera = n_world @ camera2world[:3,:3]
+        （行向量约定，与 CameraData.toDirectionsCamera 一致）。
+        normal map 形状为 (H, W, 3)，最后一维是法线分量，可直接右乘 3x3 旋转矩阵。
+        """
+        if self.normal_world is None:
+            return True
+
+        self.normal_camera = self.toDirectionsCamera(self.normal_world)
+        return True
+
+    def _syncNormalWorldFromCamera(self) -> bool:
+        """
+        由相机系法线派生世界系法线：n_world = n_camera @ world2camera[:3,:3]
+        （行向量约定，与 CameraData.toDirectionsWorld 一致）。
+        """
+        if self.normal_camera is None:
+            return True
+
+        self.normal_world = self.toDirectionsWorld(self.normal_camera)
+        return True
+
     def setImageSize(
         self,
         width: int,

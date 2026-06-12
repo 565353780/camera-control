@@ -18,14 +18,28 @@ class NormalCameraChannel(BaseNormalChannel):
     def loadNormalCamera(
         self,
         normal: Union[torch.Tensor, np.ndarray, list],
+        is_update_normal_world: bool = True,
     ) -> bool:
-        return BaseNormalChannel._load_normal(self, _ATTR, normal)
+        if not BaseNormalChannel._load_normal(self, _ATTR, normal):
+            return False
+        if is_update_normal_world:
+            return self._syncNormalWorldFromCamera()
+        return True
 
     def loadNormalCameraFile(
         self,
         normal_file_path: str,
+        is_update_normal_world: bool = True,
     ) -> bool:
-        return BaseNormalChannel._load_normal_file(self, _ATTR, normal_file_path)
+        if not BaseNormalChannel._load_normal_file(self, _ATTR, normal_file_path):
+            return False
+        if is_update_normal_world:
+            return self._syncNormalWorldFromCamera()
+        return True
+
+    def _syncNormalWorldFromCamera(self) -> bool:
+        """由 normal_camera 派生 normal_world，需 Camera 同时混入 NormalWorldChannel。"""
+        return True
 
     def toNormalCameraUV(self) -> torch.Tensor:
         return BaseNormalChannel._to_normal_uv(self, _ATTR)
