@@ -167,9 +167,53 @@ def sample_material(seed, device):
 
 
 @torch.no_grad()
+def shade_pbr_ibl(normal_world, view_dir, ibl, material, exposure=1.2):
+    """Atomic per-pixel Cook-Torrance GGX + IBL shader (geometry-source agnostic).
+
+    纯逐像素着色原子函数：不关心几何缓冲来自哪里（mesh 光栅化插值、GS splatting
+    累积法线、深度图反投影均可），只要给出世界空间单位法线与单位视线方向即可，
+    因此 mesh 灰模与 GS 灰模可共享同一套着色数学，保证风格一致。
+
+    Args:
+        normal_world: [H,W,3] unit world-space normals.
+        view_dir:     [H,W,3] unit world-space view dirs (surface -> camera).
+        ibl:      :func:`prepare_ibl` 的返回。
+        material: :func:`sample_material` 的返回。
+        exposure: 曝光系数。
+
+    Returns:
+        [H,W,3] sRGB in [0,1]。不做背景合成——由调用方按自身的 mask/alpha 合成。
+    """
+    dev = normal_world.device
+    Nw, Vd = normal_world, view_dir
+    NoV = torch.clamp((Nw * Vd).sum(-1, keepdim=True), 1e-4, 1.0)
+    R = F.normalize(2 * (Nw * Vd).sum(-1, keepdim=True) * Nw - Vd, dim=-1)
+
+    base = material['base_color']; rough = material['roughness']
+    metal = material['metallic']; F0 = material['F0']
+
+    irr = _sh_irradiance(Nw, ibl['L_sh'])
+    diffuse = (1 - metal) * base.view(1, 1, 3) * irr / math.pi
+
+    n_lvl = ibl['n_lvl']
+    lvl = float(rough) * (n_lvl - 1)
+    lo = int(math.floor(lvl)); hi = min(lo + 1, n_lvl - 1); fr = lvl - lo
+    prefilt = _sample(ibl['spec_mips'][lo], R) * (1 - fr) + _sample(ibl['spec_mips'][hi], R) * fr
+    sc, bs = _env_brdf_approx(rough * torch.ones_like(NoV[..., 0]), NoV[..., 0], dev)
+    specular = prefilt * (F0.view(1, 1, 3) * sc.unsqueeze(-1) + bs.unsqueeze(-1))
+
+    color = (diffuse + specular) * exposure
+    return torch.clamp(_aces(color), 0, 1) ** (1 / 2.2)         # [H,W,3] in [0,1], sRGB
+
+
+@torch.no_grad()
 def render_pbr_ibl(mesh, camera, ibl, material, exposure=1.2,
                    rasterize_dict=None, bg_color=(255, 255, 255), vertices_tensor=None):
-    """Render one view with PBR+IBL. Returns rgb [H,W,3] float in [0,1] (object on bg_color)."""
+    """Render one view with PBR+IBL. Returns rgb [H,W,3] float in [0,1] (object on bg_color).
+
+    Mesh 路径包装器：光栅化得到法线/位置/掩码缓冲，再调用原子着色器
+    :func:`shade_pbr_ibl` 完成逐像素着色并合成背景。
+    """
     from camera_control.Module.nvdiffrast_renderer import NVDiffRastRenderer
     from camera_control.Method.data import toTensor
 
@@ -192,24 +236,8 @@ def render_pbr_ibl(mesh, camera, ibl, material, exposure=1.2,
 
     cam_pos = camera.pos.to(dev).float().view(1, 1, 3)
     Vd = F.normalize(cam_pos - Pw, dim=-1)
-    NoV = torch.clamp((Nw * Vd).sum(-1, keepdim=True), 1e-4, 1.0)
-    R = F.normalize(2 * (Nw * Vd).sum(-1, keepdim=True) * Nw - Vd, dim=-1)
 
-    base = material['base_color']; rough = material['roughness']
-    metal = material['metallic']; F0 = material['F0']
-
-    irr = _sh_irradiance(Nw, ibl['L_sh'])
-    diffuse = (1 - metal) * base.view(1, 1, 3) * irr / math.pi
-
-    n_lvl = ibl['n_lvl']
-    lvl = float(rough) * (n_lvl - 1)
-    lo = int(math.floor(lvl)); hi = min(lo + 1, n_lvl - 1); fr = lvl - lo
-    prefilt = _sample(ibl['spec_mips'][lo], R) * (1 - fr) + _sample(ibl['spec_mips'][hi], R) * fr
-    sc, bs = _env_brdf_approx(rough * torch.ones_like(NoV[..., 0]), NoV[..., 0], dev)
-    specular = prefilt * (F0.view(1, 1, 3) * sc.unsqueeze(-1) + bs.unsqueeze(-1))
-
-    color = (diffuse + specular) * exposure
-    ldr = torch.clamp(_aces(color), 0, 1) ** (1 / 2.2)          # [H,W,3] in [0,1], sRGB
+    ldr = shade_pbr_ibl(Nw, Vd, ibl, material, exposure=exposure)
 
     bg = toTensor(list(bg_color), torch.float32, dev).view(1, 1, 3) / 255.0
     rgb = torch.where(mask > 0, ldr, bg)
