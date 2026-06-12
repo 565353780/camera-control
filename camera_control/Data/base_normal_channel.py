@@ -29,7 +29,11 @@ class BaseNormalChannel(object):
         attr_name: str,
         normal: Union[torch.Tensor, np.ndarray, list],
     ) -> bool:
-        setattr(obj, attr_name, toTensor(normal, obj.dtype, obj.device))
+        # 渲染/插值在物体边缘处可能产生超出 [-1, 1] 的非法法线值，
+        # 这些值经 *0.5+0.5 -> *255 -> uint8 可视化时会发生回绕，
+        # 在边界形成一薄层错误颜色，故在读取时统一截断到 [-1, 1]。
+        normal_tensor = toTensor(normal, obj.dtype, obj.device).clamp(-1.0, 1.0)
+        setattr(obj, attr_name, normal_tensor)
         return True
 
     @staticmethod
