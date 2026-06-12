@@ -1,3 +1,4 @@
+import os
 import torch
 import numpy as np
 from typing import List, Union
@@ -42,6 +43,20 @@ class BaseNormalChannel(object):
         attr_name: str,
         normal_file_path: str,
     ) -> bool:
+        # normal 保存时区分两种格式：
+        #   .npy 保存的是原始浮点法线向量（范围 [-1, 1]），直接 np.load 即可；
+        #   图片格式（png/jpg 等）保存的是可视化结果（*0.5+0.5 -> *255 -> uint8，BGR），
+        #   需要反向解码 BGR->RGB、/255 还原到 [0,1]，再 *2-1 还原到 [-1,1]。
+        if not os.path.exists(normal_file_path):
+            print(f'[ERROR][{type(obj).__name__}::loadNormalFile]')
+            print('\t normal file not exist!')
+            print('\t normal_file_path:', normal_file_path)
+            return False
+
+        if os.path.splitext(normal_file_path)[1].lower() == '.npy':
+            normal = np.load(normal_file_path).astype(np.float32)
+            return BaseNormalChannel._load_normal(obj, attr_name, normal)
+
         normal = loadImage(normal_file_path)
 
         if normal is None:
@@ -49,7 +64,9 @@ class BaseNormalChannel(object):
             print('\t loadImage failed!')
             return False
 
+        # 图片是可视化编码，先 BGR->RGB、归一化到 [0,1]，再还原到 [-1,1]。
         normal = normal[..., ::-1].astype(np.float32) / 255.0
+        normal = normal * 2.0 - 1.0
 
         return BaseNormalChannel._load_normal(obj, attr_name, normal)
 
