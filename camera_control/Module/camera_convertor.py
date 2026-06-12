@@ -1543,7 +1543,8 @@ class CameraConvertor(object):
         image_folder_name: str='images',
         mask_folder_name: str='masks',
         depth_folder_name: str='depths',
-        normal_folder_name: str='normals',
+        normal_camera_folder_name: str='normal_cameras',
+        normal_world_folder_name: str='normal_worlds',
     ) -> List[Camera]:
         """
         从 COLMAP 数据目录加载相机列表。
@@ -1555,7 +1556,8 @@ class CameraConvertor(object):
         image_folder_path = colmap_data_folder_path + image_folder_name + '/'
         mask_folder_path = colmap_data_folder_path + mask_folder_name + '/'
         depth_folder_path = colmap_data_folder_path + depth_folder_name + '/'
-        normal_folder_path = colmap_data_folder_path + normal_folder_name + '/'
+        normal_camera_folder_path = colmap_data_folder_path + normal_camera_folder_name + '/'
+        normal_world_folder_path = colmap_data_folder_path + normal_world_folder_name + '/'
 
         camera_intrinsic_file_path = colmap_data_folder_path + 'sparse/0/cameras.txt'
         camera_extrinsic_file_path = colmap_data_folder_path + 'sparse/0/images.txt'
@@ -1661,12 +1663,32 @@ class CameraConvertor(object):
                     print('\t loadDepthFile failed!')
                     print('\t depth file path:', depth_file_path)
 
-            normal_file_path = normal_folder_path + image_filename
-            if os.path.exists(normal_file_path):
-                if not camera.loadNormalWorldFile(normal_file_path):
+            normal_camera_file_path = normal_camera_folder_path + image_basename + '.npy'
+            normal_world_file_path = normal_world_folder_path + image_basename + '.npy'
+            has_normal_camera = os.path.exists(normal_camera_file_path)
+            has_normal_world = os.path.exists(normal_world_file_path)
+            if has_normal_camera and has_normal_world:
+                # 两个 normal 均存在，分别加载且不互相同步
+                if not camera.loadNormalCameraFile(normal_camera_file_path, is_update_normal_world=False):
+                    print('[WARN][CameraConvertor::loadColmapDataFolder]')
+                    print('\t loadNormalCameraFile failed!')
+                    print('\t normal camera file path:', normal_camera_file_path)
+                if not camera.loadNormalWorldFile(normal_world_file_path, is_update_normal_camera=False):
                     print('[WARN][CameraConvertor::loadColmapDataFolder]')
                     print('\t loadNormalWorldFile failed!')
-                    print('\t normal file path:', normal_file_path)
+                    print('\t normal world file path:', normal_world_file_path)
+            elif has_normal_camera:
+                # 仅 normal_camera 存在，同步派生 normal_world
+                if not camera.loadNormalCameraFile(normal_camera_file_path, is_update_normal_world=True):
+                    print('[WARN][CameraConvertor::loadColmapDataFolder]')
+                    print('\t loadNormalCameraFile failed!')
+                    print('\t normal camera file path:', normal_camera_file_path)
+            elif has_normal_world:
+                # 仅 normal_world 存在，同步派生 normal_camera
+                if not camera.loadNormalWorldFile(normal_world_file_path, is_update_normal_camera=True):
+                    print('[WARN][CameraConvertor::loadColmapDataFolder]')
+                    print('\t loadNormalWorldFile failed!')
+                    print('\t normal world file path:', normal_world_file_path)
 
             camera.image_id = image_filename
             return camera
