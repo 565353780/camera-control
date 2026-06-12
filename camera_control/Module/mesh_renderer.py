@@ -21,6 +21,74 @@ class MeshRenderer(object):
         return
 
     @staticmethod
+    def _writeMatrixRows(f, matrix: np.ndarray, row_num: int, col_num: int) -> None:
+        """将 ``matrix`` 的前 ``row_num`` 行、前 ``col_num`` 列以 tab 分隔、逐行换行写入文件句柄 ``f``。"""
+        for j in range(row_num):
+            f.write('\t'.join(str(matrix[j][k]) for k in range(col_num)) + '\n')
+        return
+
+    @staticmethod
+    def renderCameraData(
+        mesh: trimesh.Trimesh,
+        camera_list: List[Camera],
+        bg_color: list=[255, 255, 255],
+        device: str='cuda:0',
+        vertices_tensor: Optional[torch.Tensor] = None,
+        enable_antialias: bool=True,
+        random_lighting: bool=False,
+        lighting: Optional[dict]=None,
+        light_seed: Optional[int]=None,
+        light_kwargs: Optional[dict]=None,
+        set_image_id: bool=False,
+    ) -> List[Camera]:
+        """在调用方给定的相机位姿 / 内参上渲染 mask/rgb/depth/normal 并原地 load 回每个相机。
+
+        这是 "已知视角 -> 渲染条件" 的纯原子: 不重新采样相机、不调整位姿。
+        :meth:`sampleRenderData` 在采样 + 调整位姿后复用本函数完成渲染。
+        返回的就是传入的 ``camera_list``。
+
+        Args:
+            set_image_id: 是否按索引为每个相机写入 ``image_id`` (``{i:06d}.png``)。
+        """
+        # 每物体采样一套世界系随机光照，所有视图共享 -> 多视图光照一致
+        if lighting is None and random_lighting:
+            lighting = NVDiffRastRenderer.sampleRandomLighting(
+                space='world', seed=light_seed, **(light_kwargs or {}))
+
+        print('[INFO][MeshRenderer::renderCameraData]')
+        print('\t start render camera data...')
+        for i in trange(len(camera_list)):
+            camera = camera_list[i]
+            camera.to(device=device)
+
+            render_dict = NVDiffRastRenderer.render(
+                mesh=mesh,
+                camera=camera,
+                render_types=['mask', 'rgb', 'depth', 'normal'],
+                bg_color=bg_color,
+                vertices_tensor=vertices_tensor,
+                enable_antialias=enable_antialias,
+                lighting=lighting,
+            )
+
+            if set_image_id:
+                camera.image_id = f'{i:06d}.png'
+
+            camera.loadMask(render_dict['mask'])
+
+            camera.loadImage(render_dict['rgb'])
+
+            camera.loadDepth(render_dict['depth'])
+
+            # renderer 已同时算好 normal_world 与 normal_camera (满足
+            #   normal_camera = normal_world @ R^T, 与 Camera 同步公式一致),
+            # 直接各自 load 并关闭同步, 避免重复一次 [H,W,3] 的法线变换矩阵乘。
+            camera.loadNormalWorld(render_dict['normal_world'], is_update_normal_camera=False)
+            camera.loadNormalCamera(render_dict['normal_camera'], is_update_normal_world=False)
+
+        return camera_list
+
+    @staticmethod
     def sampleRenderData(
         mesh: trimesh.Trimesh,
         candidate_camera_num: int = 20,
@@ -42,6 +110,7 @@ class MeshRenderer(object):
         light_seed: Optional[int]=None,
         light_kwargs: Optional[dict]=None,
     ) -> List[Camera]:
+        """采样相机位姿 (可选最优位姿筛选), 再复用 :meth:`renderCameraData` 渲染。"""
         camera_list = sampleCameras(
             mesh=mesh,
             candidate_camera_num=candidate_camera_num,
@@ -63,39 +132,19 @@ class MeshRenderer(object):
                 safe_pixel_num=safe_pixel_num,
             )
 
-        # 每物体采样一套世界系随机光照，所有视图共享 -> 多视图光照一致
-        if lighting is None and random_lighting:
-            lighting = NVDiffRastRenderer.sampleRandomLighting(
-                space='world', seed=light_seed, **(light_kwargs or {}))
-
-        print('[INFO][MeshRenderer::sampleRenderData]')
-        print('\t start sample render data...')
-        for i in trange(len(camera_list)):
-            camera = camera_list[i]
-
-            render_dict = NVDiffRastRenderer.render(
-                mesh=mesh,
-                camera=camera,
-                render_types=['mask', 'rgb', 'depth', 'normal'],
-                bg_color=bg_color,
-                vertices_tensor=vertices_tensor,
-                enable_antialias=enable_antialias,
-                lighting=lighting,
-            )
-
-            camera.image_id = f'{i:06d}.png'
-
-            camera.loadMask(render_dict['mask'])
-
-            camera.loadImage(render_dict['rgb'])
-
-            camera.loadDepth(render_dict['depth'])
-
-            camera.loadNormalWorld(render_dict['normal_world'])
-
-            camera.loadNormalCamera(render_dict['normal_camera'])
-
-        return camera_list
+        return MeshRenderer.renderCameraData(
+            mesh=mesh,
+            camera_list=camera_list,
+            bg_color=bg_color,
+            device=device,
+            vertices_tensor=vertices_tensor,
+            enable_antialias=enable_antialias,
+            random_lighting=random_lighting,
+            lighting=lighting,
+            light_seed=light_seed,
+            light_kwargs=light_kwargs,
+            set_image_id=True,
+        )
 
     @staticmethod
     def createColmapDataFolder(
@@ -226,11 +275,7 @@ class MeshRenderer(object):
         camera2worldCV_global = toNumpy(first_camera.camera2worldCV, np.float32)
 
         with open(camera_folder_path + 'c2wCV.txt', 'w') as f:
-            for j in range(3):
-                f.write(str(camera2worldCV_global[j][0]) + '\t')
-                f.write(str(camera2worldCV_global[j][1]) + '\t')
-                f.write(str(camera2worldCV_global[j][2]) + '\t')
-                f.write(str(camera2worldCV_global[j][3]) + '\n')
+            MeshRenderer._writeMatrixRows(f, camera2worldCV_global, 3, 4)
 
         print('[INFO][MeshRenderer::createOmniVGGTDataFolder]')
         print('\t start create omnivggt data folder...')
@@ -243,15 +288,8 @@ class MeshRenderer(object):
             camera2world = toNumpy(camera.camera2worldCV, np.float32) @ world2cameraCV_global
             intrinsic = toNumpy(camera.intrinsic, np.float32)
             with open(camera_folder_path + str(i) + '.txt', 'w') as f:
-                for j in range(3):
-                    f.write(str(camera2world[j][0]) + '\t')
-                    f.write(str(camera2world[j][1]) + '\t')
-                    f.write(str(camera2world[j][2]) + '\t')
-                    f.write(str(camera2world[j][3]) + '\n')
-                for j in range(3):
-                    f.write(str(intrinsic[j][0]) + '\t')
-                    f.write(str(intrinsic[j][1]) + '\t')
-                    f.write(str(intrinsic[j][2]) + '\n')
+                MeshRenderer._writeMatrixRows(f, camera2world, 3, 4)
+                MeshRenderer._writeMatrixRows(f, intrinsic, 3, 3)
 
             depth = np.where(depth == 0, 1e11, depth)
 
