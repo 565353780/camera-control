@@ -7,8 +7,9 @@ from camera_control.Module.volume_marker import VolumeMarker
 
 
 def demo_mark_volume():
-    colmap_data_folder_path = '/home/lichanghao/chLi/MMVideoReconV1/JJ/20260427_164113_431091/08_colmap_gs/'
-    gs_file_path = '/home/lichanghao/chLi/MMVideoReconV1/JJ/20260427_164113_431091/gs_normalized.ply'
+    data_folder_path = '/home/lichanghao/chLi/MMVideoReconV1/JJ/20260427_164113_431091/'
+    colmap_data_folder_path = data_folder_path + '08_colmap_gs/'
+    gs_file_path = data_folder_path + 'gs_normalized.ply'
 
     camera_list = CameraConvertor.loadColmapDataFolder(colmap_data_folder_path)
 
@@ -23,7 +24,10 @@ def demo_mark_volume():
         geometry=gs_points,
     )
 
-    mesh = toVisibleVolumeMesh(visible_volume)
+    mesh = toVisibleVolumeMesh(
+        labels=visible_volume,
+        max_free_k=1,
+    )
 
     o3d.io.write_triangle_mesh(colmap_data_folder_path + 'vis_volume_label_pcd.ply', mesh)
 
@@ -34,7 +38,10 @@ def demo_mark_volume():
             geometry=gs_points,
         )
 
-        mesh = toVisibleVolumeMesh(visible_volume)
+        mesh = toVisibleVolumeMesh(
+            labels=visible_volume,
+            max_free_k=1,
+        )
 
         o3d.io.write_triangle_mesh(colmap_data_folder_path + f'vis_volume_label_{i}.ply', mesh)
     return True

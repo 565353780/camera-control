@@ -636,6 +636,303 @@ class TestMarkVisibleCpuCandidate(unittest.TestCase):
         self.assertTrue(torch.all(labels == VolumeMarker.freeLabelInf(R)))
 
 
+class TestResolutionValidation(unittest.TestCase):
+    """严格 resolution 校验（纯逻辑，CPU）。"""
+
+    def test_integer_value_float_ok(self):
+        self.assertEqual(VolumeMarker._requirePositiveResolution(8.0, 'x'), 8)
+
+    def test_non_integer_float_raises(self):
+        with self.assertRaises(ValueError):
+            VolumeMarker._requirePositiveResolution(4.9, 'x')
+
+    def test_bool_raises(self):
+        with self.assertRaises(TypeError):
+            VolumeMarker._requirePositiveResolution(True, 'x')
+
+    def test_non_positive_raises(self):
+        for bad in (0, -1, -5):
+            with self.assertRaises(ValueError):
+                VolumeMarker._requirePositiveResolution(bad, 'x')
+
+
+class TestDomainStats(unittest.TestCase):
+    """越界 geometry 诊断统计（纯逻辑，CPU）。"""
+
+    def test_domain_stats_counts_inside_and_finite(self):
+        pts = torch.tensor(
+            [
+                [0.0, 0.0, 0.0],            # inside
+                [0.4, -0.4, 0.49],         # inside
+                [2.0, 0.0, 0.0],           # outside
+                [float('nan'), 0.0, 0.0],  # non-finite
+            ],
+            dtype=torch.float32,
+        )
+        finite_count, inside_count = VolumeMarker._domainStats(pts)
+        self.assertEqual(finite_count, 3)
+        self.assertEqual(inside_count, 2)
+
+    def test_domain_stats_empty(self):
+        finite_count, inside_count = VolumeMarker._domainStats(
+            torch.zeros((0, 3), dtype=torch.float32),
+        )
+        self.assertEqual((finite_count, inside_count), (0, 0))
+
+
+class TestGeometryDepthDecoupling(unittest.TestCase):
+    """显式 geometry 路径不应要求相机 depth（纯逻辑，CPU）。
+
+    候选完全由 geometry 决定时，只需相机位姿/内参；depth 仅在
+    geometry=None 的 CCM 候选路径才必需。这里只验证候选构建不再因
+    缺 depth 而抛错（渲染分类走 CUDA，端到端由渲染用例守护）。
+    """
+
+    def _make_cpu_camera_no_depth(self) -> Camera:
+        return Camera(
+            width=8, height=8, fovx_degree=60.0,
+            pos=[0.0, 0.0, 3.0], look_at=[0.0, 0.0, 0.0], up=[0.0, 1.0, 0.0],
+            device='cpu',
+        )
+
+    def test_build_candidate_with_geometry_no_depth_ok(self):
+        R = 8
+        camera = self._make_cpu_camera_no_depth()
+        self.assertIsNone(camera.depth)
+        pts = np.stack([_voxel_center((3, 3, 3), R)]).astype(np.float32)
+        # 不应抛错（不依赖 depth）。
+        candidate = VolumeMarker._buildCandidateOccupancy(
+            [camera], pts, R, torch.float32, 'cpu',
+        )
+        self.assertTrue(bool(candidate[3, 3, 3]))
+        self.assertEqual(int(candidate.sum().item()), 1)
+
+    def test_build_candidate_without_geometry_requires_depth(self):
+        R = 8
+        camera = self._make_cpu_camera_no_depth()
+        with self.assertRaises(ValueError):
+            VolumeMarker._buildCandidateOccupancy(
+                [camera], None, R, torch.float32, 'cpu',
+            )
+
+
+class TestExactMeshVoxelizer(unittest.TestCase):
+    """确定性精确 mesh 表面体素化（纯逻辑，CPU，无需 open3d）。"""
+
+    def test_single_small_triangle_one_voxel(self):
+        R = 4
+        c = _voxel_center((2, 2, 2), R)
+        d = 0.5 / R * 0.4
+        verts = torch.tensor(
+            [
+                [c[0] - d, c[1] - d, c[2]],
+                [c[0] + d, c[1] - d, c[2]],
+                [c[0], c[1] + d, c[2]],
+            ],
+            dtype=torch.float32,
+        )
+        faces = torch.tensor([[0, 1, 2]], dtype=torch.int64)
+        occ = VolumeMarker._voxelizeMesh(verts, faces, R, 'cpu')
+        self.assertTrue(bool(occ[2, 2, 2]))
+        self.assertEqual(int(occ.sum().item()), 1)
+
+    def test_axis_aligned_quad_covers_all_crossed_voxels(self):
+        R = 16
+        k = 6
+        z = (k + 0.5) / R - 0.5
+        i_lo, i_hi = 3, 11
+        lo = (i_lo) / R - 0.5 + 1e-3
+        hi = (i_hi + 1) / R - 0.5 - 1e-3
+        verts = torch.tensor(
+            [[lo, lo, z], [hi, lo, z], [hi, hi, z], [lo, hi, z]],
+            dtype=torch.float32,
+        )
+        faces = torch.tensor([[0, 1, 2], [0, 2, 3]], dtype=torch.int64)
+        occ = VolumeMarker._voxelizeMesh(verts, faces, R, 'cpu')
+        for i in range(i_lo, i_hi + 1):
+            for j in range(i_lo, i_hi + 1):
+                self.assertTrue(bool(occ[i, j, k]), (i, j, k))
+        self.assertEqual(torch.nonzero(occ)[:, 2].unique().tolist(), [k])
+
+    def test_box_surface_is_shell_not_filled(self):
+        R = 16
+        bmin, bmax = -0.25, 0.25
+        corners = np.array(
+            [[x, y, z] for x in (bmin, bmax)
+             for y in (bmin, bmax) for z in (bmin, bmax)],
+            dtype=np.float64,
+        )
+        quads = [
+            (0, 1, 3, 2), (4, 6, 7, 5), (0, 4, 5, 1),
+            (2, 3, 7, 6), (0, 2, 6, 4), (1, 5, 7, 3),
+        ]
+        tri_list = []
+        for a, b, c2, d2 in quads:
+            tri_list.append([corners[a], corners[b], corners[c2]])
+            tri_list.append([corners[a], corners[c2], corners[d2]])
+        verts = torch.tensor(
+            np.array(tri_list).reshape(-1, 3), dtype=torch.float32,
+        )
+        faces = torch.arange(verts.shape[0], dtype=torch.int64).reshape(-1, 3)
+        occ = VolumeMarker._voxelizeMesh(verts, faces, R, 'cpu')
+        mid = R // 2
+        self.assertFalse(bool(occ[mid, mid, mid]))
+        self.assertGreater(int(occ.sum().item()), 0)
+
+    def test_thin_sliver_triangle_is_not_missed(self):
+        # 极薄长三角形：采样近似可能漏，精确算法必须覆盖至少一个体素。
+        R = 8
+        verts = torch.tensor(
+            [[-0.4, 0.0, 0.0], [0.4, 1e-4, 0.0], [0.4, -1e-4, 0.0]],
+            dtype=torch.float32,
+        )
+        faces = torch.tensor([[0, 1, 2]], dtype=torch.int64)
+        occ = VolumeMarker._voxelizeMesh(verts, faces, R, 'cpu')
+        self.assertGreaterEqual(int(occ.sum().item()), 1)
+
+    def test_deterministic(self):
+        R = 12
+        verts = torch.tensor(
+            [[-0.3, -0.3, 0.0], [0.35, -0.2, 0.1], [0.0, 0.4, -0.05]],
+            dtype=torch.float32,
+        )
+        faces = torch.tensor([[0, 1, 2]], dtype=torch.int64)
+        occ_a = VolumeMarker._voxelizeMesh(verts, faces, R, 'cpu')
+        occ_b = VolumeMarker._voxelizeMesh(verts, faces, R, 'cpu')
+        self.assertTrue(torch.equal(occ_a, occ_b))
+
+    def test_degenerate_zero_area_triangle_falls_back_to_vertices(self):
+        # 退化（共线/零面积）三角形：退回顶点点体素化。
+        R = 8
+        c = _voxel_center((4, 4, 4), R)
+        verts = torch.tensor([c, c, c], dtype=torch.float32)
+        faces = torch.tensor([[0, 1, 2]], dtype=torch.int64)
+        occ = VolumeMarker._voxelizeMesh(verts, faces, R, 'cpu')
+        self.assertTrue(bool(occ[4, 4, 4]))
+        self.assertEqual(int(occ.sum().item()), 1)
+
+    def test_subdivision_large_triangle_bounded_memory(self):
+        # 跨越整个域的大三角形会触发细分，仍应正确覆盖且不报错。
+        R = 32
+        verts = torch.tensor(
+            [[-0.49, -0.49, 0.0], [0.49, -0.49, 0.0], [0.0, 0.49, 0.0]],
+            dtype=torch.float32,
+        )
+        faces = torch.tensor([[0, 1, 2]], dtype=torch.int64)
+        occ = VolumeMarker._voxelizeMesh(verts, faces, R, 'cpu')
+        self.assertGreater(int(occ.sum().item()), R)  # 至少覆盖一整条带
+
+
+class TestL1DistanceRobustness(unittest.TestCase):
+    """L1 距离场鲁棒性：非连续输入、CUDA、小分辨率（纯逻辑）。"""
+
+    def _brute(self, source):
+        R = source.shape[0]
+        src_idx = torch.nonzero(source).to(torch.int64)
+        grid = torch.stack(
+            torch.meshgrid(
+                torch.arange(R), torch.arange(R), torch.arange(R),
+                indexing='ij',
+            ),
+            dim=-1,
+        ).reshape(-1, 3).to(source.device)
+        if src_idx.numel() == 0:
+            return torch.full((R, R, R), 3 * R, dtype=torch.int64,
+                              device=source.device)
+        src_idx = src_idx.to(source.device)
+        return (
+            (grid[:, None, :] - src_idx[None, :, :]).abs().sum(dim=-1)
+            .min(dim=1).values
+        ).reshape(R, R, R)
+
+    def test_non_contiguous_input(self):
+        torch.manual_seed(1)
+        src = (torch.rand((6, 6, 6)) < 0.12).transpose(0, 2)
+        dist = VolumeMarker.computeL1DistanceToMask(src)
+        self.assertTrue(torch.equal(dist, self._brute(src)))
+
+    def test_small_resolutions(self):
+        for R in (1, 2, 3):
+            src = torch.zeros((R, R, R), dtype=torch.bool)
+            src[0, 0, 0] = True
+            dist = VolumeMarker.computeL1DistanceToMask(src)
+            self.assertTrue(torch.equal(dist, self._brute(src)))
+
+    @unittest.skipUnless(torch.cuda.is_available(), 'CUDA required')
+    def test_cuda_matches_bruteforce(self):
+        torch.manual_seed(2)
+        R = 7
+        src = (torch.rand((R, R, R)) < 0.1).cuda()
+        src[1, 2, 3] = True
+        dist = VolumeMarker.computeL1DistanceToMask(src)
+        self.assertTrue(torch.equal(dist.cpu(), self._brute(src).cpu()))
+
+
+class TestClassifyFreeMask(unittest.TestCase):
+    """非候选 FREE/UNKNOWN 归类策略（纯逻辑，CPU）。"""
+
+    def _setup(self):
+        R = 3
+        candidate = torch.zeros((R, R, R), dtype=torch.bool)
+        candidate[0, 0, 0] = True
+        free_any = torch.zeros((R, R, R), dtype=torch.bool)
+        free_any[1, 1, 1] = True
+        observed_any = torch.zeros((R, R, R), dtype=torch.bool)
+        observed_any[1, 1, 1] = True
+        observed_any[2, 2, 2] = True  # observed but no free evidence
+        return candidate, free_any, observed_any
+
+    def test_free_policy_unobserved_becomes_free(self):
+        candidate, free_any, observed_any = self._setup()
+        mask = VolumeMarker._classifyFreeMask(
+            candidate, free_any, observed_any, unobserved_policy='free',
+        )
+        self.assertTrue(bool(mask[1, 1, 1]))   # free evidence
+        self.assertTrue(bool(mask[0, 1, 0]))   # unobserved -> free
+        self.assertFalse(bool(mask[0, 0, 0]))  # candidate never free
+        self.assertFalse(bool(mask[2, 2, 2]))  # observed, no free -> unknown
+
+    def test_unknown_policy_unobserved_stays_unknown(self):
+        candidate, free_any, observed_any = self._setup()
+        mask = VolumeMarker._classifyFreeMask(
+            candidate, free_any, observed_any, unobserved_policy='unknown',
+        )
+        self.assertTrue(bool(mask[1, 1, 1]))   # free evidence only
+        self.assertFalse(bool(mask[0, 1, 0]))  # unobserved -> unknown
+        self.assertFalse(bool(mask[0, 0, 0]))
+
+    def test_invalid_policy_raises(self):
+        candidate, free_any, observed_any = self._setup()
+        with self.assertRaises(ValueError):
+            VolumeMarker._classifyFreeMask(
+                candidate, free_any, observed_any, unobserved_policy='bad',
+            )
+
+
+class TestCameraPrincipalPointDefault(unittest.TestCase):
+    """相机默认主点与非正方图像投影一致性（纯逻辑，CPU）。"""
+
+    def test_default_cy_uses_height(self):
+        camera = Camera(width=128, height=64, fovx_degree=60.0, device='cpu')
+        self.assertAlmostEqual(camera.cx, 64.0, places=5)
+        self.assertAlmostEqual(camera.cy, 32.0, places=5)
+
+    def test_center_point_projects_to_image_center(self):
+        # 非正方图像：相机正前方中心点应投影到画面中心。
+        # 主点在 (width/2, height/2)，UV = (pixel + 0.5) / N，故 u/v 各带
+        # 半像素偏移 0.5/width、0.5/height（非正方时两轴偏移不同）。
+        width, height = 128, 64
+        camera = Camera(
+            width=width, height=height, fovx_degree=60.0,
+            pos=[0.0, 0.0, 2.0], look_at=[0.0, 0.0, 0.0], up=[0.0, 1.0, 0.0],
+            device='cpu',
+        )
+        center = torch.tensor([[0.0, 0.0, 0.0]], dtype=torch.float32)
+        uv = camera.project_points_to_uv(center)
+        self.assertAlmostEqual(float(uv[0, 0]), 0.5 + 0.5 / width, places=4)
+        self.assertAlmostEqual(float(uv[0, 1]), 0.5 + 0.5 / height, places=4)
+
+
 @unittest.skipUnless(
     _RENDER_AVAILABLE,
     'markVisible 渲染路径仅在 CUDA + nvdiffrast 可用时有效',
@@ -768,6 +1065,47 @@ class TestMarkVisibleRender(unittest.TestCase):
         empty_pts = torch.zeros((0, 3), dtype=torch.float32, device=device)
         labels = VolumeMarker.markVisible([camera], R, geometry=empty_pts)
         self.assertTrue(torch.all(labels == VolumeMarker.freeLabelInf(R)))
+
+    def test_far_camera_beyond_default_clip_still_hits(self):
+        """相机距离远超默认 far=100 时，动态 near/far 仍能命中候选 -> VALID。
+
+        体素域固定在 [-0.5, 0.5]^3，但相机可被放到 ~300 单位外（超出默认
+        far=100）。若不动态设裁剪面，候选 mesh 会被裁掉、无 VALID 命中。
+        """
+        R = 16
+        device = 'cuda:0'
+        idx = (8, 8, 8)
+        pts = torch.from_numpy(
+            np.stack([_voxel_center(idx, R)]).astype(np.float32),
+        ).to(device)
+
+        camera = Camera(
+            width=128, height=128, fovx_degree=60.0,
+            pos=[0.0, 0.0, 300.0], look_at=[0.0, 0.0, 0.0], up=[0.0, 1.0, 0.0],
+            device=device,
+        )
+        camera.loadDepth(
+            torch.zeros((128, 128), dtype=torch.float32, device=device),
+        )
+        labels = VolumeMarker.markVisible([camera], R, geometry=pts)
+        self.assertEqual(int(labels[idx].item()), VolumeMarker.VALID)
+
+    def test_geometry_path_without_depth_runs(self):
+        """显式 geometry 时即使相机未加载 depth 也能完成渲染分类。"""
+        R = 16
+        device = 'cuda:0'
+        idx = (8, 8, 8)
+        pts = torch.from_numpy(
+            np.stack([_voxel_center(idx, R)]).astype(np.float32),
+        ).to(device)
+        camera = Camera(
+            width=128, height=128, fovx_degree=60.0,
+            pos=[0.0, 0.0, 3.0], look_at=[0.0, 0.0, 0.0], up=[0.0, 1.0, 0.0],
+            device=device,
+        )
+        self.assertIsNone(camera.depth)
+        labels = VolumeMarker.markVisible([camera], R, geometry=pts)
+        self.assertEqual(int(labels[idx].item()), VolumeMarker.VALID)
 
 
 def test():

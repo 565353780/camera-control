@@ -520,9 +520,14 @@ class NVDiffRastRenderer(object):
         mesh: Union[trimesh.Trimesh, trimesh.Scene],
         camera: Camera,
         vertices_tensor: Optional[torch.Tensor] = None,
+        near: Optional[float] = None,
+        far: Optional[float] = None,
     ) -> dict:
         """
         执行基础光栅化，返回可复用的光栅化结果字典。
+
+        near / far: 可选裁剪面。None 时用 camera.getWorld2NVDiffRast 的默认值；
+        显式传入可避免相机距离/尺度超出默认 [near, far] 时把网格裁掉。
 
         Returns:
             dict: {vertices, faces, rast_out, rast_out_db, vertices_clip}
@@ -565,7 +570,12 @@ class NVDiffRastRenderer(object):
             torch.ones((n_verts, 1), dtype=torch.float32, device=camera.device)
         ], dim=1)
 
-        mvp = camera.getWorld2NVDiffRast()
+        mvp_kwargs = {}
+        if near is not None:
+            mvp_kwargs['near'] = float(near)
+        if far is not None:
+            mvp_kwargs['far'] = float(far)
+        mvp = camera.getWorld2NVDiffRast(**mvp_kwargs)
         vertices_clip = torch.matmul(vertices_homo, mvp.T).unsqueeze(0).contiguous()
 
         if not torch.isfinite(vertices_clip).all():
@@ -949,15 +959,21 @@ class NVDiffRastRenderer(object):
         vertices_tensor: Optional[torch.Tensor] = None,
         enable_antialias: bool = False,
         rasterize_dict: Optional[dict] = None,
+        near: Optional[float] = None,
+        far: Optional[float] = None,
     ) -> dict:
         """
         渲染深度图
+
+        near / far: 可选裁剪面，透传给 rasterize（None 时用相机默认）。
 
         Returns:
             dict: depth [H,W], rgb [H,W,3], rasterize_output [H,W,4], bary_derivs [H,W,4]
         """
         if rasterize_dict is None:
-            rasterize_dict = NVDiffRastRenderer.rasterize(mesh, camera, vertices_tensor)
+            rasterize_dict = NVDiffRastRenderer.rasterize(
+                mesh, camera, vertices_tensor, near=near, far=far,
+            )
 
         vertices = rasterize_dict['vertices']
         faces = rasterize_dict['faces']
@@ -1149,9 +1165,14 @@ class NVDiffRastRenderer(object):
         pbr_seed: Optional[int] = None,
         pbr_exposure: float = 1.2,
         rasterize_dict: Optional[dict] = None,
+        near: Optional[float] = None,
+        far: Optional[float] = None,
     ) -> dict:
         """
         组合渲染接口，根据 render_types 一次性输出多种结果。
+
+        near / far: 可选裁剪面，透传给底层 rasterize（None 时用相机默认）。
+        相机距离/场景尺度超出默认 [near, far] 时，显式传入可避免网格被裁掉。
 
         随机光照（灰度·多光源）：
           - lighting: 显式光照 spec（见 sampleRandomLighting 返回格式）。给定时直接使用。
@@ -1182,7 +1203,9 @@ class NVDiffRastRenderer(object):
         """
         # 先确保有统一的光栅化结果，供所有子渲染函数复用
         if rasterize_dict is None:
-            rasterize_dict = NVDiffRastRenderer.rasterize(mesh, camera, vertices_tensor)
+            rasterize_dict = NVDiffRastRenderer.rasterize(
+                mesh, camera, vertices_tensor, near=near, far=far,
+            )
 
         # 本次调用内采样随机光照（多视图一致请在外部采样并通过 lighting 传入）
         if lighting is None and random_lighting:

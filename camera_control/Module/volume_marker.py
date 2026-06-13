@@ -37,13 +37,80 @@ class VolumeMarker(object):
     # ------------------------------------------------------------------
     @staticmethod
     def _requirePositiveResolution(volume_resolution: int, caller: str) -> int:
-        """校验体素分辨率为正，返回 int 化后的 R。"""
+        """校验体素分辨率为正整数（或整数值浮点），返回 int 化后的 R。
+
+        第一性原理：分辨率是离散网格的边长格数，必须是正整数。允许 4.0
+        这类整数值浮点（常见于配置反序列化），但拒绝 4.9 这类会被静默
+        截断成 4 的非整数浮点，避免「以为是 5 实际跑成 4」的隐性错误。
+        """
+        if isinstance(volume_resolution, bool):
+            raise TypeError(
+                f'[ERROR][VolumeMarker::{caller}] '
+                f'volume_resolution must be an integer, got bool {volume_resolution}'
+            )
+
+        if isinstance(volume_resolution, float):
+            if not volume_resolution.is_integer():
+                raise ValueError(
+                    f'[ERROR][VolumeMarker::{caller}] '
+                    f'volume_resolution must be an integer value, '
+                    f'got non-integer float {volume_resolution}'
+                )
+            volume_resolution = int(volume_resolution)
+
+        if not isinstance(volume_resolution, int):
+            raise TypeError(
+                f'[ERROR][VolumeMarker::{caller}] '
+                f'volume_resolution must be an int, got {type(volume_resolution)}'
+            )
+
         if volume_resolution <= 0:
             raise ValueError(
                 f'[ERROR][VolumeMarker::{caller}] '
                 f'volume_resolution must be positive, got {volume_resolution}'
             )
         return int(volume_resolution)
+
+    # 触发越界 geometry 告警的越界点占比阈值：超过该比例的候选点落在
+    # [-0.5, 0.5]^3 之外时，几乎可以确定 geometry 未归一化到体素域。
+    OUT_OF_DOMAIN_WARN_RATIO: float = 0.5
+
+    @staticmethod
+    def _domainStats(points: torch.Tensor) -> Tuple[int, int]:
+        """返回 (有限点数, 落在 [-0.5, 0.5]^3 域内的点数)。
+
+        用于诊断 geometry 是否归一化到体素域：大量越界点意味着上游坐标
+        系/尺度与体素网格不一致，候选体素会大面积丢失。
+        """
+        if points.numel() == 0:
+            return 0, 0
+        finite = torch.isfinite(points).all(dim=-1)
+        finite_count = int(finite.sum().item())
+        if finite_count == 0:
+            return 0, 0
+        inside = VolumeMarker._finiteInBounds(points)
+        return finite_count, int(inside.sum().item())
+
+    @staticmethod
+    def _warnIfOutOfDomain(points: torch.Tensor, caller: str) -> None:
+        """候选点大面积越出体素域 [-0.5, 0.5]^3 时打印告警（不抛错）。
+
+        体素域是硬约束，越界点会在体素化阶段被静默过滤。若绝大多数点
+        越界，结果会退化成「无候选 -> 全 FREE」，这通常是 geometry 未
+        归一化的征兆，及早告警以免静默产出错误标签。
+        """
+        finite_count, inside_count = VolumeMarker._domainStats(points)
+        if finite_count == 0:
+            return
+        out_ratio = 1.0 - inside_count / finite_count
+        if out_ratio > VolumeMarker.OUT_OF_DOMAIN_WARN_RATIO:
+            print(
+                f'[WARN][VolumeMarker::{caller}] '
+                f'{out_ratio * 100.0:.1f}% of finite candidate points fall '
+                f'outside the voxel domain [-0.5, 0.5]^3 '
+                f'({inside_count}/{finite_count} inside); geometry may not be '
+                f'normalized to the unit cube.'
+            )
 
     @staticmethod
     def _emptyLabels(
@@ -226,11 +293,17 @@ class VolumeMarker(object):
         )
         return vertices, faces
 
-    # 体采样相对体素的过采样倍率：在 K*R 分辨率下采样，确保采样点最大间距
-    # 远小于体素边长，从而网格穿过的每个体素都被至少一个采样点覆盖。
+    # 体采样相对体素的过采样倍率（仅用于可选的采样 fallback 路径）。
     MESH_SAMPLE_OVERSAMPLE_K: int = 3
-    # 采样点数上限，避免巨大网格 + 高分辨率时点数爆炸（仍足以覆盖体素）。
+    # 采样点数上限，避免巨大网格 + 高分辨率时点数爆炸（仅 fallback 路径）。
     MESH_SAMPLE_MAX_POINTS: int = 8_000_000
+
+    # 精确体素化时，单个三角形允许覆盖的最大 voxel-AABB 体积；超过则把三角形
+    # 二分细分，使每块的候选 voxel 数有界，从而 (三角形 x 候选 voxel) 配对
+    # 的内存峰值可控。值偏大牺牲内存换更少细分，偏小相反。
+    MESH_VOXELIZE_MAX_VOXELS_PER_TRI: int = 4096
+    # 三角形细分的最大递归深度，防御退化输入导致的无界细分。
+    MESH_VOXELIZE_MAX_SUBDIV_DEPTH: int = 24
 
     @staticmethod
     def _meshSurfaceArea(vertices: torch.Tensor, faces: torch.Tensor) -> float:
@@ -243,55 +316,276 @@ class VolumeMarker(object):
 
     @staticmethod
     def _meshSampleCount(area: float, R: int, K: int) -> int:
-        """按目标点间距 d = 1/(K*R) 估算面积均匀采样所需点数。
-
-        第一性原理：要让网格穿过的每个体素（边长 1/R）都被采样点覆盖，采样点
-        在面上的间距需远小于体素边长。取目标间距 d = 1/(K*R)，单位面积约需
-        1/d^2 个点，再乘安全系数 2 抵抗均匀采样的局部稀疏与边角缺口。
-        """
+        """按目标点间距 d = 1/(K*R) 估算面积均匀采样所需点数（fallback 路径）。"""
         d = 1.0 / (K * R)
         n = int(np.ceil(area / (d * d) * 2.0))
-        # 至少给足一个 K*R 网格量级的点；并限制上限。
         n = max(n, (K * R) ** 2)
         return int(min(n, VolumeMarker.MESH_SAMPLE_MAX_POINTS))
 
     @staticmethod
-    def _voxelizeMesh(
+    def _triBoxOverlapBatch(
+        tris: torch.Tensor,
+        box_centers: torch.Tensor,
+        half: float,
+    ) -> torch.Tensor:
+        """批量三角形 vs 轴对齐立方体（voxel）相交测试（SAT，Akenine-Möller）。
+
+        第一性原理：凸体相交可由分离轴定理判定——两凸体不相交当且仅当存在
+        一条轴上它们的投影不重叠。三角形 vs AABB 需检验 13 条轴：
+          1) 3 条 box 面法线（坐标轴 x/y/z）；
+          2) 1 条三角形面法线；
+          3) 9 条 box 边 (x/y/z) 与三角形三边的叉积。
+
+        Args:
+            tris: (M, 3, 3) 已平移到「以对应 box 中心为原点」的三角形顶点，
+                即 tris[m] = triangle_m_vertices - box_centers[m]。
+            box_centers: (M, 3) 仅用于校验形状一致（计算已在中心坐标系完成）。
+            half: voxel 半边长（= 0.5 / R）。
+
+        Returns:
+            (M,) bool，三角形是否与对应 voxel 相交（含边界接触）。
+        """
+        M = tris.shape[0]
+        device = tris.device
+        if M == 0:
+            return torch.zeros((0,), dtype=torch.bool, device=device)
+
+        v0 = tris[:, 0, :]
+        v1 = tris[:, 1, :]
+        v2 = tris[:, 2, :]
+
+        # 数值容差：相对 half 的小量，吸收浮点误差，保证「接触即命中」的保守性。
+        eps = half * 1e-5
+
+        # --- 轴 1：3 条坐标轴（box 面法线）---
+        # 三角形在各坐标轴上的投影区间需与 [-half, half] 重叠。
+        tri_min = torch.minimum(torch.minimum(v0, v1), v2)  # (M, 3)
+        tri_max = torch.maximum(torch.maximum(v0, v1), v2)  # (M, 3)
+        axis_ok = ((tri_min <= half + eps) & (tri_max >= -half - eps)).all(dim=1)
+
+        # --- 轴 2：三角形面法线（平面 vs box）---
+        e0 = v1 - v0
+        e1 = v2 - v1
+        normal = torch.cross(e0, e1, dim=1)  # (M, 3)
+        # box 在法线方向的半投影半径 r = half * (|nx| + |ny| + |nz|)。
+        r = half * normal.abs().sum(dim=1) + eps  # (M,)
+        # 平面到 box 中心（原点）的有符号距离 = -dot(normal, v0)。
+        d = -(normal * v0).sum(dim=1)  # (M,)
+        plane_ok = d.abs() <= r
+
+        # --- 轴 3：9 条 边叉积轴 ---
+        edges = torch.stack([e0, e1, v0 - v2], dim=1)  # (M, 3, 3) 三条边
+        verts = torch.stack([v0, v1, v2], dim=1)        # (M, 3, 3) 三个顶点
+
+        cross_ok = torch.ones((M,), dtype=torch.bool, device=device)
+        # 坐标基轴，逐个 (边 e_i x 基轴 a_j) 检验。
+        for a in range(3):
+            base = torch.zeros(3, dtype=tris.dtype, device=device)
+            base[a] = 1.0
+            for ei in range(3):
+                edge = edges[:, ei, :]  # (M, 3)
+                axis = torch.cross(
+                    edge, base.expand_as(edge), dim=1,
+                )  # (M, 3)
+                # 三顶点在该轴上的投影。
+                p = torch.matmul(verts, axis.unsqueeze(-1)).squeeze(-1)  # (M, 3)
+                p_min = p.min(dim=1).values
+                p_max = p.max(dim=1).values
+                # box 在该轴上的投影半径。
+                rad = half * axis.abs().sum(dim=1) + eps
+                this_ok = (p_min <= rad) & (p_max >= -rad)
+                cross_ok = cross_ok & this_ok
+
+        return axis_ok & plane_ok & cross_ok
+
+    @staticmethod
+    def _voxelizeTrianglesExact(
+        tris: torch.Tensor,
+        R: int,
+        device: str,
+    ) -> torch.Tensor:
+        """对 (M, 3, 3) 三角形做确定性精确表面体素化，返回 (R,R,R) bool。
+
+        第一性原理：一个 voxel 被网格穿过 <=> 至少一个三角形与该 voxel 的
+        AABB 相交（SAT 判定）。逐三角形枚举其 voxel-AABB 内的候选 voxel，
+        做精确 tri-box 相交，结果是确定性的（与采样无关），且不漏任何被
+        网格穿过的 voxel。
+
+        为控制 (三角形 x 候选 voxel) 配对的内存峰值，voxel-AABB 过大的
+        三角形会沿最长边二分细分，直到每块候选 voxel 数有界。
+
+        坐标约定：体素覆盖 [-0.5, 0.5]^3，voxel index = floor((p + 0.5) * R)。
+        """
+        occupancy = torch.zeros((R, R, R), dtype=torch.bool, device=device)
+        if tris.shape[0] == 0:
+            return occupancy
+
+        occ_flat = occupancy.reshape(-1)
+        voxel_size = 1.0 / R
+        half = 0.5 * voxel_size
+        # voxel (i,j,k) 中心世界坐标 = -0.5 + (idx + 0.5) * voxel_size。
+        max_voxels = VolumeMarker.MESH_VOXELIZE_MAX_VOXELS_PER_TRI
+
+        # 用栈做迭代式细分，避免递归深度限制与 Python 递归开销。
+        stack: List[Tuple[torch.Tensor, int]] = [(tris, 0)]
+        while stack:
+            batch, depth = stack.pop()
+            if batch.shape[0] == 0:
+                continue
+
+            # 每个三角形覆盖的 voxel index AABB（clamp 进网格）。
+            tri_min = batch.min(dim=1).values  # (B, 3)
+            tri_max = batch.max(dim=1).values  # (B, 3)
+            idx_lo = torch.floor((tri_min + 0.5) * R).long().clamp(0, R - 1)
+            idx_hi = torch.floor((tri_max + 0.5) * R).long().clamp(0, R - 1)
+            span = (idx_hi - idx_lo + 1)  # (B, 3)
+            voxel_count = span[:, 0] * span[:, 1] * span[:, 2]  # (B,)
+
+            too_big = voxel_count > max_voxels
+            if depth < VolumeMarker.MESH_VOXELIZE_MAX_SUBDIV_DEPTH and bool(too_big.any()):
+                big = batch[too_big]
+                small = batch[~too_big]
+                stack.extend(VolumeMarker._subdivideTriangles(big, depth))
+                if small.shape[0] == 0:
+                    continue
+                batch = small
+                idx_lo = idx_lo[~too_big]
+                idx_hi = idx_hi[~too_big]
+                span = span[~too_big]
+                voxel_count = voxel_count[~too_big]
+
+            VolumeMarker._markBatchExact(
+                batch, idx_lo, span, voxel_count, R, half, occ_flat,
+            )
+
+        return occ_flat.reshape(R, R, R)
+
+    @staticmethod
+    def _subdivideTriangles(
+        tris: torch.Tensor,
+        depth: int,
+    ) -> List[Tuple[torch.Tensor, int]]:
+        """沿最长边中点把每个三角形二分为两个子三角形（保持覆盖等价）。"""
+        v0 = tris[:, 0, :]
+        v1 = tris[:, 1, :]
+        v2 = tris[:, 2, :]
+        len01 = (v1 - v0).norm(dim=1)
+        len12 = (v2 - v1).norm(dim=1)
+        len20 = (v0 - v2).norm(dim=1)
+        edge_lens = torch.stack([len01, len12, len20], dim=1)  # (B, 3)
+        longest = edge_lens.argmax(dim=1)  # (B,)
+
+        # 对三种「最长边」分别构造二分；用 mask 合并，保持全向量化。
+        children: List[torch.Tensor] = []
+        # 边 0 = (v0, v1)，对边顶点 v2；中点 m=(v0+v1)/2 -> (v0,m,v2),(m,v1,v2)
+        # 边 1 = (v1, v2)，对边顶点 v0
+        # 边 2 = (v2, v0)，对边顶点 v1
+        configs = [
+            (0, 1, 2),  # split edge v0-v1, apex v2
+            (1, 2, 0),  # split edge v1-v2, apex v0
+            (2, 0, 1),  # split edge v2-v0, apex v1
+        ]
+        verts = [v0, v1, v2]
+        for cfg_i, (a, b, apex) in enumerate(configs):
+            sel = longest == cfg_i
+            if not bool(sel.any()):
+                continue
+            va, vb, vap = verts[a][sel], verts[b][sel], verts[apex][sel]
+            mid = 0.5 * (va + vb)
+            child0 = torch.stack([va, mid, vap], dim=1)
+            child1 = torch.stack([mid, vb, vap], dim=1)
+            children.append(child0)
+            children.append(child1)
+
+        if len(children) == 0:
+            return []
+        merged = torch.cat(children, dim=0)
+        return [(merged, depth + 1)]
+
+    @staticmethod
+    def _markBatchExact(
+        batch: torch.Tensor,
+        idx_lo: torch.Tensor,
+        span: torch.Tensor,
+        voxel_count: torch.Tensor,
+        R: int,
+        half: float,
+        occ_flat: torch.Tensor,
+    ) -> None:
+        """对一批 voxel-AABB 有界的三角形做精确 tri-box 相交并写入 occ_flat。"""
+        B = batch.shape[0]
+        if B == 0:
+            return
+
+        # 把每个三角形展开成其 AABB 内的候选 voxel：用 repeat_interleave 把
+        # 三角形重复 voxel_count[m] 次，再按局部线性 id 还原 (di, dj, dk)。
+        total = int(voxel_count.sum().item())
+        if total == 0:
+            return
+
+        tri_id = torch.repeat_interleave(
+            torch.arange(B, device=batch.device), voxel_count,
+        )  # (T,)
+
+        # 每个三角形局部 voxel 线性 id：0 .. voxel_count[m]-1。
+        offsets = torch.cumsum(voxel_count, dim=0) - voxel_count  # (B,)
+        local = (
+            torch.arange(total, device=batch.device) - offsets[tri_id]
+        )  # (T,)
+
+        span_sel = span[tri_id]  # (T, 3)
+        sx, sy, sz = span_sel[:, 0], span_sel[:, 1], span_sel[:, 2]
+        di = local // (sy * sz)
+        rem = local % (sy * sz)
+        dj = rem // sz
+        dk = rem % sz
+
+        lo_sel = idx_lo[tri_id]  # (T, 3)
+        vi = lo_sel[:, 0] + di
+        vj = lo_sel[:, 1] + dj
+        vk = lo_sel[:, 2] + dk
+
+        # 候选 voxel 中心世界坐标。
+        centers = torch.stack([
+            -0.5 + (vi.to(batch.dtype) + 0.5) / R,
+            -0.5 + (vj.to(batch.dtype) + 0.5) / R,
+            -0.5 + (vk.to(batch.dtype) + 0.5) / R,
+        ], dim=1)  # (T, 3)
+
+        tris_sel = batch[tri_id]  # (T, 3, 3)
+        tris_local = tris_sel - centers.unsqueeze(1)  # 平移到 box 中心坐标系
+
+        hit = VolumeMarker._triBoxOverlapBatch(tris_local, centers, half)
+        if not bool(hit.any()):
+            return
+
+        flat = (vi[hit] * R + vj[hit]) * R + vk[hit]
+        occ_flat[flat.unique()] = True
+
+    @staticmethod
+    def _voxelizeMeshSampled(
         vertices: torch.Tensor,
         faces: torch.Tensor,
         R: int,
         device: str,
     ) -> torch.Tensor:
-        """把三角网格按体素分辨率 R 求占用，返回 (R,R,R) bool 占据 mask。
+        """采样近似 mesh 体素化（fallback）：open3d 表面均匀采样后点体素化。
 
-        实现（面向性能的体采样近似）：用 open3d 在网格表面做面积均匀采样，
-        采样分辨率取体素分辨率的 K 倍（点间距 ~ 1/(K*R) 远小于体素边长
-        1/R），再把稠密采样点体素化。当 K 足够大时，网格穿过的每个体素都至少
-        含一个采样点，从而等价于「网格表面真实占用」，但避免了逐三角形精确
-        相交测试的开销，对大网格 + 高分辨率显著更快。
-
-        坐标约定与体素网格一致：体素覆盖 [-0.5, 0.5]^3，
-        voxel index = floor((point + 0.5) * R)。
+        保留作为「无 open3d / 需要更快近似」时的可选路径。对极薄三角形、
+        退化面、采样上限截断等情况可能漏体素，因此默认走精确路径
+        _voxelizeTrianglesExact。
         """
-        if faces.numel() == 0 or vertices.numel() == 0:
-            return torch.zeros((R, R, R), dtype=torch.bool, device=device)
-
         K = VolumeMarker.MESH_SAMPLE_OVERSAMPLE_K
-
         vertices_np = vertices.detach().cpu().numpy().astype(np.float64)
         faces_np = faces.detach().cpu().numpy().astype(np.int32)
 
-        area = VolumeMarker._meshSurfaceArea(
-            vertices.to(torch.float64), faces,
-        )
+        area = VolumeMarker._meshSurfaceArea(vertices.to(torch.float64), faces)
         if area <= 0.0:
-            # 退化（零面积）网格：直接用顶点当点云体素化。
             return VolumeMarker._voxelizePoints(
                 vertices.to(torch.float32), R, device,
             )
 
         num_points = VolumeMarker._meshSampleCount(area, R, K)
-
         o3d_mesh = o3d.geometry.TriangleMesh(
             o3d.utility.Vector3dVector(vertices_np),
             o3d.utility.Vector3iVector(faces_np),
@@ -300,8 +594,53 @@ class VolumeMarker(object):
         points = torch.from_numpy(
             np.ascontiguousarray(np.asarray(sampled.points)),
         ).to(dtype=torch.float32, device=device)
-
         return VolumeMarker._voxelizePoints(points, R, device)
+
+    @staticmethod
+    def _voxelizeMesh(
+        vertices: torch.Tensor,
+        faces: torch.Tensor,
+        R: int,
+        device: str,
+    ) -> torch.Tensor:
+        """把三角网格按体素分辨率 R 求表面占用，返回 (R,R,R) bool 占据 mask。
+
+        默认实现是确定性精确算法（_voxelizeTrianglesExact）：逐三角形对其
+        voxel-AABB 内的候选 voxel 做 SAT tri-box 相交，覆盖网格穿过的每个
+        voxel，不依赖随机采样，对薄三角形 / 退化面 / 体素边界都稳定。
+
+        退化（零面积）三角形不构成面，SAT 法线轴会消失；这类三角形退回到
+        「顶点点体素化」（顶点仍是几何上被占据的位置），与原行为一致。
+
+        坐标约定与体素网格一致：体素覆盖 [-0.5, 0.5]^3，
+        voxel index = floor((point + 0.5) * R)。
+        """
+        if faces.numel() == 0 or vertices.numel() == 0:
+            return torch.zeros((R, R, R), dtype=torch.bool, device=device)
+
+        vertices = vertices.to(device=device)
+        faces = faces.to(device=device)
+        tris = vertices[faces].to(torch.float32)  # (F, 3, 3)
+
+        # 退化（零面积）三角形：无有效面法线，用顶点点体素化兜底。
+        e0 = tris[:, 1] - tris[:, 0]
+        e1 = tris[:, 2] - tris[:, 0]
+        normal_norm = torch.cross(e0, e1, dim=1).norm(dim=1)
+        degenerate = normal_norm <= 0.0
+
+        occupancy = torch.zeros((R, R, R), dtype=torch.bool, device=device)
+
+        good_tris = tris[~degenerate]
+        if good_tris.shape[0] > 0:
+            occupancy |= VolumeMarker._voxelizeTrianglesExact(
+                good_tris, R, device,
+            )
+
+        if bool(degenerate.any()):
+            deg_pts = tris[degenerate].reshape(-1, 3)
+            occupancy |= VolumeMarker._voxelizePoints(deg_pts, R, device)
+
+        return occupancy
 
     @staticmethod
     def _geometryToOccupancy(
@@ -328,9 +667,11 @@ class VolumeMarker(object):
             vertices, faces = VolumeMarker._meshVerticesFaces(
                 geometry, dtype, device,
             )
+            VolumeMarker._warnIfOutOfDomain(vertices, '_geometryToOccupancy')
             return VolumeMarker._voxelizeMesh(vertices, faces, R, device)
 
         points = VolumeMarker._geometryToPoints(geometry, dtype, device)
+        VolumeMarker._warnIfOutOfDomain(points, '_geometryToOccupancy')
         return VolumeMarker._voxelizePoints(points, R, device)
 
     @staticmethod
@@ -438,6 +779,33 @@ class VolumeMarker(object):
             return torch.zeros((0, 3), dtype=dtype, device=device)
 
         return torch.cat(all_points, dim=0)
+
+    @staticmethod
+    def _buildCandidateOccupancy(
+        camera_list: List[Camera],
+        geometry,
+        R: int,
+        dtype,
+        device: str,
+    ) -> torch.Tensor:
+        """构建 (R, R, R) bool 候选占据体素，按输入语义选择 depth 依赖。
+
+        第一性原理：候选占据的来源决定了对相机 depth 的依赖。
+          - 显式 geometry：候选完全由几何先验决定，只需要相机位姿/内参
+            来渲染遮挡，不需要任何 depth；因此这里不校验 depth。
+          - geometry 为 None：候选来自多相机 depth 反投影的真实表面点，
+            此时每个相机必须已加载 depth 与 valid_depth_mask。
+        """
+        if geometry is not None:
+            return VolumeMarker._geometryToOccupancy(geometry, R, dtype, device)
+
+        candidate_points = VolumeMarker._collectCandidatePoints(
+            camera_list, dtype, device,
+        )
+        VolumeMarker._warnIfOutOfDomain(
+            candidate_points, '_buildCandidateOccupancy',
+        )
+        return VolumeMarker._voxelizePoints(candidate_points, R, device)
 
     # ------------------------------------------------------------------
     # 候选体素并集的边界 mesh
@@ -657,6 +1025,42 @@ class VolumeMarker(object):
         return uv, point_depth
 
     @staticmethod
+    def _cameraDepthRange(
+        camera: Camera,
+        vertices_tensor: torch.Tensor,
+    ) -> Optional[Tuple[float, float]]:
+        """从候选 mesh 顶点估计该相机所需的 (near, far) 裁剪面。
+
+        第一性原理：nvdiffrast 默认 near/far 是为单位尺度场景设定的；当相机
+        距离或场景尺度偏离默认 [near, far] 时，候选 mesh 会被裁掉，导致无
+        VALID 命中、且背景误判 FREE。这里用顶点在相机前方的真实深度范围动态
+        设定裁剪面，并留出余量与正下限，保证整段候选几何都在裁剪范围内。
+
+        Returns:
+            (near, far)；若没有任何顶点落在相机前方则返回 None（沿用默认）。
+        """
+        if vertices_tensor.shape[0] == 0:
+            return None
+
+        verts_homo = torch.cat(
+            [vertices_tensor,
+             torch.ones_like(vertices_tensor[..., :1])], dim=-1,
+        )
+        # 相机前方正深度 = -Z_camera。
+        depth = -(verts_homo @ camera.world2camera.T)[..., 2]
+        front = depth[depth > 0]
+        if front.numel() == 0:
+            return None
+
+        d_min = float(front.min().item())
+        d_max = float(front.max().item())
+        # 余量：near 取最小深度的 0.5 倍（且有正下限），far 取最大深度的 2 倍，
+        # 充分包裹候选几何，避免边界顶点被裁。
+        near = max(d_min * 0.5, 1e-4)
+        far = max(d_max * 2.0, near * 10.0)
+        return near, far
+
+    @staticmethod
     def _renderClassify(
         camera_list: List[Camera],
         vertices: torch.Tensor,
@@ -720,6 +1124,13 @@ class VolumeMarker(object):
                 )
                 vertices_cache[camera.device] = vertices_tensor
 
+            # 动态裁剪面：用候选 mesh 顶点的真实深度范围设定 near/far，避免
+            # 相机距离/尺度偏离默认裁剪范围时把候选几何裁掉。
+            depth_range = VolumeMarker._cameraDepthRange(camera, vertices_tensor)
+            near_far = {} if depth_range is None else {
+                'near': depth_range[0], 'far': depth_range[1],
+            }
+
             render_result = NVDiffRastRenderer.render(
                 mesh=mesh,
                 camera=camera,
@@ -727,6 +1138,7 @@ class VolumeMarker(object):
                 vertices_tensor=vertices_tensor,
                 enable_antialias=False,
                 enable_lighting=False,
+                **near_far,
             )
 
             rast_out = render_result['rasterize_output']  # (H, W, 4)
@@ -779,43 +1191,56 @@ class VolumeMarker(object):
     # L1 距离场 / FREE_KN 标签（高效并行原子函数）
     # ------------------------------------------------------------------
     @staticmethod
-    def _minPlusScan1D(
+    def _minPlusTransform1D(
         distance: torch.Tensor,
         axis: int,
-        reverse: bool,
     ) -> torch.Tensor:
-        """沿单轴单方向做 min-plus 前缀扫描（Hillis-Steele 倍增），原地更新。
+        """沿单轴做精确 1D min-plus 距离传播，返回新张量（不原地改写）。
 
-        扫描后满足：dist[i] = min_{j <= i}(dist[j] + (i - j))（forward），
-        reverse 时方向相反。每步把偏移 s 处的 dist + s 取 min，s 按 1,2,4,...
-        倍增，共 ceil(log2 L) 步切片运算，全张量并行、无数据相关分支。
+        第一性原理：1D 距离变换
+            out[i] = min_j (dist[j] + |i - j|)
+        可拆成前向 + 后向两个单调扫描，并用「坐标补偿 + 单调 cummin」无分支
+        实现，避免 Hillis-Steele 倍增中重叠切片 in-place 写入对内核语义的
+        依赖：
+            forward[i]  = i  + min_{j <= i}(dist[j] - j)   = i  + cummin(dist - i)
+            backward[i] = -i + min_{j >= i}(dist[j] + j)   = -i + cummin_rev(dist + i)
+            out[i]      = min(forward[i], backward[i])
+
+        其中坐标 i 沿 axis 取值 0..L-1。cummin 是无重叠读写的纯前缀算子，
+        全张量并行、CPU / GPU 通用，无任何主机-设备同步或数据相关分支。
         """
         L = distance.shape[axis]
-        s = 1
-        while s < L:
-            src = distance.narrow(axis, 0, L - s)
-            dst = distance.narrow(axis, s, L - s)
-            if reverse:
-                src, dst = dst, src
-            torch.minimum(dst, src + s, out=dst)
-            s *= 2
-        return distance
+        shape = [1] * distance.ndim
+        shape[axis] = L
+        coord = torch.arange(
+            L, dtype=distance.dtype, device=distance.device,
+        ).reshape(shape)
+
+        # forward: i + cummin_{j<=i}(dist[j] - j)
+        forward = coord + torch.cummin(distance - coord, dim=axis).values
+
+        # backward: -i + cummin_{j>=i}(dist[j] + j)，用 flip 把后缀 cummin 转成前缀
+        plus = (distance + coord).flip(axis)
+        backward = -coord + torch.cummin(plus, dim=axis).values.flip(axis)
+
+        return torch.minimum(forward, backward)
 
     @staticmethod
     def computeL1DistanceToMask(source_mask: torch.Tensor) -> torch.Tensor:
         """计算每个 voxel 到 source_mask 的精确 L1（曼哈顿）距离场。
 
-        第一性原理：L1 距离变换可按轴分离——3D 距离 = 依次沿三个轴做 1D
-        min-plus 距离传播（forward + backward 两个方向）。每个方向用倍增
-        扫描实现，总计 3 轴 x 2 方向 x ceil(log2 R) 次切片 min 运算，
-        全张量并行，CPU / GPU 通用，无任何主机-设备同步或早停分支。
+        第一性原理：L1 距离变换可按轴分离——N 维距离 = 依次沿每个轴做一次
+        1D min-plus 距离传播。每次 1D 传播用「坐标补偿 + 单调 cummin」实现
+        （见 _minPlusTransform1D），总计 N 次 cummin 算子，全张量并行、
+        CPU / GPU 通用，无主机-设备同步、无早停分支、无重叠切片原地写。
 
         Args:
-            source_mask: (R, R, R) bool，距离源（距离 0）。
+            source_mask: (R, R, R) bool（或任意维 bool），距离源（距离 0）。
 
         Returns:
-            (R, R, R) int64 精确 L1 距离场；source 为空时全为 INF = 3R
-            （严格大于网格内最大可能距离 3(R-1)，对应「无限远」哨兵语义）。
+            与输入同形状的 int64 精确 L1 距离场；source 为空时全为
+            INF = sum(shape)（严格大于网格内最大可能距离，对应「无限远」
+            哨兵语义；对立方 (R,R,R) 即 3R）。
         """
         inf = int(sum(source_mask.shape))
         distance = torch.where(
@@ -825,8 +1250,7 @@ class VolumeMarker(object):
         )
 
         for axis in range(source_mask.ndim):
-            VolumeMarker._minPlusScan1D(distance, axis, reverse=False)
-            VolumeMarker._minPlusScan1D(distance, axis, reverse=True)
+            distance = VolumeMarker._minPlusTransform1D(distance, axis)
 
         return distance.clamp(max=inf)
 
@@ -896,6 +1320,65 @@ class VolumeMarker(object):
         return VolumeMarker._makeIjkGrid(coords)
 
     # ------------------------------------------------------------------
+    # 标签合并原子
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _classifyFreeMask(
+        candidate: torch.Tensor,
+        free_any: torch.Tensor,
+        observed_any: torch.Tensor,
+        unobserved_policy: str = 'free',
+    ) -> torch.Tensor:
+        """从渲染证据派生「应赋 FREE_KN」的非候选 voxel mask。
+
+        第一性原理：FREE 只可能是非候选 voxel（候选要么 VALID 要么 UNKNOWN）。
+        一个非候选 voxel 判为 FREE 的依据有两类：
+          - 任一视角给出直接 FREE 证据（在渲染表面前方或投影到背景）；
+          - 从未被任何相机观测到（视锥外/相机后方），按 unobserved_policy 决定。
+
+        Args:
+            candidate: (R, R, R) bool 候选占据体素。
+            free_any: (R, R, R) bool，至少一个视角给出 FREE 证据。
+            observed_any: (R, R, R) bool，至少被一个相机观测到。
+            unobserved_policy: 未观测非候选的归类策略：
+                'free'    -> 视为 FREE（无物体信息，默认，兼容现有下游）；
+                'unknown' -> 视为 UNKNOWN（保守，不假设视锥外为空）。
+
+        Returns:
+            (R, R, R) bool，需要写 FREE_KN 标签的 voxel。
+        """
+        non_candidate = ~candidate
+        if unobserved_policy == 'free':
+            return non_candidate & (free_any | (~observed_any))
+        if unobserved_policy == 'unknown':
+            return non_candidate & free_any
+        raise ValueError(
+            '[ERROR][VolumeMarker::_classifyFreeMask] '
+            f"unobserved_policy must be 'free' or 'unknown', got {unobserved_policy}"
+        )
+
+    @staticmethod
+    def _mergeLabels(
+        R: int,
+        visible_candidate: torch.Tensor,
+        free_mask: torch.Tensor,
+        device: str,
+    ) -> torch.Tensor:
+        """合并 VALID / FREE_KN / UNKNOWN 为最终标签场。
+
+        UNKNOWN(0) 为底；visible_candidate -> VALID(1)；free_mask -> FREE_KN(-K)。
+        visible_candidate 与 free_mask 不相交（前者候选、后者非候选），合并
+        顺序无歧义。
+        """
+        labels = VolumeMarker._emptyLabels(R, VolumeMarker.UNKNOWN, device)
+        labels = torch.where(
+            visible_candidate,
+            torch.full_like(labels, VolumeMarker.VALID),
+            labels,
+        )
+        return VolumeMarker.assignFreeLabels(labels, free_mask)
+
+    # ------------------------------------------------------------------
     # 主入口
     # ------------------------------------------------------------------
     @staticmethod
@@ -921,7 +1404,9 @@ class VolumeMarker(object):
                      均匀采样得到稠密点云再体素化，覆盖网格穿过的所有体素；
                    * 点云 / numpy / tensor / 点云文件 -> 点体素化（点落在哪个
                      体素）；
-               - 否则用所有 camera.toCCM(use_mask=False) 的并集体素化。
+                 提供 geometry 时只需相机位姿/内参来渲染遮挡，不要求 depth。
+               - 否则用所有 camera.toCCM(use_mask=False) 的并集体素化，此路径
+                 要求每个相机已加载 depth 与 valid_depth_mask。
           2. 边界 mesh：对候选体素并集构造只含外露面的立方体表面 mesh，并记录
              每个三角对应的 voxel。
           3. 单次渲染、统一判定（_renderClassify）：从每个相机用 nvdiffrast
@@ -957,27 +1442,18 @@ class VolumeMarker(object):
         device = ref_camera.device
         dtype = ref_camera.dtype
 
-        VolumeMarker._requireDepthLoaded(camera_list, 'markVisible')
-
         # --- 1. 候选占据体素 ---
-        if geometry is not None:
-            candidate = VolumeMarker._geometryToOccupancy(
-                geometry, R, dtype, device,
-            )
-        else:
-            candidate_points = VolumeMarker._collectCandidatePoints(
-                camera_list, dtype, device,
-            )
-            candidate = VolumeMarker._voxelizePoints(candidate_points, R, device)
+        # depth 依赖收口在 _buildCandidateOccupancy：仅 geometry 为 None 的
+        # depth 候选路径才要求 depth；显式 geometry 只需相机位姿/内参。
+        candidate = VolumeMarker._buildCandidateOccupancy(
+            camera_list, geometry, R, dtype, device,
+        )
 
         # --- 无候选体素：空间无占据，整体为 FREE（无 VALID -> 哨兵） ---
         if not bool(candidate.any()):
             return VolumeMarker._emptyLabels(
                 R, VolumeMarker.freeLabelInf(R), device,
             )
-
-        labels = VolumeMarker._emptyLabels(R, VolumeMarker.UNKNOWN, device)
-        non_candidate = ~candidate
 
         # --- 2 & 3. 边界 mesh + 单次渲染同源产出 VALID/FREE/observed ---
         vertices, faces, triangle_to_voxel = \
@@ -989,18 +1465,9 @@ class VolumeMarker(object):
             )
 
         # --- 4. 标签合并 ---
-        # 非候选 -> FREE，当且仅当任一视角给出 FREE 证据，或从未被任何相机
-        # 观测到（视线外，一定无物体信息）。
-        free_mask = non_candidate & (free_any | (~observed_any))
-
-        # 候选且任一视角可见 -> VALID（free_mask 仅含非候选，二者不相交）。
-        labels = torch.where(
-            visible_candidate,
-            torch.full_like(labels, VolumeMarker.VALID),
-            labels,
+        free_mask = VolumeMarker._classifyFreeMask(
+            candidate, free_any, observed_any, unobserved_policy='free',
         )
 
-        # --- 5. FREE_KN 标签：全量 L1 距离 -> -K ---
-        labels = VolumeMarker.assignFreeLabels(labels, free_mask)
-
-        return labels
+        # --- 5. VALID / FREE_KN / UNKNOWN 合并（含全量 L1 距离 -> -K） ---
+        return VolumeMarker._mergeLabels(R, visible_candidate, free_mask, device)

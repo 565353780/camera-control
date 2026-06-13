@@ -49,7 +49,7 @@ class CameraData(object):
         if cy is not None:
             self.cy = float(cy)
         else:
-            self.cy = float(0.5 * self.width)
+            self.cy = float(0.5 * self.height)
         self.dtype = dtype
         self.device = device
 
