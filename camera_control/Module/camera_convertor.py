@@ -1358,6 +1358,15 @@ class CameraConvertor(object):
                 pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=30))
 
         camera_num = len(cameras)
+
+        # 要求所有相机要么都有 image_id, 要么都没有, 不允许混用。
+        has_image_id = [camera.image_id is not None for camera in cameras]
+        if any(has_image_id) and not all(has_image_id):
+            raise ValueError(
+                '[ERROR][CameraConvertor::createColmapDataFolder] '
+                'cameras must either all have image_id or all have none.'
+            )
+
         height, width = cameras[0].image.shape[:2]
         fx = cameras[0].fx
         fy = cameras[0].fy
@@ -1435,9 +1444,18 @@ class CameraConvertor(object):
 
         png_params = [cv2.IMWRITE_PNG_COMPRESSION, 0]
 
+        # 为每个相机确定 image_basename: 全部有 image_id 时直接取其 basename;
+        # 全部没有时从 000001 开始按 (索引 + 1) 赋值。
+        if all(has_image_id):
+            image_basenames = [
+                os.path.splitext(camera.image_id)[0] for camera in cameras
+            ]
+        else:
+            image_basenames = [f'{camera_idx + 1:06d}' for camera_idx in range(camera_num)]
+
         def _process_one_camera(camera_idx):
             camera = cameras[camera_idx]
-            image_basename = os.path.splitext(camera.image_id)[0]
+            image_basename = image_basenames[camera_idx]
             image_filename = image_basename + '.png'
 
             colmap_pose = camera.toColmapPose().cpu().numpy()
