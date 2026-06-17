@@ -1143,6 +1143,82 @@ class NVDiffRastRenderer(object):
         }
 
     @staticmethod
+    def renderTexturedPbrIbl(
+        mesh: Union[trimesh.Trimesh, trimesh.Scene],
+        camera: Camera,
+        ibl: Optional[dict] = None,
+        material: Optional[dict] = None,
+        ibl_hdr_path: Optional[str] = None,
+        pbr_seed: Optional[int] = None,
+        exposure: float = 1.2,
+        bg_color: list = [255, 255, 255],
+        vertices_tensor: Optional[torch.Tensor] = None,
+        rasterize_dict: Optional[dict] = None,
+    ) -> dict:
+        """PBR + IBL，但漫反射 albedo 取自 mesh 自带纹理（texture-DEPENDENT 版 renderGray）。
+
+        光照模型与 :meth:`renderGray` 完全一致（同一 IBL env + 同一 roughness/metallic），
+        只把灰材质 base_color 换成逐像素纹理采样值，因此"有纹理 / 无纹理"两路光照风格
+        一致、仅 albedo 不同。无纹理时 ``albedo=None`` 自动退回灰材质 base_color（=灰模
+        PBR+IBL），保证 'auto' 路径总有合理输出。纹理按 sRGB->linear 解码后作为 linear
+        albedo 喂 PBR 着色（与灰材质 base 同处于 linear 空间）。
+        """
+        from camera_control.Method.pbr_ibl import (
+            prepare_ibl, sample_material, render_pbr_ibl, resolveIblHdrPath,
+        )
+
+        if ibl is None:
+            ibl = prepare_ibl(resolveIblHdrPath(ibl_hdr_path), camera.device)
+        if material is None:
+            material = sample_material(pbr_seed, camera.device)
+        if rasterize_dict is None:
+            rasterize_dict = NVDiffRastRenderer.rasterize(mesh, camera, vertices_tensor)
+
+        vertex_count = (vertices_tensor.shape[0] if vertices_tensor is not None
+                        else len(mesh.vertices))
+        use_texture, uvs_np, tex_img = NVDiffRastRenderer._sanitizeTextureInputs(
+            mesh, vertex_count)
+
+        albedo = None
+        if use_texture:
+            if len(tex_img.shape) == 2:
+                tex_img = np.stack([tex_img] * 3, axis=-1)
+            elif tex_img.shape[-1] == 4:
+                tex_img = tex_img[:, :, :3]
+            texture = toTensor(tex_img, torch.float32, 'cpu') / 255.0
+            texture = texture.flip(0).contiguous().unsqueeze(0).to(camera.device)
+            uvs_tensor = toTensor(uvs_np, torch.float32, camera.device)
+            faces = rasterize_dict['faces']
+            rast_out = rasterize_dict['rast_out']
+            uv_interp, _ = dr.interpolate(uvs_tensor.unsqueeze(0), rast_out, faces)
+            wrap_s, wrap_t = 'clamp', 'clamp'
+            if hasattr(mesh, 'metadata') and 'uv_wrap_mode' in mesh.metadata:
+                wrap_s, wrap_t = mesh.metadata['uv_wrap_mode']
+            uv_interp = NVDiffRastRenderer._wrapUV(uv_interp, wrap_s, wrap_t)
+            tex = dr.texture(texture, uv_interp, filter_mode='linear')[0]    # [H,W,c] in [0,1]
+            c = tex.shape[-1]
+            if c < 3:
+                tex = torch.cat(
+                    [tex, torch.zeros(*tex.shape[:-1], 3 - c, device=tex.device)], dim=-1)
+            elif c > 3:
+                tex = tex[..., :3]
+            albedo = tex.clamp(0.0, 1.0) ** 2.2     # sRGB -> linear
+
+        rgb = render_pbr_ibl(
+            mesh, camera, ibl, material,
+            exposure=exposure, rasterize_dict=rasterize_dict,
+            bg_color=bg_color, vertices_tensor=vertices_tensor, albedo=albedo,
+        )
+
+        rast_out = rasterize_dict['rast_out']
+        rast_out_db = rasterize_dict['rast_out_db']
+        return {
+            'rgb': rgb,
+            'rasterize_output': rast_out[0],
+            'bary_derivs': rast_out_db[0] if rast_out_db is not None else torch.zeros_like(rast_out[0]),
+        }
+
+    @staticmethod
     def render(
         mesh: Union[trimesh.Trimesh, trimesh.Scene],
         camera: Camera,
@@ -1192,6 +1268,8 @@ class NVDiffRastRenderer(object):
           - 'mask'  : 输出 'mask'（以及内部用于合成的光栅结果）
           - 'rgb'   : 使用 renderTexture，输出 'rgb'
           - 'gray'  : 使用 renderGray (PBR+IBL 灰模, 纹理无关)，输出 'gray'
+          - 'rgb_pbr': 使用 renderTexturedPbrIbl (PBR+IBL，albedo 取自纹理，无纹理
+                      fallback 灰模)，输出 'rgb_pbr'
           - 'depth' : 使用 renderDepth，输出 'depth' 与 'rgb_depth'
           - 'normal': 使用 renderNormal，输出
                       'normal_world', 'normal_camera',
@@ -1258,6 +1336,23 @@ class NVDiffRastRenderer(object):
                 rasterize_dict=rasterize_dict,
             )
             results['gray'] = gray_out['rgb']
+
+        # 纹理 PBR+IBL：与 'gray' 同一套 IBL 光照，diffuse albedo 取自纹理（无纹理时
+        # 自动 fallback 到灰材质 = 灰模），主 rgb 写到 'rgb_pbr'。
+        if 'rgb_pbr' in render_types:
+            pbr_out = NVDiffRastRenderer.renderTexturedPbrIbl(
+                mesh=mesh,
+                camera=camera,
+                ibl=ibl,
+                material=material,
+                ibl_hdr_path=ibl_hdr_path,
+                pbr_seed=pbr_seed,
+                exposure=pbr_exposure,
+                bg_color=bg_color,
+                vertices_tensor=vertices_tensor,
+                rasterize_dict=rasterize_dict,
+            )
+            results['rgb_pbr'] = pbr_out['rgb']
 
         # 深度渲染，depth + depth 可视化 rgb
         #FIXME: depth should not antialias

@@ -167,7 +167,7 @@ def sample_material(seed, device):
 
 
 @torch.no_grad()
-def shade_pbr_ibl(normal_world, view_dir, ibl, material, exposure=1.2):
+def shade_pbr_ibl(normal_world, view_dir, ibl, material, exposure=1.2, albedo=None):
     """Atomic per-pixel Cook-Torrance GGX + IBL shader (geometry-source agnostic).
 
     纯逐像素着色原子函数：不关心几何缓冲来自哪里（mesh 光栅化插值、GS splatting
@@ -189,18 +189,26 @@ def shade_pbr_ibl(normal_world, view_dir, ibl, material, exposure=1.2):
     NoV = torch.clamp((Nw * Vd).sum(-1, keepdim=True), 1e-4, 1.0)
     R = F.normalize(2 * (Nw * Vd).sum(-1, keepdim=True) * Nw - Vd, dim=-1)
 
-    base = material['base_color']; rough = material['roughness']
-    metal = material['metallic']; F0 = material['F0']
+    rough = material['roughness']; metal = material['metallic']
+    # albedo=None -> 灰材质常量 base_color（[1,1,3] 广播）；给定逐像素 albedo
+    # ([H,W,3]，纹理采样的 LINEAR 漫反射率)则用它，F0 也按逐像素 albedo 重算，
+    # 从而带纹理渲染与灰模共享同一套 IBL 着色数学、只换 albedo。
+    if albedo is None:
+        base = material['base_color'].view(1, 1, 3)
+        F0 = material['F0'].view(1, 1, 3)
+    else:
+        base = albedo
+        F0 = 0.04 * (1 - metal) + albedo * metal
 
     irr = _sh_irradiance(Nw, ibl['L_sh'])
-    diffuse = (1 - metal) * base.view(1, 1, 3) * irr / math.pi
+    diffuse = (1 - metal) * base * irr / math.pi
 
     n_lvl = ibl['n_lvl']
     lvl = float(rough) * (n_lvl - 1)
     lo = int(math.floor(lvl)); hi = min(lo + 1, n_lvl - 1); fr = lvl - lo
     prefilt = _sample(ibl['spec_mips'][lo], R) * (1 - fr) + _sample(ibl['spec_mips'][hi], R) * fr
     sc, bs = _env_brdf_approx(rough * torch.ones_like(NoV[..., 0]), NoV[..., 0], dev)
-    specular = prefilt * (F0.view(1, 1, 3) * sc.unsqueeze(-1) + bs.unsqueeze(-1))
+    specular = prefilt * (F0 * sc.unsqueeze(-1) + bs.unsqueeze(-1))
 
     color = (diffuse + specular) * exposure
     return torch.clamp(_aces(color), 0, 1) ** (1 / 2.2)         # [H,W,3] in [0,1], sRGB
@@ -208,11 +216,13 @@ def shade_pbr_ibl(normal_world, view_dir, ibl, material, exposure=1.2):
 
 @torch.no_grad()
 def render_pbr_ibl(mesh, camera, ibl, material, exposure=1.2,
-                   rasterize_dict=None, bg_color=(255, 255, 255), vertices_tensor=None):
+                   rasterize_dict=None, bg_color=(255, 255, 255), vertices_tensor=None,
+                   albedo=None):
     """Render one view with PBR+IBL. Returns rgb [H,W,3] float in [0,1] (object on bg_color).
 
     Mesh 路径包装器：光栅化得到法线/位置/掩码缓冲，再调用原子着色器
-    :func:`shade_pbr_ibl` 完成逐像素着色并合成背景。
+    :func:`shade_pbr_ibl` 完成逐像素着色并合成背景。``albedo`` 给定（[H,W,3] LINEAR
+    逐像素漫反射率，如纹理采样值）时用它替代灰材质 base_color，光照模型不变。
     """
     from camera_control.Module.nvdiffrast_renderer import NVDiffRastRenderer
     from camera_control.Method.data import toTensor
@@ -237,7 +247,7 @@ def render_pbr_ibl(mesh, camera, ibl, material, exposure=1.2,
     cam_pos = camera.pos.to(dev).float().view(1, 1, 3)
     Vd = F.normalize(cam_pos - Pw, dim=-1)
 
-    ldr = shade_pbr_ibl(Nw, Vd, ibl, material, exposure=exposure)
+    ldr = shade_pbr_ibl(Nw, Vd, ibl, material, exposure=exposure, albedo=albedo)
 
     bg = toTensor(list(bg_color), torch.float32, dev).view(1, 1, 3) / 255.0
     rgb = torch.where(mask > 0, ldr, bg)
