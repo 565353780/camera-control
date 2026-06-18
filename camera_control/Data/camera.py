@@ -42,6 +42,11 @@ class CameraData(object):
         self.width = int(width)
         self.height = int(height)
         self.fovx_degree = float(fovx_degree)
+        # fy 默认与 fx 一致（由 fovx_degree 推出），但 PINHOLE 相机的 fx != fy 时
+        # 必须独立保存。为与 fovx_degree 对称（角度量、与分辨率解耦），这里存垂直
+        # FOV 而非像素 fy：setImageSize 改变 height 时 fy 会像 fx 一样自动随分辨率
+        # 缩放，避免比例失配。_fovy_degree_override 为 None 表示沿用 fx 推出的 fy。
+        self._fovy_degree_override: Optional[float] = None
         if cx is not None:
             self.cx = float(cx)
         else:
@@ -70,17 +75,23 @@ class CameraData(object):
 
     @property
     def fovy_degree(self) -> float:
+        # 独立设置过垂直 FOV 时直接返回；否则退化为旧行为（由 fovx 与宽高比推导）。
+        fovy_override = getattr(self, '_fovy_degree_override', None)
+        if fovy_override is not None:
+            return fovy_override
         fovx_rad = math.radians(self.fovx_degree)
         fovy_rad = 2.0 * math.atan(self.height / self.width * math.tan(fovx_rad / 2.0))
         return math.degrees(fovy_rad)
 
     @property
     def fy(self) -> float:
-        return self.fx
+        # fy 始终由 fovy_degree 与 height 推出，保证随分辨率缩放，与 fx 对称。
+        fovy_rad = math.radians(self.fovy_degree)
+        return self.height / (2.0 * math.tan(fovy_rad / 2.0))
 
     @fy.setter
     def fy(self, value: float) -> None:
-        self.fovx_degree = CameraData.fxToFovxDegree(float(value), self.width)
+        self._fovy_degree_override = CameraData.fxToFovxDegree(float(value), self.height)
 
     @staticmethod
     def fxToFovxDegree(fx: float, width: int) -> float:
@@ -102,12 +113,20 @@ class CameraData(object):
         cy: float,
         width: Optional[int] = None,
         height: Optional[int] = None,
+        fy: Optional[float] = None,
     ) -> bool:
         if width is not None:
             self.width = int(width)
         if height is not None:
             self.height = int(height)
         self.fovx_degree = CameraData.fxToFovxDegree(fx, self.width)
+        # fy 为 None 或与 fx 相等时不单独保存（沿用 fx）；不同时按当前 height 换算成
+        # 垂直 FOV 存储，保证非各向同性 PINHOLE 内参在渲染与反投影中都被正确使用，
+        # 且后续改变分辨率时 fy 随之缩放。
+        if fy is not None and abs(float(fy) - float(fx)) > 1e-9:
+            self._fovy_degree_override = CameraData.fxToFovxDegree(float(fy), self.height)
+        else:
+            self._fovy_degree_override = None
         self.cx = float(cx)
         self.cy = float(cy)
         return True
@@ -129,6 +148,10 @@ class CameraData(object):
             dtype=dtype,
             device=device,
         )
+        # 向后兼容：旧 dict 无 'fy' 字段时沿用 fx；新 dict 恢复真实 fy。
+        fy = data_dict.get('fy', None) if hasattr(data_dict, 'get') else None
+        if fy is not None and abs(float(fy) - float(camera.fx)) > 1e-9:
+            camera._fovy_degree_override = CameraData.fxToFovxDegree(float(fy), camera.height)
         return camera
 
     @classmethod
@@ -572,7 +595,7 @@ class CameraData(object):
         cy = float(intrinsic[1][2])
         width = int(2.0 * cx)
         height = int(2.0 * cy)
-        self.setIntrinsic(float(intrinsic[0][0]), cx, cy, width, height)
+        self.setIntrinsic(float(intrinsic[0][0]), cx, cy, width, height, fy=float(intrinsic[1][1]))
 
         # 定义坐标系转换矩阵
         C = torch.diag(torch.tensor([1, -1, -1, 1], dtype=self.dtype, device=self.device))
@@ -592,7 +615,7 @@ class CameraData(object):
         cy = float(intrinsic[1][2])
         width = int(2.0 * cx)
         height = int(2.0 * cy)
-        self.setIntrinsic(float(intrinsic[0][0]), cx, cy, width, height)
+        self.setIntrinsic(float(intrinsic[0][0]), cx, cy, width, height, fy=float(intrinsic[1][1]))
 
         self.setWorld2CameraCV(extrinsic)
         return True
@@ -614,7 +637,7 @@ class CameraData(object):
         cy = float(intrinsic[1][2])
         width = int(2.0 * cx)
         height = int(2.0 * cy)
-        self.setIntrinsic(float(intrinsic[0][0]), cx, cy, width, height)
+        self.setIntrinsic(float(intrinsic[0][0]), cx, cy, width, height, fy=float(intrinsic[1][1]))
 
         quat = pose[:4]   # qw, qx, qy, qz
         t = pose[4:7]     # tx, ty, tz
@@ -871,6 +894,7 @@ class CameraData(object):
             'width': self.width,
             'height': self.height,
             'fovx_degree': self.fovx_degree,
+            'fy': float(self.fy),
             'cx': self.cx,
             'cy': self.cy,
             'world2camera': toNumpy(self.world2camera, np.float64),
