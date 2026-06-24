@@ -21,7 +21,7 @@ def visibleLabelFreeKN(k: int) -> int:
 
 
 def visibleLabelFreeInf(resolution: int) -> int:
-    """返回「无限远 FREE」哨兵编码：-(3R)，用于场景中无任何 VALID voxel。"""
+    """返回「无限远 FREE」哨兵编码：-(3R)，用于场景全 FREE、无任何非 FREE 锚点。"""
     if resolution <= 0:
         raise ValueError(
             '[ERROR][visible::visibleLabelFreeInf] '

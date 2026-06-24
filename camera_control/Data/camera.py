@@ -777,18 +777,26 @@ class CameraData(object):
 
         相机坐标系：X右，Y上，Z后（看向 -Z 方向）
         用圆柱体替换直线，模拟 frustum wireframe 效果
+
+        四个角点方向由当前相机的宽高与 fovx_degree 决定，far 表示每个角点
+        到相机位置的欧氏距离（而非沿 -Z 轴的深度）。
         """
         import open3d as o3d
-        half_width = (self.width / self.fx) * far
-        half_height = (self.height / self.fy) * far
+        # 由水平 FOV 推出水平半角正切，再按宽高比推出垂直半角正切。
+        tan_half_x = math.tan(math.radians(self.fovx_degree) / 2.0)
+        tan_half_y = tan_half_x * (self.height / self.width)
 
-        # 定义远平面四角点
-        far_corners_camera = np.array([
-            [-half_width, -half_height, -far],  # 左下
-            [half_width, -half_height, -far],   # 右下
-            [half_width, half_height, -far],    # 右上
-            [-half_width, half_height, -far],   # 左上
+        # 图像四角对应的视线方向（相机坐标系，看向 -Z）
+        corner_dirs = np.array([
+            [-tan_half_x, -tan_half_y, -1.0],  # 左下
+            [tan_half_x, -tan_half_y, -1.0],   # 右下
+            [tan_half_x, tan_half_y, -1.0],    # 右上
+            [-tan_half_x, tan_half_y, -1.0],   # 左上
         ], dtype=np.float64)
+
+        # 归一化后乘以 far，使每个角点到相机位置的距离恰为 far
+        corner_dirs /= np.linalg.norm(corner_dirs, axis=1, keepdims=True)
+        far_corners_camera = corner_dirs * far
 
         # 相机坐标转世界
         far_corners_camera_torch = torch.from_numpy(far_corners_camera).to(

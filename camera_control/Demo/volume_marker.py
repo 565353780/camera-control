@@ -58,7 +58,6 @@ def _save_volume_glb_with_cameras(
 
 def demo_mark_glb():
     data_folder_path = '/home/lichanghao/chLi/Dataset/test_glb/'
-    output_folder_path = data_folder_path + 'volume_marker_debug/'
     glb_file_path = data_folder_path + 'gt_mesh.glb'
 
     mesh = loadMeshFile(glb_file_path)
@@ -96,9 +95,6 @@ def demo_mark_glb():
         camera_list=camera_list,
         volume_resolution=16,
         geometry=sample_points,
-        debug=True,
-        debug_folder_path=output_folder_path,
-        debug_prefix='glb',
     )
 
     n_valid = int((visible_volume == VolumeMarker.VALID).sum().item())
@@ -106,8 +102,8 @@ def demo_mark_glb():
     n_unknown = int((visible_volume == VolumeMarker.UNKNOWN).sum().item())
     print(f'[demo_mark_glb] VALID={n_valid}, FREE={n_free}, UNKNOWN={n_unknown}')
 
-    # 隐藏 UNKNOWN 灰色四面体、显示全部 FREE 层级（max_free_k=None），
-    # 便于直接核对 VALID/FREE 的几何与 FREE_KN 距离分层。
+    # 只绘制最近邻 FREE 层（max_free_k=1）以控制 GLB 体积，
+    # 同时保留 UNKNOWN 灰色四面体作为空间参照。
     mesh = toVisibleVolumeMesh(
         labels=visible_volume,
         max_free_k=1,
@@ -117,8 +113,28 @@ def demo_mark_glb():
     _save_volume_glb_with_cameras(
         mesh=mesh,
         camera_list=camera_list,
-        glb_file_path=output_folder_path + 'vis_volume_label_pcd.glb',
+        glb_file_path=data_folder_path + 'vis_volume_label_pcd.glb',
     )
+
+    # 逐相机分别保存单相机 volume GLB
+    for i, cam in enumerate(camera_list):
+        visible_volume_single = VolumeMarker.markVisible(
+            camera_list=[cam],
+            volume_resolution=16,
+            geometry=sample_points,
+        )
+
+        mesh_single = toVisibleVolumeMesh(
+            labels=visible_volume_single,
+            max_free_k=1,
+            show_unknown=True,
+        )
+
+        _save_volume_glb_with_cameras(
+            mesh=mesh_single,
+            camera_list=[cam],
+            glb_file_path=data_folder_path + f'vis_volume_label_pcd_cam_{i}.glb',
+        )
     return True
 
 def demo_mark_real_data():
@@ -149,22 +165,4 @@ def demo_mark_real_data():
         camera_list=camera_list,
         glb_file_path=colmap_data_folder_path + 'vis_volume_label_pcd.glb',
     )
-
-    for i in range(len(camera_list)):
-        visible_volume = VolumeMarker.markVisible(
-            camera_list=[camera_list[i]],
-            volume_resolution=16,
-            geometry=gs_points,
-        )
-
-        mesh = toVisibleVolumeMesh(
-            labels=visible_volume,
-            max_free_k=1,
-        )
-
-        _save_volume_glb_with_cameras(
-            mesh=mesh,
-            camera_list=[camera_list[i]],
-            glb_file_path=colmap_data_folder_path + f'vis_volume_label_{i}.glb',
-        )
     return True

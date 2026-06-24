@@ -1001,6 +1001,11 @@ class VolumeMarker(object):
             mask 外（mask==0）说明相机在该方向未观测到任何物体，整条射线空到无穷
             远，遮挡终点取 +inf（任何有限前方深度都满足）。
 
+        关键不变量：画面外（UV 不在 [0, 1]^2 或非有限）不是 camera.mask 外。
+        mask_outside 显式要求 in_frame，因此画面外点恒 mask_outside=False、
+        candidate_hit=False、effective_depth=-inf，绝不会被「+inf 空射线」释放。
+        投影到画面外的点意味着该相机对其没有观测，无权对其判定 FREE。
+
         Args:
             rendered_depth: (H, W) 候选立方体相机前方正距离，背景为 0。
             hit_mask: (H, W) bool，像素是否命中候选立方体渲染表面。
@@ -1013,7 +1018,7 @@ class VolumeMarker(object):
             mask_outside:    (N,) bool，存在 camera.mask 且画面内 UV 落在其外。
             effective_depth: (N,) 逐点「严格前方」比较用的遮挡终点深度：
                 mask 外 -> +inf；否则命中候选 -> 候选渲染 depth；否则（画面内但无
-                候选遮挡终点）-> -inf（无可信终点，任何点都不可释放）。
+                候选遮挡终点，或画面外）-> -inf（无可信终点，任何点都不可释放）。
         """
         in_frame = (
             torch.isfinite(uv).all(dim=-1)
@@ -1162,6 +1167,45 @@ class VolumeMarker(object):
         ).reshape(-1, 8, 3)  # (R^3, 8, 3)
         return torch.cat([centers, corners], dim=1)  # (R^3, 9, 3)
 
+    # 单位立方体外边界面所在的坐标值：corner 任一坐标命中 ±0.5 即在域边界。
+    DOMAIN_BOUND: float = 0.5
+
+    @staticmethod
+    def _createVoxelQueryBoundaryExemptMask(
+        R: int,
+        device: str,
+    ) -> torch.Tensor:
+        """生成 (R^3, 9) bool：哪些查询点是单位立方体外边界 corner，可豁免判定。
+
+        第一性原理：体素域固定为单位立方体 [-0.5, 0.5]^3，其最外围 6 个面是空间
+        的硬边界——从外向内看，落在这 6 个面上的 corner 必然「在物体之外、朝向自由
+        空间」，无需任何相机对其完成投影/遮挡证明即可视作自由侧。因此最外围一圈
+        voxel 不应因为这些边界 corner 投影出画面或缺少遮挡终点而被否决 FREE；只需
+        判定其余「真正深入空间」的点（中心 + 非边界 corner）。
+
+        与 _createVoxelQueryPoints 的列顺序严格一致：
+          - 第 0 列是体素中心，永远不豁免（中心点必须被可信证明在前方）；
+          - 第 1..8 列是 8 角点，只要该 corner 任一坐标落在 ±0.5（DOMAIN_BOUND）
+            即位于单位立方体外边界 6 面之一，标为 True（豁免）。
+
+        该原子只依赖体素网格几何（不依赖相机），可被判定链路与测试/诊断复用。
+
+        Returns:
+            (R^3, 9) bool，True 表示该查询点为外边界 corner，可在 9 点判定中跳过。
+        """
+        corners = VolumeMarker._createVoxelCorners(
+            R, torch.float32, device,
+        ).reshape(-1, 8, 3)  # (R^3, 8, 3)
+
+        on_boundary = (
+            corners.abs() >= (VolumeMarker.DOMAIN_BOUND - 1e-6)
+        ).any(dim=-1)  # (R^3, 8)
+
+        center_exempt = torch.zeros(
+            (corners.shape[0], 1), dtype=torch.bool, device=on_boundary.device,
+        )
+        return torch.cat([center_exempt, on_boundary], dim=1)  # (R^3, 9)
+
     @staticmethod
     def _cameraPixelObservationMask(
         camera: Camera,
@@ -1269,8 +1313,9 @@ class VolumeMarker(object):
         point_depth9: torch.Tensor,
         in_frame9: torch.Tensor,
         effective_depth9: torch.Tensor,
+        exempt_mask9: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """9 点严格 FREE 证明：中心 + 8 角点全部落在画面内且严格在遮挡终点前方。
+        """9 点严格 FREE 证明：所有非豁免点落在画面内且严格在遮挡终点前方。
 
         第一性原理：FREE 必须是「被可信射线证明为空」的体素。voxel 的中心与 8 个
         角点合计 9 个采样点，唯有它们全部满足「画面内 且 相机前方深度 < 遮挡终点
@@ -1279,18 +1324,29 @@ class VolumeMarker(object):
           - 候选渲染命中 -> 候选表面深度（点在其前方即被该表面证明为空）；
           - 相机 mask 外 -> +inf（该方向未观测到物体，空到无穷远，必然在前方）；
           - 无可信终点 -> -inf（任何点都不可能在其前方，天然否决）。
-        某个视角让全部 9 点都通过即给出 FREE 证据（候选体素自身在合并阶段被排除，
-        不会变 FREE）。
+
+        exempt_mask9（可选）标记单位立方体外边界 corner：这些点位于空间硬边界、
+        朝向自由空间，无需任何相机的投影/遮挡证明即视作自由侧，故在判定中跳过。
+        中心点永远不在豁免之列，必须被可信证明在前方。豁免只放宽「这些边界点」，
+        不改变其余必需点的严格要求——尤其「画面外」仍然是普通必需点的否决条件，
+        画面外绝不等同于 camera.mask 外（后者由 effective_depth 的 +inf 通道表达）。
+
+        某个视角让所有非豁免点都通过即给出 FREE 证据（候选体素自身在合并阶段被
+        排除，不会变 FREE）。
 
         Args:
             point_depth9/in_frame9/effective_depth9: 均为 (N, 9)。
+            exempt_mask9: (N, 9) bool 或 None。True 表示该点为外边界 corner，
+                在判定中视作已通过；None 等价于全 False（无豁免）。
 
         Returns:
             (N,) bool，该视角下体素是否获得 FREE 证据。
         """
         eps = torch.clamp(point_depth9.abs() * 1e-4, min=1e-6)
-        point_in_front = in_frame9 & (point_depth9 < effective_depth9 - eps)
-        return point_in_front.all(dim=-1)
+        point_ok = in_frame9 & (point_depth9 < effective_depth9 - eps)
+        if exempt_mask9 is not None:
+            point_ok = point_ok | exempt_mask9
+        return point_ok.all(dim=-1)
 
     @staticmethod
     def _renderCandidateForCamera(
@@ -1327,6 +1383,7 @@ class VolumeMarker(object):
         query_points_flat: torch.Tensor,
         R: int,
         device: str,
+        boundary_exempt_mask_flat: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """单相机 9 点 FREE 证据 -> (R, R, R) bool。
 
@@ -1335,9 +1392,14 @@ class VolumeMarker(object):
         做严格判定。不再使用 pixel_obs 做门控：mask 外区域改由「+inf 遮挡终点」通道
         直接释放，mask 内区域则需候选渲染命中作为有限遮挡终点。
 
+        boundary_exempt_mask_flat 标记单位立方体外边界 corner（与 query 点列对齐），
+        这些点在判定中跳过，使最外围一圈 voxel 不因边界 corner 投影出画面/缺遮挡终点
+        而被否决；中心点不在豁免之列。
+
         Args:
             rendered_depth/hit_mask: 候选立方体在该相机的渲染遮挡证据。
             query_points_flat: (R^3, 9, 3) 体素 9 点世界坐标（与相机同 dtype/device）。
+            boundary_exempt_mask_flat: (R^3, 9) bool 或 None，外边界 corner 豁免。
         """
         height = int(rendered_depth.shape[0])
         width = int(rendered_depth.shape[1])
@@ -1350,10 +1412,16 @@ class VolumeMarker(object):
             VolumeMarker._sampleCandidateAndCameraMaskAtUV(
                 camera, rendered_depth, hit_mask, uv, height, width,
             )
+        exempt9 = None
+        if boundary_exempt_mask_flat is not None:
+            exempt9 = boundary_exempt_mask_flat.reshape(num_voxels, 9).to(
+                device=in_frame.device,
+            )
         return VolumeMarker._freeEvidenceNinePointsInFront(
             point_depth.reshape(num_voxels, 9),
             in_frame.reshape(num_voxels, 9),
             effective_depth.reshape(num_voxels, 9),
+            exempt9,
         ).reshape(R, R, R).to(device)
 
     @staticmethod
@@ -1362,7 +1430,6 @@ class VolumeMarker(object):
         candidate: torch.Tensor,
         R: int,
         device: str,
-        per_camera_sink: Optional[list] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """单次候选立方体渲染派生 VALID 与 FREE（用户目标流程阶段 c + d）。
 
@@ -1370,18 +1437,14 @@ class VolumeMarker(object):
         depth（不开抗锯齿）：
           - VALID（阶段 c）：命中的三角 id -> 候选体素（受相机 mask 观测域
             门控）-> 跨视角并集，即真正可见的候选 = VALID；
-          - FREE（阶段 d）：对每个体素投影其「中心 + 8 角点」共 9 点，要求 9 点
-            uv 全部落在画面内、且各自相机前方深度都严格小于该点遮挡终点深度
-            （候选渲染 depth；UV 落在 camera.mask 外时遮挡终点视为 +inf）->
-            跨视角并集，即 FREE 证据。
+          - FREE（阶段 d）：对每个体素投影其「中心 + 8 角点」共 9 点，要求其中所有
+            非外边界豁免点 uv 落在画面内、且各自相机前方深度都严格小于该点遮挡终点
+            深度（候选渲染 depth；UV 落在 camera.mask 外时遮挡终点视为 +inf；画面外
+            不视作 mask 外）。单位立方体外边界 corner 作为豁免点跳过 -> 跨视角并集，
+            即 FREE 证据。
 
         VALID 与 FREE 来自同一次渲染：mask 内由候选立方体表面提供有限遮挡终点，
         mask 外由「相机未观测到物体」直接释放为空（遮挡终点 +inf）。
-
-        Args:
-            per_camera_sink: 若提供 list，则逐相机 append
-                {'visible': (R,R,R) bool, 'free_evidence': (R,R,R) bool}，
-                供 debug 单视角中间结果导出（默认 None 不收集）。
 
         Returns:
             visible_candidate: (R, R, R) bool，跨视角真正可见的候选体素（VALID）。
@@ -1399,10 +1462,11 @@ class VolumeMarker(object):
         cand_mesh = VolumeMarker._trimeshFromTensors(cand_vertices, cand_faces)
         cand_tri2voxel = cand_tri2voxel.to(device)
 
-        # 同一 device 上的 float32 顶点张量、以及 voxel 9 点（中心+8角点，只依赖
-        # R/dtype/device）跨相机复用，避免重复搬运/构造。
+        # 同一 device 上的 float32 顶点张量、voxel 9 点（中心+8角点）、以及外边界
+        # corner 豁免 mask（均只依赖 R/dtype/device）跨相机复用，避免重复构造。
         cand_vert_cache: dict = {}
         query_points_cache: dict = {}
+        boundary_exempt_cache: dict = {}
         for camera in camera_list:
             vtensor = cand_vert_cache.get(camera.device)
             if vtensor is None:
@@ -1419,7 +1483,7 @@ class VolumeMarker(object):
                 rast_out, cand_tri2voxel, R, device, pixel_obs,
             )
 
-            # --- 阶段 d：9 点（中心+8角点）全部严格在遮挡终点前方 -> FREE ---
+            # --- 阶段 d：非外边界豁免点全部严格在遮挡终点前方 -> FREE ---
             cache_key = (camera.dtype, camera.device)
             query_points = query_points_cache.get(cache_key)
             if query_points is None:
@@ -1428,18 +1492,21 @@ class VolumeMarker(object):
                 )  # (R^3, 9, 3)
                 query_points_cache[cache_key] = query_points
 
+            boundary_exempt = boundary_exempt_cache.get(camera.device)
+            if boundary_exempt is None:
+                boundary_exempt = \
+                    VolumeMarker._createVoxelQueryBoundaryExemptMask(
+                        R, camera.device,
+                    )  # (R^3, 9)
+                boundary_exempt_cache[camera.device] = boundary_exempt
+
             cam_free = VolumeMarker._freeEvidenceForCameraByNinePoints(
                 camera, rendered_depth, hit_mask, query_points, R, device,
+                boundary_exempt,
             )
 
             visible = visible | cam_visible
             free_evidence = free_evidence | cam_free
-
-            if per_camera_sink is not None:
-                per_camera_sink.append({
-                    'visible': cam_visible,
-                    'free_evidence': cam_free,
-                })
 
         return visible, free_evidence
 
@@ -1514,33 +1581,32 @@ class VolumeMarker(object):
     def assignFreeLabels(
         labels: torch.Tensor,
         free_mask: torch.Tensor,
-        distance_source_mask: torch.Tensor,
     ) -> torch.Tensor:
         """把 free_mask 指定的 voxel 写为 FREE_KN = -K。
 
-        K = 该 FREE voxel 到 distance_source_mask 的 L1 距离。
+        K = 该 FREE voxel 到最近「非 FREE 锚点」的 L1 距离。非 FREE 锚点即
+        VALID ∪ UNKNOWN，也就是不属于 free_mask 的所有 voxel（~free_mask）。
 
-        第一性原理：FREE_KN 的层级度量的是「离最近被观测到的真实表面（VALID）
-        有多远」——K 越小越贴近物体表面、置信度越高；K 越大越深入自由空间。
-        因此距离源必须是 VALID（而非 VALID∪UNKNOWN）：把 UNKNOWN 也当源会让
-        紧贴 UNKNOWN 边界的 FREE 全被压成 FREE_1N，抹掉真正的 2N/3N/4N 层次。
-        距离源由调用方显式给出，使本原子与「源是什么」解耦、可复用。
+        第一性原理：FREE_KN 的层级度量的是「离最近的非自由空间边界有多远」——
+        K 越小越贴近边界（VALID 表面或 UNKNOWN 区域）、置信度越高；K 越大越
+        深入自由空间内部。FREE 是从 VALID∪UNKNOWN 的并集向外扩散的：UNKNOWN
+        与 VALID 同为「非自由空间」的边界，都应作为距离源，而非仅取 VALID。
 
         UNKNOWN / VALID 不动；free_mask 处一次向量化写入 -distance。
-        若距离源为空（无任何 VALID），距离场自然全为 INF = 3R，与「无限远
-        FREE」哨兵 freeLabelInf(R) = -(3R) 一致。
+        若 free_mask 覆盖整个空间（无任何非 FREE 锚点），距离场自然全为
+        INF = 3R，与「无限远 FREE」哨兵 freeLabelInf(R) = -(3R) 一致。
 
         Args:
             labels: (R, R, R) int64 标签场（UNKNOWN=0 / VALID=1）。
             free_mask: (R, R, R) bool，需要赋 FREE_KN 标签的 voxel。
-            distance_source_mask: (R, R, R) bool，计算 K 的距离源（VALID）。
 
         Returns:
             (R, R, R) int64 新标签场（不修改输入）。
         """
         labels = labels.clone()
 
-        distance = VolumeMarker.computeL1DistanceToMask(distance_source_mask)
+        anchors = ~free_mask
+        distance = VolumeMarker.computeL1DistanceToMask(anchors)
         labels[free_mask] = -distance[free_mask]
         return labels
 
@@ -1605,40 +1671,6 @@ class VolumeMarker(object):
         return (~candidate) & free_evidence
 
     @staticmethod
-    def _classifyFreeMask(
-        candidate: torch.Tensor,
-        free_any: torch.Tensor,
-        observed_any: torch.Tensor,
-        unobserved_policy: str = 'unknown',
-    ) -> torch.Tensor:
-        """[LEGACY] center/background 证据下的 FREE 归类（不再用于严格主流程）。
-
-        严格主流程已改用 _deriveStrictFreeMask（仅 9 点严格前方证明）。此 helper
-        保留仅为向后兼容与单元覆盖，新路径不应使用；默认 unobserved_policy 已从
-        'free' 改为 'unknown'，与第一性原理一致（未观测不是空）。
-
-        Args:
-            candidate: (R, R, R) bool 候选占据体素。
-            free_any: (R, R, R) bool，至少一个视角给出 FREE 证据。
-            observed_any: (R, R, R) bool，至少被一个相机观测到。
-            unobserved_policy: 未观测非候选的归类策略：
-                'unknown' -> 视为 UNKNOWN（保守，默认）；
-                'free'    -> 视为 FREE（旧启发式，仅兼容）。
-
-        Returns:
-            (R, R, R) bool，需要写 FREE_KN 标签的 voxel。
-        """
-        non_candidate = ~candidate
-        if unobserved_policy == 'free':
-            return non_candidate & (free_any | (~observed_any))
-        if unobserved_policy == 'unknown':
-            return non_candidate & free_any
-        raise ValueError(
-            '[ERROR][VolumeMarker::_classifyFreeMask] '
-            f"unobserved_policy must be 'free' or 'unknown', got {unobserved_policy}"
-        )
-
-    @staticmethod
     def _mergeLabels(
         R: int,
         visible_candidate: torch.Tensor,
@@ -1648,7 +1680,7 @@ class VolumeMarker(object):
         """合并 VALID / FREE_KN / UNKNOWN 为最终标签场。
 
         UNKNOWN(0) 为底；visible_candidate -> VALID(1)；free_mask -> FREE_KN(-K)，
-        其中 K = 到最近 VALID 的 L1 距离（距离源为 visible_candidate）。
+        其中 K = 到最近非 FREE 锚点（VALID∪UNKNOWN，即 ~free_mask）的 L1 距离。
         visible_candidate 与 free_mask 不相交（前者候选、后者非候选），合并
         顺序无歧义；VALID 在此固定，不会被 FREE 改写。
         """
@@ -1658,150 +1690,11 @@ class VolumeMarker(object):
             torch.full_like(labels, VolumeMarker.VALID),
             labels,
         )
-        return VolumeMarker.assignFreeLabels(labels, free_mask, visible_candidate)
+        return VolumeMarker.assignFreeLabels(labels, free_mask)
 
     # ------------------------------------------------------------------
     # 主入口
     # ------------------------------------------------------------------
-    @staticmethod
-    def _emptyEvidenceLabels(
-        R: int,
-        empty_policy: str,
-        device: Optional[str],
-    ) -> torch.Tensor:
-        """无任何可信证据（无相机 / 无候选）时的标签场。
-
-        第一性原理：没有候选或没有相机时，不存在任何「证明为空」的可信射线，
-        严格语义下整个空间应为 UNKNOWN（未观测不是空）。仅当下游显式要求
-        兼容旧「空候选 = 全 FREE 哨兵」行为时，才用 'free_inf'。
-
-        Args:
-            empty_policy: 'unknown' -> 全 UNKNOWN(0)（严格默认）；
-                          'free_inf' -> 全哨兵 FREE -(3R)（旧兼容行为）。
-        """
-        if empty_policy == 'unknown':
-            return VolumeMarker._emptyLabels(R, VolumeMarker.UNKNOWN, device)
-        if empty_policy == 'free_inf':
-            return VolumeMarker._emptyLabels(
-                R, VolumeMarker.freeLabelInf(R), device,
-            )
-        raise ValueError(
-            '[ERROR][VolumeMarker::markVisible] '
-            f"empty_policy must be 'unknown' or 'free_inf', got {empty_policy}"
-        )
-
-    # ------------------------------------------------------------------
-    # debug 可视化导出（仅在 debug=True 时启用）
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _maskToLabelField(
-        mask: torch.Tensor,
-        fill_label: int,
-        R: int,
-        device: str,
-    ) -> torch.Tensor:
-        """把一个 bool mask 转成标签场：mask 内写 fill_label，其余 UNKNOWN。
-
-        用于把候选 / VALID / FREE 等中间 bool 结果喂给 toVisibleVolumeMesh
-        做四面体可视化（复用 markVisible 输出的标签语义）。
-        """
-        labels = VolumeMarker._emptyLabels(R, VolumeMarker.UNKNOWN, device)
-        return torch.where(
-            mask, torch.full_like(labels, int(fill_label)), labels,
-        )
-
-    @staticmethod
-    def _debugExportLabels(
-        labels: torch.Tensor,
-        folder_path: str,
-        filename: str,
-        **viz_kwargs,
-    ) -> None:
-        """把一个标签场导出为四面体 PLY（debug 中间结果可视化）。
-
-        复用 camera_control.Method.render.toVisibleVolumeMesh（与
-        VolumeMarker 输出同款可视化），延迟导入以免无 open3d/render 环境下
-        影响纯标注主流程。任何导出异常只告警、不打断主流程。
-        """
-        try:
-            from camera_control.Method.render import toVisibleVolumeMesh
-
-            os.makedirs(folder_path, exist_ok=True)
-            mesh = toVisibleVolumeMesh(labels=labels, **viz_kwargs)
-            out_path = os.path.join(folder_path, filename)
-            o3d.io.write_triangle_mesh(out_path, mesh)
-            print(f'[debug][VolumeMarker] saved {out_path}')
-        except Exception as exc:  # noqa: BLE001
-            print(
-                '[debug][VolumeMarker][WARN] '
-                f'failed to export {filename}: {type(exc).__name__}: {exc}'
-            )
-
-    @staticmethod
-    def _debugExportStages(
-        folder_path: str,
-        prefix: str,
-        R: int,
-        device: str,
-        candidate: torch.Tensor,
-        visible_candidate: torch.Tensor,
-        free_mask: torch.Tensor,
-        labels: torch.Tensor,
-        per_camera: Optional[list] = None,
-    ) -> None:
-        """导出五阶段中间结果（候选 / VALID / FREE / 最终标签 [/ 逐相机]）。
-
-        每个中间结果都隐藏 UNKNOWN（show_unknown=False），避免被外围灰色四面体
-        淹没；FREE 类按 K 渐变着色，可直接核对距离层次。
-        """
-        VALID = VolumeMarker.VALID
-        free_1n = VolumeMarker.freeLabelKN(1)
-
-        # 阶段 b：候选占据体素（绿色 VALID 样式）。
-        VolumeMarker._debugExportLabels(
-            VolumeMarker._maskToLabelField(candidate, VALID, R, device),
-            folder_path, f'{prefix}_candidate.ply',
-            show_unknown=False, show_free=False,
-        )
-
-        # 阶段 c：VALID（真正可见的候选，绿色）。
-        VolumeMarker._debugExportLabels(
-            VolumeMarker._maskToLabelField(visible_candidate, VALID, R, device),
-            folder_path, f'{prefix}_valid.ply',
-            show_unknown=False, show_free=False,
-        )
-
-        # 阶段 d：FREE 体素（统一 FREE_1N 蓝色）叠加 VALID 绿色作空间参照。
-        free_view = VolumeMarker._maskToLabelField(
-            visible_candidate, VALID, R, device,
-        )
-        free_view = torch.where(
-            free_mask, torch.full_like(free_view, free_1n), free_view,
-        )
-        VolumeMarker._debugExportLabels(
-            free_view, folder_path, f'{prefix}_free.ply', show_unknown=False,
-        )
-
-        # 阶段 e：最终标签（VALID 绿 + FREE_KN 按距离渐变，隐藏 UNKNOWN）。
-        VolumeMarker._debugExportLabels(
-            labels, folder_path, f'{prefix}_labels.ply', show_unknown=False,
-        )
-
-        # 可选：逐相机 VALID + FREE 证据（排查单视角问题）。
-        if per_camera:
-            for i, ev in enumerate(per_camera):
-                cam_view = VolumeMarker._maskToLabelField(
-                    ev['visible'], VALID, R, device,
-                )
-                cam_free = ev['free_evidence'] & (~candidate)
-                cam_view = torch.where(
-                    cam_free, torch.full_like(cam_view, free_1n), cam_view,
-                )
-                VolumeMarker._debugExportLabels(
-                    cam_view, folder_path, f'{prefix}_cam{i}.ply',
-                    show_unknown=False,
-                )
-
     @staticmethod
     def markVisible(
         camera_list: List[Camera],
@@ -1814,11 +1707,6 @@ class VolumeMarker(object):
         np.ndarray,
         torch.Tensor,
     ]] = None,
-        empty_policy: str = 'unknown',
-        debug: bool = False,
-        debug_folder_path: Optional[str] = None,
-        debug_prefix: str = 'volume_marker',
-        debug_per_camera: bool = False,
     ) -> torch.Tensor:
         """基于候选占据 + 单次候选立方体渲染对空间体素打严格可信标签。
 
@@ -1836,36 +1724,30 @@ class VolumeMarker(object):
           c. 把 candidate 构造为立方体边界 mesh，对每个相机渲染一次得到 mask 与
              depth（不开抗锯齿）；命中的三角 -> 候选体素（受相机 mask 门控）->
              跨视角并集 = VALID。VALID 在此固定、之后不再更新。
-          d. 对每个相机：对每个体素取「中心 + 8 角点」共 9 点，若 9 点投影 uv 全部
-             落在画面内、且每个点相机前方深度都严格小于其遮挡终点深度，则该体素
-             获得 FREE 证据。遮挡终点深度逐点取：UV 命中候选立方体渲染 -> 候选
-             渲染 depth；UV 落在 camera.mask 外（mask==0）-> +inf（相机在该方向未
-             观测到物体，整条射线空到无穷远）。跨视角并集得到 free_evidence，排除
-             候选后即 FREE。【debug 开启时导出该中间结果可视化】
-          e. 把所有 FREE 按到最近 VALID 的 L1 距离 K 写为 FREE_KN = -K。
+          d. 对每个相机：对每个体素取「中心 + 8 角点」共 9 点，要求其中所有「非
+             外边界豁免点」投影 uv 落在画面内、且相机前方深度严格小于其遮挡终点
+             深度，则该体素获得 FREE 证据。单位立方体 [-0.5, 0.5]^3 外边界 6 面
+             上的 corner 是空间硬边界、朝向自由空间，作为豁免点跳过（中心点不
+             豁免）。遮挡终点深度逐点取：UV 命中候选立方体渲染 -> 候选渲染 depth；
+             UV 落在 camera.mask 外（mask==0）-> +inf（相机在该方向未观测到物体，
+             整条射线空到无穷远）；画面外不视作 mask 外，普通点画面外即否决该相机
+             对该体素的 FREE 判定。跨视角并集得到 free_evidence，排除候选后即 FREE。
+          e. 把所有 FREE 按到最近非 FREE 锚点（VALID∪UNKNOWN）的 L1 距离 K
+             写为 FREE_KN = -K。
 
         c + d 共用同一次候选立方体渲染（_renderVisibilityEvidence），不再做
         visible-VALID 的二次重建渲染。
 
-        无相机或无候选时按 empty_policy（默认 'unknown' -> 全 UNKNOWN；
-        'free_inf' 保留旧的全哨兵 FREE 兼容行为）。
+        无相机或无候选时，没有任何「证明为空」的可信射线，整个空间为 UNKNOWN。
 
-        Args:
-            debug: 为 True 且 debug_folder_path 非空时，导出候选 / VALID / FREE /
-                最终标签的四面体可视化 PLY（隐藏 UNKNOWN）。
-            debug_folder_path: debug PLY 输出目录（debug=True 时必填才生效）。
-            debug_prefix: 输出文件名前缀（默认 'volume_marker'）。
-            debug_per_camera: 额外导出每个相机的 VALID + FREE 证据（排查单视角）。
-
-        返回: (R, R, R) 的 int64 tensor，编码 UNKNOWN=0, VALID=1,
-        FREE_KN=-K（K = 到最近 VALID 的 L1 距离；无 VALID 时为 -(3R)）。
+        返回: (R, R, R) 的 int64 tensor，编码 UNKNOWN=0, VALID=1，
+        FREE_KN=-K（K = 到最近非 FREE 锚点的 L1 距离；全 FREE 时为 -(3R)）。
         """
         R = VolumeMarker._requirePositiveResolution(volume_resolution, 'markVisible')
-        do_debug = bool(debug) and debug_folder_path is not None
 
         if len(camera_list) == 0:
-            # 没有任何视角，不存在任何可信观测证据 -> 严格默认全 UNKNOWN。
-            return VolumeMarker._emptyEvidenceLabels(R, empty_policy, None)
+            # 没有任何视角，不存在任何可信观测证据 -> 全 UNKNOWN。
+            return VolumeMarker._emptyLabels(R, VolumeMarker.UNKNOWN, None)
 
         ref_camera = camera_list[0]
         device = ref_camera.device
@@ -1883,34 +1765,18 @@ class VolumeMarker(object):
             camera_list, resolved_geometry, R, dtype, device,
         )
 
-        # --- 无候选体素：无可信证据 -> 按 empty_policy（严格默认全 UNKNOWN） ---
+        # --- 无候选体素：无可信证据 -> 全 UNKNOWN。 ---
         if not bool(candidate.any()):
-            if do_debug:
-                VolumeMarker._debugExportLabels(
-                    VolumeMarker._maskToLabelField(
-                        candidate, VolumeMarker.VALID, R, device,
-                    ),
-                    debug_folder_path, f'{debug_prefix}_candidate.ply',
-                    show_unknown=False, show_free=False,
-                )
-            return VolumeMarker._emptyEvidenceLabels(R, empty_policy, device)
+            return VolumeMarker._emptyLabels(R, VolumeMarker.UNKNOWN, device)
 
         # --- c + d. 单次候选立方体渲染：真正可见 VALID + 9 点 FREE 证据 ---
-        per_camera: Optional[list] = [] if (do_debug and debug_per_camera) else None
         visible_candidate, free_evidence = \
             VolumeMarker._renderVisibilityEvidence(
-                camera_list, candidate, R, device, per_camera_sink=per_camera,
+                camera_list, candidate, R, device,
             )
 
         # --- FREE = 非候选 且 9 点严格前方证明（VALID 固定不被改写） ---
         free_mask = VolumeMarker._deriveStrictFreeMask(candidate, free_evidence)
 
-        # --- e. VALID / FREE_KN / UNKNOWN 合并（FREE_KN = 到最近 VALID 的 L1 距离） ---
-        labels = VolumeMarker._mergeLabels(R, visible_candidate, free_mask, device)
-
-        if do_debug:
-            VolumeMarker._debugExportStages(
-                debug_folder_path, debug_prefix, R, device,
-                candidate, visible_candidate, free_mask, labels, per_camera,
-            )
-        return labels
+        # --- e. VALID / FREE_KN / UNKNOWN 合并（FREE_KN = 到最近非 FREE 锚点的 L1 距离） ---
+        return VolumeMarker._mergeLabels(R, visible_candidate, free_mask, device)

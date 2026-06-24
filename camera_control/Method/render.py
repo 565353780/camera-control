@@ -281,7 +281,7 @@ def toVisibleVolumeMesh(
     - UNKNOWN（0） -> 灰色，中等尺寸（0.7 倍）；
     - FREE_KN（-K）-> 颜色按 t = (K-1)/(K_max-1) 从蓝色渐变到红色，
       尺寸从 0.6 倍线性减小到 0.15 倍（K_max 为标签场中实际最大 K，
-      含无 VALID 时的 -(3R) 哨兵层）。
+      含全 FREE 时的 -(3R) 哨兵层）。
 
     Args:
         labels: (R, R, R) int 张量，编码 UNKNOWN=0, VALID=1, FREE_KN=-K。
