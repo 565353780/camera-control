@@ -652,9 +652,10 @@ class VolumeMarker(object):
         """把任意支持的 geometry 自动转成 (R,R,R) bool 候选占据体素。
 
         类型分发（第一性原理：先看是否含三角面拓扑）：
-          - open3d.TriangleMesh / trimesh.Trimesh（含面）-> 网格体素化：用
-            open3d 在表面按 K*R 分辨率做面积均匀采样再体素化，覆盖网格穿过的
-            所有体素，不走「直接取顶点当点云」的稀疏近似；
+          - open3d.TriangleMesh / trimesh.Trimesh（含面）-> 网格体素化：默认走
+            确定性精确 SAT 三角-体素相交（_voxelizeMesh -> _voxelizeTrianglesExact），
+            覆盖网格穿过的每个体素，不依赖随机采样，也不走「直接取顶点当点云」
+            的稀疏近似（open3d 表面采样仅作为 _voxelizeMeshSampled fallback 保留）；
           - open3d.PointCloud / trimesh.PointCloud / numpy / tensor / 文件路径
             -> 点体素化（点落在哪个体素）；
           - 字符串文件路径：用 trimesh.load 加载后再按上面规则判别；含面则当
@@ -760,18 +761,42 @@ class VolumeMarker(object):
         return occ_flat.reshape(R, R, R)
 
     @staticmethod
+    def _depthObservationDomain(camera: Camera) -> torch.Tensor:
+        """返回某相机 depth 网格上的可信观测域 (Hd, Wd) bool。
+
+        第一性原理：候选只能来自相机的可信观测域。
+          - 无 camera.mask：观测域 = valid_depth_mask（所有有效深度像素）。
+          - 有 camera.mask：观测域 = valid_depth_mask 且落在 mask 内。mask 是
+            「该相机的可信观测域」，mask 外既不是占据也不是空，不得贡献候选。
+        mask 与 depth 分辨率可能不同，统一用 depth UV 在 mask 上最近邻采样对齐。
+        """
+        domain = camera.valid_depth_mask
+        if getattr(camera, 'mask', None) is None:
+            return domain
+        uv = camera.toDepthUV()  # (Hd, Wd, 2)
+        in_mask = camera.sampleMaskAtUV(uv).to(
+            dtype=torch.bool, device=domain.device,
+        )
+        return domain & in_mask
+
+    @staticmethod
     def _collectCandidatePoints(
         camera_list: List[Camera],
         dtype,
         device: str,
     ) -> torch.Tensor:
-        """合并所有相机 toCCM(use_mask=False) 的真实表面点，返回 (N, 3)。"""
+        """合并所有相机可信观测域内的真实表面点，返回 (N, 3)。
+
+        每个相机只取「valid_depth_mask 且（若有 mask）落在 mask 内」的像素的
+        CCM 点：mask 外的深度点不属于该相机的可信观测域，不进入候选。
+        """
         VolumeMarker._requireDepthLoaded(camera_list, '_collectCandidatePoints')
 
         all_points: List[torch.Tensor] = []
         for camera in camera_list:
             ccm = camera.toCCM(use_mask=False)  # (H, W, 3)
-            points = ccm[camera.valid_depth_mask]  # (P, 3)
+            domain = VolumeMarker._depthObservationDomain(camera)  # (H, W)
+            points = ccm[domain]  # (P, 3)
             if points.numel() > 0:
                 all_points.append(points.to(dtype=dtype, device=device))
 
@@ -958,25 +983,27 @@ class VolumeMarker(object):
     # 用 nvdiffrast 渲染候选 mesh，统一产出 VALID 与 FREE 证据
     # ------------------------------------------------------------------
     @staticmethod
-    def _sampleRenderedDepth(
+    def _sampleRenderedDepthAtUV(
         rendered_depth: torch.Tensor,
         hit_mask: torch.Tensor,
+        observation_mask: torch.Tensor,
         uv: torch.Tensor,
         height: int,
         width: int,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """在候选 mesh 渲染出的 depth 图上，按 voxel 中心 UV 做最近邻采样。
+        """在某次渲染结果上按任意点的 UV 做最近邻采样（中心或 8 顶点通用）。
 
         Args:
             rendered_depth: (H, W) 渲染 mesh 的相机前方正距离，背景为 0。
-            hit_mask: (H, W) bool，像素是否命中 mesh。
-            uv: (N, 2) voxel 中心归一化 UV [0, 1]，与 camera UV 约定一致。
-            height/width: 渲染图分辨率。
+            hit_mask: (H, W) bool，像素是否命中 mesh 表面。
+            observation_mask: (H, W) bool，该相机的可信观测域（mask 外为 False）。
+            uv: (N, 2) 归一化 UV [0, 1]，与 camera UV 约定一致。
+            height/width: 渲染图分辨率（须与 observation_mask 同形状）。
 
         Returns:
-            sampled_depth: (N,) 采样到的渲染表面深度（背景/越界处为 0）。
-            surface_hit:   (N,) bool，UV 在画面内且该像素命中 mesh 表面。
-            background:    (N,) bool，UV 在画面内但该像素是背景（无 mesh）。
+            sampled_depth: (N,) 命中处渲染表面深度（背景/越界/被遮挡为 0）。
+            surface_hit:   (N,) bool，UV 在画面内且该像素命中渲染表面。
+            in_domain:     (N,) bool，UV 在画面内且该像素位于相机观测域内。
         """
         in_frame = (
             torch.isfinite(uv).all(dim=-1)
@@ -993,35 +1020,38 @@ class VolumeMarker(object):
 
         raw_depth = rendered_depth[v_nearest, u_nearest]
         pix_hit = hit_mask[v_nearest, u_nearest]
+        pix_obs = observation_mask[v_nearest, u_nearest]
 
         surface_hit = in_frame & pix_hit
-        background = in_frame & (~pix_hit)
+        in_domain = in_frame & pix_obs
 
         sampled_depth = torch.where(
             surface_hit, raw_depth, torch.zeros_like(raw_depth),
         )
-        return sampled_depth, surface_hit, background
+        return sampled_depth, surface_hit, in_domain
 
     @staticmethod
-    def _projectCentersForCamera(
+    def _projectPointsForCamera(
         camera: Camera,
-        centers_flat: torch.Tensor,
+        points_flat: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """把 voxel 中心投影到某相机，返回 (uv, point_depth)。
+        """把任意世界坐标点投影到某相机，返回 (uv, point_depth)。
+
+        既用于 voxel 中心，也用于 voxel 的 8 个顶点（调用方先 flatten 再 reshape）。
 
         Args:
-            centers_flat: (N, 3) voxel 中心世界坐标（与相机同 dtype/device）。
+            points_flat: (N, 3) 点的世界坐标（与相机同 dtype/device）。
 
         Returns:
             uv:          (N, 2) 归一化 UV [0, 1]，与 camera UV 约定一致。
-            point_depth: (N,) voxel 中心在相机坐标系下的前方正深度。
+            point_depth: (N,) 点在相机坐标系下的前方正深度（相机后方为负）。
         """
-        uv = camera.project_points_to_uv(centers_flat)  # (N, 2)
+        uv = camera.project_points_to_uv(points_flat)  # (N, 2)
 
-        centers_homo = torch.cat(
-            [centers_flat, torch.ones_like(centers_flat[..., :1])], dim=-1,
+        points_homo = torch.cat(
+            [points_flat, torch.ones_like(points_flat[..., :1])], dim=-1,
         )
-        point_depth = -(centers_homo @ camera.world2camera.T)[..., 2]  # (N,)
+        point_depth = -(points_homo @ camera.world2camera.T)[..., 2]  # (N,)
         return uv, point_depth
 
     @staticmethod
@@ -1061,131 +1091,279 @@ class VolumeMarker(object):
         return near, far
 
     @staticmethod
-    def _renderClassify(
-        camera_list: List[Camera],
+    def _createVoxelCorners(
+        R: int,
+        dtype,
+        device: str,
+    ) -> torch.Tensor:
+        """生成 (R, R, R, 8, 3) 每个体素的 8 个顶点世界坐标。
+
+        voxel (i, j, k) 的顶点 = -0.5 + (idx + c) / R，c in {0, 1}，与
+        createGridVertices() 的网格顶点约定完全一致：顶点落在体素 8 个角。
+        顶点顺序固定为 (cx, cy, cz) 的二进制枚举：
+            0:(0,0,0) 1:(1,0,0) 2:(0,1,0) 3:(1,1,0)
+            4:(0,0,1) 5:(1,0,1) 6:(0,1,1) 7:(1,1,1)
+        顺序仅影响列对齐，「8 顶点全满足」的判定与顺序无关。
+        """
+        voxel_size = 1.0 / R
+        # 每个体素最小角（c=0,0,0）的世界坐标沿各轴 = idx / R - 0.5。
+        low = torch.arange(R, dtype=dtype, device=device) / R - 0.5  # (R,)
+        lx, ly, lz = torch.meshgrid(low, low, low, indexing='ij')
+        low_grid = torch.stack([lx, ly, lz], dim=-1)  # (R, R, R, 3)
+
+        corner_unit = torch.tensor(
+            [
+                [0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0],
+                [0, 0, 1], [1, 0, 1], [0, 1, 1], [1, 1, 1],
+            ],
+            dtype=dtype, device=device,
+        ) * voxel_size  # (8, 3)
+
+        return low_grid.unsqueeze(-2) + corner_unit  # (R, R, R, 8, 3)
+
+    @staticmethod
+    def _cameraPixelObservationMask(
+        camera: Camera,
+        height: int,
+        width: int,
+    ) -> torch.Tensor:
+        """单相机像素级可信观测域 (H, W) bool，对齐到渲染分辨率。
+
+        第一性原理：mask 是「该相机能提供可信观测的画面区域」，不是空域。
+          - camera.mask is None：整幅画面都可观测 -> 全 True。
+          - 存在 mask：用 sampleMaskWithSize 在渲染分辨率上对齐采样，mask 内
+            为 True；mask 外不得产生 VALID/FREE 证据（保持 UNKNOWN）。
+        """
+        if getattr(camera, 'mask', None) is None:
+            return torch.ones(
+                (height, width), dtype=torch.bool, device=camera.device,
+            )
+        return camera.sampleMaskWithSize(width, height).to(
+            dtype=torch.bool, device=camera.device,
+        )
+
+    @staticmethod
+    def _trimeshFromTensors(
         vertices: torch.Tensor,
         faces: torch.Tensor,
-        triangle_to_voxel: torch.Tensor,
-        R: int,
-        device: str,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """渲染候选体素并集边界 mesh，一次性产出 VALID 与 FREE 证据。
-
-        对每个相机渲染稳定遮挡关系的 depth（关闭抗锯齿），同时得到：
-          - 被击中的 face id -> 真正可见的候选体素（VALID）。
-          - voxel 中心相对渲染表面深度的位置 -> 自由空间证据（FREE）。
-
-        FREE 判定（第一性原理）：候选 mesh 是该视角的占据几何「地面真值」。
-        一个 voxel 在某相机下属于自由空间，当且仅当从相机到该 voxel 中心的
-        视线在到达占据表面之前就经过了它，即：
-          - voxel 中心投影像素命中 mesh，且 voxel 深度 < 渲染表面深度（更近）；
-          - 或 voxel 中心投影像素是背景（整条视线无占据）。
-        这保证了「比任意 VALID/占据表面更靠近相机且视线无遮挡」的 voxel 必为
-        FREE —— 不会再出现比 VALID 更近却 UNKNOWN 的矛盾。
-
-        Returns:
-            visible_candidate: (R, R, R) bool，跨视角可见候选体素并集。
-            free_any:          (R, R, R) bool，至少一个视角给出 FREE 证据。
-            observed_any:      (R, R, R) bool，voxel 中心至少被一个相机看到
-                               （投影落在画面内且在相机前方）。
-        """
-        visible = torch.zeros((R, R, R), dtype=torch.bool, device=device)
-        free_any = torch.zeros((R, R, R), dtype=torch.bool, device=device)
-        observed_any = torch.zeros((R, R, R), dtype=torch.bool, device=device)
-
-        if faces.shape[0] == 0:
-            return visible, free_any, observed_any
-
-        # 延迟导入：nvdiffrast 仅在真正渲染时才需要，使纯 CPU 逻辑
-        # （体素化 / 边界 mesh）在无 nvdiffrast 环境也能使用。
-        from camera_control.Module.nvdiffrast_renderer import NVDiffRastRenderer
-
-        # nvdiffrast 不读取 visual，传入纯几何 trimesh 即可。
-        mesh = trimesh.Trimesh(
+    ) -> trimesh.Trimesh:
+        """从顶点/面张量构造纯几何 trimesh（nvdiffrast 不读取 visual）。"""
+        return trimesh.Trimesh(
             vertices=vertices.detach().cpu().numpy().astype(np.float64),
             faces=faces.detach().cpu().numpy().astype(np.int64),
             process=False,
         )
 
-        visible_flat = visible.reshape(-1)
-        triangle_to_voxel = triangle_to_voxel.to(device)
+    @staticmethod
+    def _renderMeshDepthForCamera(
+        mesh: trimesh.Trimesh,
+        camera: Camera,
+        vertices_tensor: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
+        """单相机渲染给定 mesh 的稳定遮挡 depth（关闭抗锯齿）。
 
-        # voxel 中心只依赖 (R, dtype, device)，跨相机复用以避免每个相机重复
-        # 创建 R^3 个中心点。
-        centers_cache: dict = {}
-        # 同一 device 上的 float32 顶点张量也跨相机复用。
-        vertices_cache: dict = {}
+        候选边界 mesh 与 visible-VALID-only mesh 共用此原子，统一处理动态
+        near/far 裁剪面，避免相机尺度偏离默认裁剪范围时几何被裁掉。
 
+        Returns:
+            rendered_depth: (H, W) 相机前方正距离，背景为 0。
+            hit_mask:       (H, W) bool，像素是否命中 mesh 表面。
+            rast_out:       (H, W, 4) 光栅化输出（第 4 通道为 1 起的三角 id）。
+            height, width:  渲染分辨率。
+        """
+        # 延迟导入：nvdiffrast 仅在真正渲染时才需要，使纯 CPU 逻辑
+        # （体素化 / 边界 mesh）在无 nvdiffrast 环境也能使用。
+        from camera_control.Module.nvdiffrast_renderer import NVDiffRastRenderer
+
+        depth_range = VolumeMarker._cameraDepthRange(camera, vertices_tensor)
+        near_far = {} if depth_range is None else {
+            'near': depth_range[0], 'far': depth_range[1],
+        }
+
+        render_result = NVDiffRastRenderer.render(
+            mesh=mesh,
+            camera=camera,
+            render_types=['depth'],
+            vertices_tensor=vertices_tensor,
+            enable_antialias=False,
+            enable_lighting=False,
+            **near_far,
+        )
+
+        rast_out = render_result['rasterize_output']  # (H, W, 4)
+        rendered_depth = render_result['depth']  # (H, W) 相机前方正距离
+        height = int(rendered_depth.shape[0])
+        width = int(rendered_depth.shape[1])
+        hit_mask = rast_out[..., 3] > 0  # (H, W)
+        return rendered_depth, hit_mask, rast_out, height, width
+
+    @staticmethod
+    def _visibleVoxelsFromRaster(
+        rast_out: torch.Tensor,
+        triangle_to_voxel: torch.Tensor,
+        R: int,
+        device: str,
+        pixel_observation_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """把渲染命中的 face 映射成真正可见的候选 voxel（受观测域门控）。
+
+        只统计「命中 mesh 且像素位于观测域内」的命中：mask 外的命中不属于该
+        相机的可信观测，不算 VALID。
+
+        Returns:
+            (R, R, R) bool，该视角可见的候选体素。
+        """
+        visible_flat = torch.zeros(R * R * R, dtype=torch.bool, device=device)
+        tri_id = rast_out[..., 3].reshape(-1).long()  # (H*W,)
+        obs = pixel_observation_mask.reshape(-1).to(tri_id.device)
+        hit = (tri_id > 0) & obs
+        if bool(hit.any()):
+            local_face_id = (tri_id[hit] - 1).to(device)
+            hit_voxel_flat = triangle_to_voxel[local_face_id].unique()
+            visible_flat[hit_voxel_flat] = True
+        return visible_flat.reshape(R, R, R)
+
+    @staticmethod
+    def _freeEvidenceEightVerticesInFront(
+        depth8: torch.Tensor,
+        sampled_depth8: torch.Tensor,
+        surface_hit8: torch.Tensor,
+        in_domain8: torch.Tensor,
+    ) -> torch.Tensor:
+        """8 顶点严格 FREE 证明：唯有整个体素都在可见 VALID 表面前方才成立。
+
+        第一性原理：FREE 必须是「被可信射线证明为空」的体素。voxel 中心单点
+        在表面前方只能证明中心点为空，不能证明整个体素为空。严格判据要求
+        体素的 8 个顶点同时满足：
+          - in_domain：顶点投影落在画面内且位于相机可信观测域（mask 内）；
+          - surface_hit：顶点投影像素命中 visible-VALID 渲染表面（背后确有
+            真正可见的 VALID 作为遮挡终点）；
+          - 严格前方：顶点的相机前方深度 < 该像素 visible-VALID 渲染深度 - eps。
+        只要某个视角让全部 8 顶点都通过，则相机与可见 VALID 表面之间完整包住
+        该体素，可证明其为 FREE。
+
+        Args:
+            depth8/sampled_depth8/surface_hit8/in_domain8: 均为 (N, 8)。
+
+        Returns:
+            (N,) bool，该视角下体素是否获得 FREE 证据。
+        """
+        eps = torch.clamp(depth8.abs() * 1e-4, min=1e-6)
+        in_front = surface_hit8 & in_domain8 & (depth8 < sampled_depth8 - eps)
+        return in_front.all(dim=-1)
+
+    @staticmethod
+    def _renderVisibilityEvidence(
+        camera_list: List[Camera],
+        candidate: torch.Tensor,
+        R: int,
+        device: str,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """两阶段渲染：先确认真正可见 VALID，再用 8 顶点证明派生 FREE。
+
+        阶段一（确认 VALID）：渲染候选体素并集的边界 mesh，命中的 face ->
+        voxel（受每个相机 mask 观测域门控）-> 跨视角并集得到 visible_candidate。
+
+        阶段二（证明 FREE）：仅由 visible_candidate 重建边界 mesh（FREE 的唯一
+        遮挡终点只能是真正可见的 VALID 表面），再逐相机渲染该 visible-VALID
+        mesh；对每个体素投影其 8 个顶点，做 _freeEvidenceEightVerticesInFront
+        的严格证明，跨视角并集得到 free_evidence。
+
+        没有任何真正可见 VALID 时（如稀疏点云某方向无候选阻挡），不存在可信
+        遮挡终点，free_evidence 全 False —— 该方向保持 UNKNOWN。
+
+        Returns:
+            visible_candidate: (R, R, R) bool，跨视角真正可见的候选体素（VALID）。
+            free_evidence:     (R, R, R) bool，拥有 8 顶点 visible-VALID 前方证明
+                               的体素（尚未排除候选，最终 FREE 见 _deriveStrictFreeMask）。
+        """
+        visible = torch.zeros((R, R, R), dtype=torch.bool, device=device)
+        free_evidence = torch.zeros((R, R, R), dtype=torch.bool, device=device)
+
+        # --- 阶段一：渲染候选边界 mesh，确认真正可见的 VALID 体素 ---
+        cand_vertices, cand_faces, cand_tri2voxel = \
+            VolumeMarker._buildVoxelBoundaryMesh(candidate, R)
+        if cand_faces.shape[0] == 0:
+            return visible, free_evidence
+
+        cand_mesh = VolumeMarker._trimeshFromTensors(cand_vertices, cand_faces)
+        cand_tri2voxel = cand_tri2voxel.to(device)
+
+        # 同一 device 上的 float32 顶点张量跨相机复用。
+        cand_vert_cache: dict = {}
         for camera in camera_list:
-            vertices_tensor = vertices_cache.get(camera.device)
-            if vertices_tensor is None:
-                vertices_tensor = vertices.to(
+            vtensor = cand_vert_cache.get(camera.device)
+            if vtensor is None:
+                vtensor = cand_vertices.to(
                     dtype=torch.float32, device=camera.device,
                 )
-                vertices_cache[camera.device] = vertices_tensor
+                cand_vert_cache[camera.device] = vtensor
 
-            # 动态裁剪面：用候选 mesh 顶点的真实深度范围设定 near/far，避免
-            # 相机距离/尺度偏离默认裁剪范围时把候选几何裁掉。
-            depth_range = VolumeMarker._cameraDepthRange(camera, vertices_tensor)
-            near_far = {} if depth_range is None else {
-                'near': depth_range[0], 'far': depth_range[1],
-            }
-
-            render_result = NVDiffRastRenderer.render(
-                mesh=mesh,
-                camera=camera,
-                render_types=['depth'],
-                vertices_tensor=vertices_tensor,
-                enable_antialias=False,
-                enable_lighting=False,
-                **near_far,
+            _, _, rast_out, height, width = \
+                VolumeMarker._renderMeshDepthForCamera(cand_mesh, camera, vtensor)
+            pixel_obs = VolumeMarker._cameraPixelObservationMask(
+                camera, height, width,
+            )
+            visible = visible | VolumeMarker._visibleVoxelsFromRaster(
+                rast_out, cand_tri2voxel, R, device, pixel_obs,
             )
 
-            rast_out = render_result['rasterize_output']  # (H, W, 4)
-            rendered_depth = render_result['depth']  # (H, W) 相机前方正距离
+        # 没有任何真正可见 VALID -> 没有可信遮挡终点 -> 不产生 FREE 证据。
+        if not bool(visible.any()):
+            return visible, free_evidence
 
-            height, width = int(rendered_depth.shape[0]), int(rendered_depth.shape[1])
-            hit_mask = rast_out[..., 3] > 0  # (H, W)
+        # --- 阶段二：仅由真正可见 VALID 体素重建边界 mesh，作为 FREE 唯一遮挡终点 ---
+        valid_vertices, valid_faces, _ = \
+            VolumeMarker._buildVoxelBoundaryMesh(visible, R)
+        if valid_faces.shape[0] == 0:
+            return visible, free_evidence
 
-            # --- VALID：命中 face -> voxel ---
-            tri_id = rast_out[..., 3].reshape(-1).long()  # (H*W,)
-            hit = tri_id > 0
-            if bool(hit.any()):
-                local_face_id = (tri_id[hit] - 1).to(device)
-                hit_voxel_flat = triangle_to_voxel[local_face_id].unique()
-                visible_flat[hit_voxel_flat] = True
+        valid_mesh = VolumeMarker._trimeshFromTensors(valid_vertices, valid_faces)
 
-            # --- FREE：voxel 中心 vs 渲染表面深度 ---
+        # voxel 8 顶点只依赖 (R, dtype, device)，跨相机复用。
+        corners_cache: dict = {}
+        valid_vert_cache: dict = {}
+        for camera in camera_list:
+            vtensor = valid_vert_cache.get(camera.device)
+            if vtensor is None:
+                vtensor = valid_vertices.to(
+                    dtype=torch.float32, device=camera.device,
+                )
+                valid_vert_cache[camera.device] = vtensor
+
+            rendered_depth, hit_mask, _, height, width = \
+                VolumeMarker._renderMeshDepthForCamera(valid_mesh, camera, vtensor)
+            pixel_obs = VolumeMarker._cameraPixelObservationMask(
+                camera, height, width,
+            )
+
             cache_key = (camera.dtype, camera.device)
-            centers_flat = centers_cache.get(cache_key)
-            if centers_flat is None:
-                centers_flat = VolumeMarker.createVoxelCenters(
+            corners_flat = corners_cache.get(cache_key)
+            if corners_flat is None:
+                corners_flat = VolumeMarker._createVoxelCorners(
                     R, camera.dtype, camera.device,
-                ).reshape(-1, 3)  # (R^3, 3)
-                centers_cache[cache_key] = centers_flat
+                ).reshape(-1, 8, 3)  # (R^3, 8, 3)
+                corners_cache[cache_key] = corners_flat
 
-            uv, point_depth = VolumeMarker._projectCentersForCamera(
-                camera, centers_flat,
+            num_voxels = corners_flat.shape[0]
+            uv, point_depth = VolumeMarker._projectPointsForCamera(
+                camera, corners_flat.reshape(-1, 3),  # (R^3 * 8, 3)
             )
-
-            sampled_depth, surface_hit, background = \
-                VolumeMarker._sampleRenderedDepth(
-                    rendered_depth, hit_mask, uv, height, width,
+            sampled_depth, surface_hit, in_domain = \
+                VolumeMarker._sampleRenderedDepthAtUV(
+                    rendered_depth, hit_mask, pixel_obs, uv, height, width,
                 )
 
-            eps = torch.clamp(point_depth.abs() * 1e-4, min=1e-6)
-            # voxel 中心明确位于渲染表面前方（更靠近相机）。
-            in_front = surface_hit & (point_depth < sampled_depth - eps)
-            voxel_free = (in_front | background).reshape(R, R, R).to(device)
+            cam_free = VolumeMarker._freeEvidenceEightVerticesInFront(
+                point_depth.reshape(num_voxels, 8),
+                sampled_depth.reshape(num_voxels, 8),
+                surface_hit.reshape(num_voxels, 8),
+                in_domain.reshape(num_voxels, 8),
+            ).reshape(R, R, R).to(device)
 
-            # observed：投影落在画面内（surface_hit 或 background 都意味着
-            # voxel 中心在相机前方且 UV 在画面内）。
-            observed = (surface_hit | background).reshape(R, R, R).to(device)
+            free_evidence = free_evidence | cam_free
 
-            free_any = free_any | voxel_free
-            observed_any = observed_any | observed
-
-        return visible_flat.reshape(R, R, R), free_any, observed_any
+        return visible, free_evidence
 
     # ------------------------------------------------------------------
     # L1 距离场 / FREE_KN 标签（高效并行原子函数）
@@ -1323,26 +1501,48 @@ class VolumeMarker(object):
     # 标签合并原子
     # ------------------------------------------------------------------
     @staticmethod
+    def _deriveStrictFreeMask(
+        candidate: torch.Tensor,
+        free_evidence: torch.Tensor,
+    ) -> torch.Tensor:
+        """严格 FREE = 非候选 且 拥有 8 顶点 visible-VALID 前方证明。
+
+        第一性原理：FREE 只可能是非候选 voxel（候选要么 VALID 要么 UNKNOWN），
+        且只能来自 _renderVisibilityEvidence 的 8 顶点严格证明（整个体素被夹在
+        相机与真正可见 VALID 表面之间）。除此之外的一切非候选体素 —— 被遮挡、
+        视锥外、相机后方、稀疏点云孔洞、mask 外、background 未命中 —— 一律保持
+        UNKNOWN，不再有任何 background / 未观测 / center-only 启发式释放。
+
+        Args:
+            candidate: (R, R, R) bool 候选占据体素。
+            free_evidence: (R, R, R) bool，8 顶点 visible-VALID 前方证明。
+
+        Returns:
+            (R, R, R) bool，需要写 FREE_KN 标签的 voxel。
+        """
+        return (~candidate) & free_evidence
+
+    @staticmethod
     def _classifyFreeMask(
         candidate: torch.Tensor,
         free_any: torch.Tensor,
         observed_any: torch.Tensor,
-        unobserved_policy: str = 'free',
+        unobserved_policy: str = 'unknown',
     ) -> torch.Tensor:
-        """从渲染证据派生「应赋 FREE_KN」的非候选 voxel mask。
+        """[LEGACY] center/background 证据下的 FREE 归类（不再用于严格主流程）。
 
-        第一性原理：FREE 只可能是非候选 voxel（候选要么 VALID 要么 UNKNOWN）。
-        一个非候选 voxel 判为 FREE 的依据有两类：
-          - 任一视角给出直接 FREE 证据（在渲染表面前方或投影到背景）；
-          - 从未被任何相机观测到（视锥外/相机后方），按 unobserved_policy 决定。
+        严格主流程已改用 _deriveStrictFreeMask（仅 8 顶点 visible-VALID 前方
+        证明）。此 helper 保留仅为向后兼容与单元覆盖，新路径不应使用；默认
+        unobserved_policy 已从 'free' 改为 'unknown'，与第一性原理一致
+        （未观测不是空）。
 
         Args:
             candidate: (R, R, R) bool 候选占据体素。
             free_any: (R, R, R) bool，至少一个视角给出 FREE 证据。
             observed_any: (R, R, R) bool，至少被一个相机观测到。
             unobserved_policy: 未观测非候选的归类策略：
-                'free'    -> 视为 FREE（无物体信息，默认，兼容现有下游）；
-                'unknown' -> 视为 UNKNOWN（保守，不假设视锥外为空）。
+                'unknown' -> 视为 UNKNOWN（保守，默认）；
+                'free'    -> 视为 FREE（旧启发式，仅兼容）。
 
         Returns:
             (R, R, R) bool，需要写 FREE_KN 标签的 voxel。
@@ -1382,6 +1582,33 @@ class VolumeMarker(object):
     # 主入口
     # ------------------------------------------------------------------
     @staticmethod
+    def _emptyEvidenceLabels(
+        R: int,
+        empty_policy: str,
+        device: Optional[str],
+    ) -> torch.Tensor:
+        """无任何可信证据（无相机 / 无候选）时的标签场。
+
+        第一性原理：没有候选或没有相机时，不存在任何「证明为空」的可信射线，
+        严格语义下整个空间应为 UNKNOWN（未观测不是空）。仅当下游显式要求
+        兼容旧「空候选 = 全 FREE 哨兵」行为时，才用 'free_inf'。
+
+        Args:
+            empty_policy: 'unknown' -> 全 UNKNOWN(0)（严格默认）；
+                          'free_inf' -> 全哨兵 FREE -(3R)（旧兼容行为）。
+        """
+        if empty_policy == 'unknown':
+            return VolumeMarker._emptyLabels(R, VolumeMarker.UNKNOWN, device)
+        if empty_policy == 'free_inf':
+            return VolumeMarker._emptyLabels(
+                R, VolumeMarker.freeLabelInf(R), device,
+            )
+        raise ValueError(
+            '[ERROR][VolumeMarker::markVisible] '
+            f"empty_policy must be 'unknown' or 'free_inf', got {empty_policy}"
+        )
+
+    @staticmethod
     def markVisible(
         camera_list: List[Camera],
         volume_resolution: int,
@@ -1393,41 +1620,39 @@ class VolumeMarker(object):
         np.ndarray,
         torch.Tensor,
     ]] = None,
+        empty_policy: str = 'unknown',
     ) -> torch.Tensor:
-        """基于候选占据 + 立方体 mesh 渲染对空间体素打标签。
+        """基于候选占据 + 两阶段渲染对空间体素打严格可信标签。
 
-        算法（第一性原理重构）：
-          1. 候选占据：
-               - 若提供 geometry，按其真实类型转成候选占据体素：
-                   * 三角网格（open3d.TriangleMesh / trimesh.Trimesh，含面）->
-                     用 open3d 在表面按 volume_resolution 的 K 倍分辨率做面积
-                     均匀采样得到稠密点云再体素化，覆盖网格穿过的所有体素；
-                   * 点云 / numpy / tensor / 点云文件 -> 点体素化（点落在哪个
-                     体素）；
-                 提供 geometry 时只需相机位姿/内参来渲染遮挡，不要求 depth。
-               - 否则用所有 camera.toCCM(use_mask=False) 的并集体素化，此路径
-                 要求每个相机已加载 depth 与 valid_depth_mask。
-          2. 边界 mesh：对候选体素并集构造只含外露面的立方体表面 mesh，并记录
-             每个三角对应的 voxel。
-          3. 单次渲染、统一判定（_renderClassify）：从每个相机用 nvdiffrast
-             渲染该 mesh 的 depth（关闭抗锯齿），同源得到两类证据：
-               - face id 命中 -> 真正可见的候选体素 -> VALID；
-               - voxel 中心相对渲染表面深度的位置 -> FREE / 遮挡。
-             候选 mesh 是该视角的占据几何「地面真值」，因此遮挡关系自洽：
-               * voxel 中心在渲染表面前方（更近）或投影到背景 -> 该视角 FREE；
-               * voxel 中心在渲染表面后方（被遮挡）-> 该视角无信息。
-             这从根本上消除「比某个 VALID 更靠近相机却被判 UNKNOWN」的矛盾。
+        第一性原理：VALID / FREE 只能来自可信观测证据，其余一律 UNKNOWN。
+
+          1. 候选占据（潜在 VALID）：
+               - 提供 geometry：按真实类型体素化（三角网格走 SAT 精确表面三角
+                 体素化，得到无缝隙的表面壳；点云 / numpy / tensor / 文件走点
+                 体素化）。此路径只需相机位姿/内参来渲染遮挡，不要求 depth；
+                 显式 geometry 不按相机 mask 裁剪候选几何。
+               - geometry 为 None：用所有相机可信观测域内（valid_depth_mask
+                 且 mask 内）的 CCM 点并集体素化。此路径要求每个相机已加载
+                 depth 与 valid_depth_mask；mask 外的深度点不进入候选。
+          2. 边界 mesh：对候选体素并集构造只含外露面的立方体表面 mesh。
+          3. 两阶段渲染（_renderVisibilityEvidence）：
+               - 阶段一：渲染候选边界 mesh，命中的 face -> voxel（受每个相机
+                 mask 观测域门控）-> 跨视角并集得到真正可见的 VALID；
+               - 阶段二：仅由真正可见 VALID 重建边界 mesh 再渲染，对每个非候选
+                 体素做「8 顶点全部位于 mask 内、命中 visible-VALID 表面、且严格
+                 在其前方」的证明，跨视角并集得到 FREE 证据。
+             任何方向若没有真正可见的 VALID 作为遮挡终点（如稀疏点云无候选
+             阻挡），则该方向不产生 FREE，全部保持 UNKNOWN。
           4. 标签合并：
                - 候选且任一视角可见 -> VALID；
-               - 候选但被所有视角完全遮挡 -> UNKNOWN（不被 FREE 改写）；
-               - 非候选且任一视角 FREE -> FREE；
-               - 非候选且从未被任何相机观测到 -> FREE（无物体信息）；
-               - 其余非候选（被遮挡、无 FREE 证据）-> UNKNOWN。
-             若不存在任何候选体素，则空间无占据，整体为 FREE。
-          5. FREE_KN 标签（assignFreeLabels）：对所有 FREE voxel 全量计算
-             到最近非 FREE voxel（VALID 或 UNKNOWN）的 L1 距离 K，写为
-             FREE_KN = -K；若整个空间都是 FREE（无任何 VALID/UNKNOWN），
-             所有 FREE 写为哨兵 -(3R)。
+               - 非候选且有 8 顶点 visible-VALID 前方证明 -> FREE（不可改写）；
+               - 其余一切（被遮挡候选、视锥外、相机后方、mask 外、background
+                 未命中、稀疏孔洞、中心在前方但 8 顶点未全证明）-> UNKNOWN。
+          5. FREE_KN 标签（assignFreeLabels）：对所有 FREE voxel 全量计算到最近
+             非 FREE voxel（VALID 或 UNKNOWN）的 L1 距离 K，写为 FREE_KN = -K。
+
+        无相机或无候选时按 empty_policy（默认 'unknown' -> 全 UNKNOWN；
+        'free_inf' 保留旧的全哨兵 FREE 兼容行为）。
 
         返回: (R, R, R) 的 int64 tensor，编码 UNKNOWN=0, VALID=1,
         FREE_KN=-K（K = 到最近 VALID/UNKNOWN 的 L1 距离；全 FREE 时为 -(3R)）。
@@ -1435,39 +1660,37 @@ class VolumeMarker(object):
         R = VolumeMarker._requirePositiveResolution(volume_resolution, 'markVisible')
 
         if len(camera_list) == 0:
-            # 没有任何视角，整个空间一定没有物体信息，且无 VALID -> 哨兵 FREE。
-            return VolumeMarker._emptyLabels(R, VolumeMarker.freeLabelInf(R))
+            # 没有任何视角，不存在任何可信观测证据 -> 严格默认全 UNKNOWN。
+            return VolumeMarker._emptyEvidenceLabels(R, empty_policy, None)
 
         ref_camera = camera_list[0]
         device = ref_camera.device
         dtype = ref_camera.dtype
 
         # --- 1. 候选占据体素 ---
+        # 文件路径只解析一次，候选构建复用同一份几何。
+        resolved_geometry = geometry
+        if isinstance(geometry, str):
+            resolved_geometry = VolumeMarker._loadGeometryFile(geometry)
+
         # depth 依赖收口在 _buildCandidateOccupancy：仅 geometry 为 None 的
         # depth 候选路径才要求 depth；显式 geometry 只需相机位姿/内参。
         candidate = VolumeMarker._buildCandidateOccupancy(
-            camera_list, geometry, R, dtype, device,
+            camera_list, resolved_geometry, R, dtype, device,
         )
 
-        # --- 无候选体素：空间无占据，整体为 FREE（无 VALID -> 哨兵） ---
+        # --- 无候选体素：无可信证据 -> 按 empty_policy（严格默认全 UNKNOWN） ---
         if not bool(candidate.any()):
-            return VolumeMarker._emptyLabels(
-                R, VolumeMarker.freeLabelInf(R), device,
+            return VolumeMarker._emptyEvidenceLabels(R, empty_policy, device)
+
+        # --- 2 & 3. 两阶段渲染：真正可见 VALID + 8 顶点 FREE 证明 ---
+        visible_candidate, free_evidence = \
+            VolumeMarker._renderVisibilityEvidence(
+                camera_list, candidate, R, device,
             )
 
-        # --- 2 & 3. 边界 mesh + 单次渲染同源产出 VALID/FREE/observed ---
-        vertices, faces, triangle_to_voxel = \
-            VolumeMarker._buildVoxelBoundaryMesh(candidate, R)
-
-        visible_candidate, free_any, observed_any = \
-            VolumeMarker._renderClassify(
-                camera_list, vertices, faces, triangle_to_voxel, R, device,
-            )
-
-        # --- 4. 标签合并 ---
-        free_mask = VolumeMarker._classifyFreeMask(
-            candidate, free_any, observed_any, unobserved_policy='free',
-        )
+        # --- 4. 严格 FREE = 非候选 且 8 顶点 visible-VALID 前方证明 ---
+        free_mask = VolumeMarker._deriveStrictFreeMask(candidate, free_evidence)
 
         # --- 5. VALID / FREE_KN / UNKNOWN 合并（含全量 L1 距离 -> -K） ---
         return VolumeMarker._mergeLabels(R, visible_candidate, free_mask, device)
