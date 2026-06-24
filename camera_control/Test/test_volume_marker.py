@@ -1,20 +1,21 @@
 """Tests for the refactored `VolumeMarker.markVisible`.
 
-严格可信可见性算法：
-  1. 候选占据体素（geometry 优先，否则多相机可信观测域内 CCM 并集，mask 外
+严格可信可见性算法（用户目标五阶段）：
+  a. 整个空间初始化为 UNKNOWN；
+  b. 候选占据体素（geometry 优先，否则多相机可信观测域内 CCM 并集，mask 外
      的深度点不进入候选）；
-  2. 候选体素并集的外露立方体面 mesh + triangle->voxel 映射；
-  3. 两阶段渲染：
-       - 阶段一渲染候选 mesh，命中 face（受相机 mask 观测域门控）-> 真正可见
-         VALID；
-       - 阶段二仅由真正可见 VALID 重建 mesh 再渲染，对每个非候选体素做 8 顶点
-         「全部 mask 内、命中 visible-VALID 表面、且严格在其前方」证明 -> FREE；
-  4. 严格 FREE = 非候选 且 8 顶点 visible-VALID 前方证明；其余一切（被遮挡、
-     视锥外、相机后方、mask 外、background 未命中、稀疏孔洞）-> UNKNOWN；FREE
-     voxel 全量编码为 FREE_KN = -K（K = 到最近非 FREE voxel 的 L1 距离）。
+  c. 候选体素并集的外露立方体面 mesh，对每个相机渲染一次得到 mask/depth（不开
+     抗锯齿），命中 face（受相机 mask 观测域门控）-> 真正可见 VALID（固定不变）；
+  d. 同一次候选立方体渲染：对每个非候选体素取「中心 + 8 角点」共 9 点，要求 9 点
+     全部落在画面内、且每个点相机前方深度严格小于其遮挡终点深度 -> FREE。遮挡终点
+     深度逐点取：UV 命中候选渲染 -> 候选 depth；UV 落在 camera.mask 外（mask==0）
+     -> +inf（相机在该方向未观测到物体，整条射线空到无穷远）；
+  e. 被遮挡、视锥外、相机后方、mask 内但未命中候选、稀疏孔洞 -> UNKNOWN；
+     FREE voxel 全量编码为 FREE_KN = -K（K = 到最近 VALID 的 L1 距离；
+     无 VALID 时为哨兵 -(3R)）。
 
-纯逻辑（体素化 / 边界 mesh / 8 顶点证据 / 观测域 / FREE_KN）在 CPU 即可验证；
-需要真正渲染遮挡关系的端到端用例由 CUDA + nvdiffrast 守护。
+纯逻辑（体素化 / 边界 mesh / 9 点证据 / 观测域 / FREE_KN / debug 导出）在 CPU
+即可验证；需要真正渲染遮挡关系的端到端用例由 CUDA + nvdiffrast 守护。
 """
 
 import os
@@ -334,81 +335,117 @@ class TestVoxelCenters(unittest.TestCase):
         self.assertTrue(torch.all(centers <= 0.5))
 
 
-class TestSampleRenderedDepthAtUV(unittest.TestCase):
-    """渲染深度 + 命中 + 观测域的 UV 最近邻采样（纯逻辑，CPU）。
+class TestSampleCandidateAndCameraMaskAtUV(unittest.TestCase):
+    """候选渲染 + 相机 mask 的 9 点双通道 UV 采样（纯逻辑，CPU）。
 
-    这是 8 顶点 FREE 证明的核心采样原子：对每个顶点 UV 返回 visible-VALID
-    渲染深度、是否命中表面、是否落在相机可信观测域内。
+    这是 9 点 FREE 证明的核心采样原子，对每个点 UV 返回逐点遮挡终点深度
+    effective_depth：
+      - UV 命中候选渲染 -> effective = 候选 depth（有限遮挡终点）；
+      - UV 落在 camera.mask 外（mask==0）-> effective = +inf（射线空到无穷远）；
+      - 画面内但 mask 内又未命中候选 -> effective = -inf（无可信终点，不可释放）。
     """
 
-    def _make_depth(self, H, W, surface_depth, hit_value=True, obs_value=True):
+    def _make_camera(self, W=8, H=8):
+        return Camera(
+            width=W, height=H, fovx_degree=60.0,
+            pos=[0.0, 0.0, 3.0], look_at=[0.0, 0.0, 0.0], up=[0.0, 1.0, 0.0],
+            device='cpu',
+        )
+
+    def _make_render(self, H, W, surface_depth, hit_value=True):
         rendered = torch.full((H, W), float(surface_depth), dtype=torch.float32)
         hit = torch.full((H, W), bool(hit_value), dtype=torch.bool)
-        obs = torch.full((H, W), bool(obs_value), dtype=torch.bool)
-        return rendered, hit, obs
+        return rendered, hit
 
-    def test_point_in_front_of_surface(self):
-        H = W = 8
-        rendered, hit, obs = self._make_depth(H, W, surface_depth=5.0)
+    def test_candidate_hit_no_mask_uses_render_depth(self):
+        camera = self._make_camera()
+        rendered, hit = self._make_render(8, 8, surface_depth=5.0)
         uv = torch.tensor([[0.5, 0.5]], dtype=torch.float32)
-        sampled, surface_hit, in_domain = VolumeMarker._sampleRenderedDepthAtUV(
-            rendered, hit, obs, uv, H, W,
-        )
-        self.assertTrue(bool(surface_hit[0]))
-        self.assertTrue(bool(in_domain[0]))
-        self.assertAlmostEqual(float(sampled[0]), 5.0, places=5)
-        # 严格前方：point_depth 2.0 < sampled 5.0。
-        self.assertTrue(2.0 < float(sampled[0]))
+        in_frame, cand_hit, mask_out, eff = \
+            VolumeMarker._sampleCandidateAndCameraMaskAtUV(
+                camera, rendered, hit, uv, 8, 8,
+            )
+        self.assertTrue(bool(in_frame[0]))
+        self.assertTrue(bool(cand_hit[0]))
+        self.assertFalse(bool(mask_out[0]))
+        self.assertAlmostEqual(float(eff[0]), 5.0, places=5)
 
-    def test_point_behind_surface(self):
-        H = W = 8
-        rendered, hit, obs = self._make_depth(H, W, surface_depth=2.0)
-        uv = torch.tensor([[0.5, 0.5]], dtype=torch.float32)
-        sampled, surface_hit, in_domain = VolumeMarker._sampleRenderedDepthAtUV(
-            rendered, hit, obs, uv, H, W,
-        )
-        self.assertTrue(bool(surface_hit[0]))
-        # point_depth 5.0 > 表面 2.0 -> 被遮挡，不在前方。
-        self.assertFalse(5.0 < float(sampled[0]))
-
-    def test_background_pixel_not_surface_hit(self):
-        H = W = 8
-        rendered, hit, obs = self._make_depth(
-            H, W, surface_depth=0.0, hit_value=False,
+    def test_background_no_mask_is_neg_inf(self):
+        camera = self._make_camera()
+        rendered, hit = self._make_render(
+            8, 8, surface_depth=0.0, hit_value=False,
         )
         uv = torch.tensor([[0.5, 0.5]], dtype=torch.float32)
-        sampled, surface_hit, in_domain = VolumeMarker._sampleRenderedDepthAtUV(
-            rendered, hit, obs, uv, H, W,
-        )
-        # 背景像素没有命中 visible-VALID 表面 -> 不能成为 FREE 证据。
-        self.assertFalse(bool(surface_hit[0]))
-        self.assertAlmostEqual(float(sampled[0]), 0.0, places=5)
+        in_frame, cand_hit, mask_out, eff = \
+            VolumeMarker._sampleCandidateAndCameraMaskAtUV(
+                camera, rendered, hit, uv, 8, 8,
+            )
+        # 无 mask、候选未命中 -> 无可信遮挡终点 -> -inf（不可释放）。
+        self.assertTrue(bool(in_frame[0]))
+        self.assertFalse(bool(cand_hit[0]))
+        self.assertFalse(bool(mask_out[0]))
+        self.assertEqual(float(eff[0]), float('-inf'))
 
-    def test_outside_observation_domain(self):
-        H = W = 8
-        rendered, hit, obs = self._make_depth(
-            H, W, surface_depth=5.0, hit_value=True, obs_value=False,
+    def test_mask_outside_is_pos_inf(self):
+        # camera.mask 全 False -> 画面内任意点都在 mask 外 -> effective +inf，
+        # 即使该像素命中了候选渲染（mask 外通道优先）。
+        camera = self._make_camera()
+        camera.loadMask(torch.zeros((8, 8), dtype=torch.bool))
+        rendered, hit = self._make_render(8, 8, surface_depth=5.0, hit_value=True)
+        uv = torch.tensor([[0.5, 0.5]], dtype=torch.float32)
+        in_frame, cand_hit, mask_out, eff = \
+            VolumeMarker._sampleCandidateAndCameraMaskAtUV(
+                camera, rendered, hit, uv, 8, 8,
+            )
+        self.assertTrue(bool(mask_out[0]))
+        self.assertEqual(float(eff[0]), float('inf'))
+
+    def test_mask_inside_hit_uses_render_depth(self):
+        # mask 全 True -> 都在 mask 内；命中候选 -> effective = 候选 depth。
+        camera = self._make_camera()
+        camera.loadMask(torch.ones((8, 8), dtype=torch.bool))
+        rendered, hit = self._make_render(8, 8, surface_depth=4.0, hit_value=True)
+        uv = torch.tensor([[0.5, 0.5]], dtype=torch.float32)
+        in_frame, cand_hit, mask_out, eff = \
+            VolumeMarker._sampleCandidateAndCameraMaskAtUV(
+                camera, rendered, hit, uv, 8, 8,
+            )
+        self.assertFalse(bool(mask_out[0]))
+        self.assertTrue(bool(cand_hit[0]))
+        self.assertAlmostEqual(float(eff[0]), 4.0, places=5)
+
+    def test_mask_inside_miss_is_neg_inf(self):
+        # mask 全 True 但候选未命中 -> 无可信遮挡终点 -> effective -inf。
+        camera = self._make_camera()
+        camera.loadMask(torch.ones((8, 8), dtype=torch.bool))
+        rendered, hit = self._make_render(
+            8, 8, surface_depth=0.0, hit_value=False,
         )
         uv = torch.tensor([[0.5, 0.5]], dtype=torch.float32)
-        sampled, surface_hit, in_domain = VolumeMarker._sampleRenderedDepthAtUV(
-            rendered, hit, obs, uv, H, W,
-        )
-        # 命中表面但落在观测域外（mask 外）-> in_domain=False，不可作 FREE。
-        self.assertTrue(bool(surface_hit[0]))
-        self.assertFalse(bool(in_domain[0]))
+        in_frame, cand_hit, mask_out, eff = \
+            VolumeMarker._sampleCandidateAndCameraMaskAtUV(
+                camera, rendered, hit, uv, 8, 8,
+            )
+        self.assertFalse(bool(mask_out[0]))
+        self.assertFalse(bool(cand_hit[0]))
+        self.assertEqual(float(eff[0]), float('-inf'))
 
-    def test_out_of_frame_is_neither(self):
-        H = W = 8
-        rendered, hit, obs = self._make_depth(H, W, surface_depth=2.0)
+    def test_out_of_frame_is_neg_inf(self):
+        camera = self._make_camera()
+        camera.loadMask(torch.zeros((8, 8), dtype=torch.bool))  # 即使 mask 外
+        rendered, hit = self._make_render(8, 8, surface_depth=5.0, hit_value=True)
         uv = torch.tensor(
             [[1.5, 0.5], [float('nan'), 0.5]], dtype=torch.float32,
         )
-        sampled, surface_hit, in_domain = VolumeMarker._sampleRenderedDepthAtUV(
-            rendered, hit, obs, uv, H, W,
-        )
+        in_frame, cand_hit, mask_out, eff = \
+            VolumeMarker._sampleCandidateAndCameraMaskAtUV(
+                camera, rendered, hit, uv, 8, 8,
+            )
         for i in (0, 1):
-            self.assertFalse(bool(surface_hit[i]))
-            self.assertFalse(bool(in_domain[i]))
+            self.assertFalse(bool(in_frame[i]))
+            self.assertFalse(bool(mask_out[i]))
+            self.assertFalse(bool(cand_hit[i]))
+            self.assertEqual(float(eff[i]), float('-inf'))
 
 
 class TestVoxelHelpers(unittest.TestCase):
@@ -548,7 +585,9 @@ class TestFreeNeighborLevels(unittest.TestCase):
         free_mask[2, 2, 2] = False  # VALID
         free_mask[2, 2, 3] = False  # 保持 UNKNOWN
 
-        out = VolumeMarker.assignFreeLabels(labels, free_mask)
+        # 距离源 = VALID（用户语义：FREE_KN 度量到最近 VALID 的距离）。
+        valid_mask = labels == VolumeMarker.VALID
+        out = VolumeMarker.assignFreeLabels(labels, free_mask, valid_mask)
 
         # VALID / UNKNOWN 不动。
         self.assertEqual(int(out[2, 2, 2].item()), VolumeMarker.VALID)
@@ -558,36 +597,45 @@ class TestFreeNeighborLevels(unittest.TestCase):
         self.assertEqual(int(out[2, 1, 2].item()), VolumeMarker.freeLabelKN(1))
         # 距离 2 的 FREE -> -2。
         self.assertEqual(int(out[4, 2, 2].item()), VolumeMarker.freeLabelKN(2))
-        # UNKNOWN 也是距离源：(2,2,4) 紧贴 UNKNOWN (2,2,3) -> -1
-        # （而非到 VALID (2,2,2) 的距离 2）。
-        self.assertEqual(int(out[2, 2, 4].item()), VolumeMarker.freeLabelKN(1))
-        # 任意距离全量编码：角点 (0,0,0) 到最近源 (2,2,2) 距离 6 -> -6。
+        # UNKNOWN 不再是距离源：(2,2,4) 紧贴 UNKNOWN (2,2,3)，但距离按到
+        # VALID (2,2,2) 计 -> -2（而非旧语义的 -1）。
+        self.assertEqual(int(out[2, 2, 4].item()), VolumeMarker.freeLabelKN(2))
+        # 任意距离全量编码：角点 (0,0,0) 到最近 VALID (2,2,2) 距离 6 -> -6。
         self.assertEqual(int(out[0, 0, 0].item()), VolumeMarker.freeLabelKN(6))
         # 输入不被原地修改。
         self.assertEqual(int(labels[3, 2, 2].item()), VolumeMarker.UNKNOWN)
 
-    def test_assign_free_labels_unknown_is_distance_source(self):
-        # 没有任何 VALID，只有一个 UNKNOWN：FREE 的 K 按到该 UNKNOWN 的
-        # L1 距离编码（回归：紧贴 UNKNOWN 的 FREE 的 K 不应过大）。
-        R = 3
+    def test_assign_free_labels_distance_source_ignores_unknown(self):
+        # 显式距离源解耦：UNKNOWN 不是距离源，紧贴 UNKNOWN 的 FREE 不会被
+        # 压成 FREE_1N，而是按到唯一 VALID 的真实 L1 距离分层。
+        R = 4
         labels = torch.full((R, R, R), VolumeMarker.UNKNOWN, dtype=torch.int64)
+        labels[0, 0, 0] = VolumeMarker.VALID  # 唯一 VALID
+        labels[0, 0, 3] = VolumeMarker.UNKNOWN  # 远端 UNKNOWN（非源）
+
         free_mask = torch.ones((R, R, R), dtype=torch.bool)
-        free_mask[0, 0, 0] = False
+        free_mask[0, 0, 0] = False  # VALID 不参与
+        free_mask[0, 0, 3] = False  # 该 UNKNOWN 不参与
 
-        out = VolumeMarker.assignFreeLabels(labels, free_mask)
+        out = VolumeMarker.assignFreeLabels(
+            labels, free_mask, labels == VolumeMarker.VALID,
+        )
 
-        self.assertEqual(int(out[0, 0, 0].item()), VolumeMarker.UNKNOWN)
+        # 贴近 VALID 的层。
         self.assertEqual(int(out[1, 0, 0].item()), VolumeMarker.freeLabelKN(1))
         self.assertEqual(int(out[1, 1, 0].item()), VolumeMarker.freeLabelKN(2))
-        self.assertEqual(int(out[2, 2, 2].item()), VolumeMarker.freeLabelKN(6))
+        # (0,0,2) 紧贴非源 UNKNOWN (0,0,3)，但到 VALID (0,0,0) 距离为 2 -> -2，
+        # 证明 UNKNOWN 不再缩短 K。
+        self.assertEqual(int(out[0, 0, 2].item()), VolumeMarker.freeLabelKN(2))
 
-    def test_assign_free_labels_all_free_is_inf_sentinel(self):
-        # 整个空间都是 FREE（无任何 VALID/UNKNOWN）-> 全部哨兵 -(3R)。
+    def test_assign_free_labels_empty_source_is_inf_sentinel(self):
+        # 距离源为空（无任何 VALID）-> FREE 全部哨兵 -(3R)。
         R = 3
         labels = torch.full((R, R, R), VolumeMarker.UNKNOWN, dtype=torch.int64)
         free_mask = torch.ones((R, R, R), dtype=torch.bool)
+        empty_source = torch.zeros((R, R, R), dtype=torch.bool)
 
-        out = VolumeMarker.assignFreeLabels(labels, free_mask)
+        out = VolumeMarker.assignFreeLabels(labels, free_mask, empty_source)
 
         self.assertTrue(torch.all(out == VolumeMarker.freeLabelInf(R)))
 
@@ -987,63 +1035,109 @@ class TestVoxelCorners(unittest.TestCase):
         self.assertTrue(torch.all(corners <= 0.5 + 1e-6))
 
 
-class TestEightVertexFreeEvidence(unittest.TestCase):
-    """8 顶点严格 FREE 证明（纯逻辑，CPU）。
+class TestVoxelQueryPoints(unittest.TestCase):
+    """体素 9 点查询（中心 + 8 角点）几何一致性（纯逻辑，CPU）。"""
 
-    回归核心：唯有 8 个顶点同时「mask 内 + 命中 visible-VALID 表面 + 严格在
-    其前方」才给出 FREE 证据；任一顶点越界/未命中/不在前方都不成立。
+    def test_query_points_shape(self):
+        R = 4
+        q = VolumeMarker._createVoxelQueryPoints(R, torch.float32, 'cpu')
+        self.assertEqual(tuple(q.shape), (R * R * R, 9, 3))
+
+    def test_first_point_is_center_rest_are_corners(self):
+        R = 5
+        q = VolumeMarker._createVoxelQueryPoints(R, torch.float32, 'cpu')
+        centers = VolumeMarker.createVoxelCenters(
+            R, torch.float32, 'cpu',
+        ).reshape(-1, 3)
+        corners = VolumeMarker._createVoxelCorners(
+            R, torch.float32, 'cpu',
+        ).reshape(-1, 8, 3)
+        # 点 0 = 体素中心；点 1..8 = 8 角点。
+        self.assertTrue(torch.allclose(q[:, 0, :], centers))
+        self.assertTrue(torch.allclose(q[:, 1:, :], corners))
+
+    def test_center_is_centroid_of_corners(self):
+        R = 6
+        q = VolumeMarker._createVoxelQueryPoints(R, torch.float32, 'cpu')
+        centroid = q[:, 1:, :].mean(dim=1)
+        self.assertTrue(torch.allclose(q[:, 0, :], centroid, atol=1e-6))
+
+
+class TestNinePointFreeEvidence(unittest.TestCase):
+    """9 点严格 FREE 证明（纯逻辑，CPU）。
+
+    回归核心：唯有 9 点（中心 + 8 角点）同时「画面内 + 严格在遮挡终点前方」才
+    给出 FREE 证据；任一点越界 / 不在前方 / 无可信终点都不成立。遮挡终点既可是
+    候选渲染深度（有限），也可是 camera.mask 外的 +inf。
     """
 
     def _all_pass(self):
-        depth8 = torch.full((1, 8), 2.0)
-        sampled8 = torch.full((1, 8), 5.0)
-        hit8 = torch.ones((1, 8), dtype=torch.bool)
-        dom8 = torch.ones((1, 8), dtype=torch.bool)
-        return depth8, sampled8, hit8, dom8
+        # 有限候选遮挡终点 5.0，9 点深度 2.0 均严格在前方。
+        point_depth9 = torch.full((1, 9), 2.0)
+        in_frame9 = torch.ones((1, 9), dtype=torch.bool)
+        effective9 = torch.full((1, 9), 5.0)
+        return point_depth9, in_frame9, effective9
 
-    def test_all_eight_in_front_is_free(self):
-        depth8, sampled8, hit8, dom8 = self._all_pass()
-        free = VolumeMarker._freeEvidenceEightVerticesInFront(
-            depth8, sampled8, hit8, dom8,
-        )
+    def test_all_nine_in_front_is_free(self):
+        pd, infr, eff = self._all_pass()
+        free = VolumeMarker._freeEvidenceNinePointsInFront(pd, infr, eff)
         self.assertTrue(bool(free[0]))
 
-    def test_one_vertex_behind_breaks_proof(self):
-        depth8, sampled8, hit8, dom8 = self._all_pass()
-        depth8[0, 3] = 9.0  # 该顶点在表面后方
-        free = VolumeMarker._freeEvidenceEightVerticesInFront(
-            depth8, sampled8, hit8, dom8,
-        )
+    def test_one_corner_behind_breaks_proof(self):
+        pd, infr, eff = self._all_pass()
+        pd[0, 4] = 9.0  # 某角点在遮挡终点后方
+        free = VolumeMarker._freeEvidenceNinePointsInFront(pd, infr, eff)
         self.assertFalse(bool(free[0]))
 
-    def test_one_vertex_not_hit_breaks_proof(self):
-        depth8, sampled8, hit8, dom8 = self._all_pass()
-        hit8[0, 5] = False  # 该顶点未命中 visible-VALID 表面
-        free = VolumeMarker._freeEvidenceEightVerticesInFront(
-            depth8, sampled8, hit8, dom8,
-        )
+    def test_center_point_behind_breaks_proof(self):
+        # 中心点（索引 0）在终点后方 -> 整个体素不成立（中心点是额外保证）。
+        pd, infr, eff = self._all_pass()
+        pd[0, 0] = 9.0
+        free = VolumeMarker._freeEvidenceNinePointsInFront(pd, infr, eff)
         self.assertFalse(bool(free[0]))
 
-    def test_one_vertex_outside_domain_breaks_proof(self):
-        depth8, sampled8, hit8, dom8 = self._all_pass()
-        dom8[0, 0] = False  # 该顶点落在 mask 外
-        free = VolumeMarker._freeEvidenceEightVerticesInFront(
-            depth8, sampled8, hit8, dom8,
-        )
+    def test_one_point_out_of_frame_breaks_proof(self):
+        pd, infr, eff = self._all_pass()
+        infr[0, 5] = False  # 某点投影出画面
+        free = VolumeMarker._freeEvidenceNinePointsInFront(pd, infr, eff)
+        self.assertFalse(bool(free[0]))
+
+    def test_one_point_without_terminus_breaks_proof(self):
+        # effective = -inf（画面内但 mask 内又未命中候选）-> 否决该点 -> 非 FREE。
+        pd, infr, eff = self._all_pass()
+        eff[0, 2] = float('-inf')
+        free = VolumeMarker._freeEvidenceNinePointsInFront(pd, infr, eff)
         self.assertFalse(bool(free[0]))
 
     def test_equal_depth_not_strictly_in_front(self):
-        # 顶点深度等于渲染深度（紧贴表面）-> 不算严格前方 -> 非 FREE。
-        depth8, sampled8, hit8, dom8 = self._all_pass()
-        sampled8 = depth8.clone()
-        free = VolumeMarker._freeEvidenceEightVerticesInFront(
-            depth8, sampled8, hit8, dom8,
-        )
+        # 点深度等于遮挡终点（紧贴表面）-> 不算严格前方 -> 非 FREE。
+        pd, infr, eff = self._all_pass()
+        eff = pd.clone()
+        free = VolumeMarker._freeEvidenceNinePointsInFront(pd, infr, eff)
         self.assertFalse(bool(free[0]))
+
+    def test_mixed_channels_all_in_front_is_free(self):
+        # 混合通道：部分点终点为有限候选 depth、部分点终点为 mask 外 +inf，
+        # 只要 9 点全部严格在各自终点前方即 FREE。
+        pd = torch.full((1, 9), 2.0)
+        infr = torch.ones((1, 9), dtype=torch.bool)
+        eff = torch.full((1, 9), 5.0)
+        eff[0, 1] = float('inf')  # mask 外通道
+        eff[0, 4] = float('inf')
+        free = VolumeMarker._freeEvidenceNinePointsInFront(pd, infr, eff)
+        self.assertTrue(bool(free[0]))
+
+    def test_mask_outside_channel_frees_far_point(self):
+        # mask 外 +inf 终点：即使点深度很大（远体素），仍严格在 +inf 前方 -> FREE。
+        pd = torch.full((1, 9), 1e6)
+        infr = torch.ones((1, 9), dtype=torch.bool)
+        eff = torch.full((1, 9), float('inf'))
+        free = VolumeMarker._freeEvidenceNinePointsInFront(pd, infr, eff)
+        self.assertTrue(bool(free[0]))
 
 
 class TestStrictFreeMask(unittest.TestCase):
-    """严格 FREE = 非候选 且 8 顶点证明（纯逻辑，CPU）。"""
+    """严格 FREE = 非候选 且 9 点证明（纯逻辑，CPU）。"""
 
     def test_only_non_candidate_with_evidence_is_free(self):
         R = 3
@@ -1066,6 +1160,92 @@ class TestStrictFreeMask(unittest.TestCase):
         free_evidence = torch.zeros((R, R, R), dtype=torch.bool)
         mask = VolumeMarker._deriveStrictFreeMask(candidate, free_evidence)
         self.assertFalse(bool(mask.any()))
+
+
+class TestMergeLabels(unittest.TestCase):
+    """VALID / FREE_KN / UNKNOWN 合并（纯逻辑，CPU）。"""
+
+    def test_valid_fixed_and_free_kn_distance_to_valid(self):
+        # VALID 在 (2,2,2)；一条 FREE 链沿 +x 离开 VALID。
+        R = 5
+        visible = torch.zeros((R, R, R), dtype=torch.bool)
+        visible[2, 2, 2] = True
+        free_mask = torch.zeros((R, R, R), dtype=torch.bool)
+        free_mask[3, 2, 2] = True  # 距 VALID 1
+        free_mask[4, 2, 2] = True  # 距 VALID 2
+
+        labels = VolumeMarker._mergeLabels(R, visible, free_mask, 'cpu')
+
+        # VALID 固定为 1，绝不被 FREE 改写。
+        self.assertEqual(int(labels[2, 2, 2].item()), VolumeMarker.VALID)
+        # FREE_KN 按到 VALID 的 L1 距离分层。
+        self.assertEqual(int(labels[3, 2, 2].item()), VolumeMarker.freeLabelKN(1))
+        self.assertEqual(int(labels[4, 2, 2].item()), VolumeMarker.freeLabelKN(2))
+        # 其余保持 UNKNOWN。
+        self.assertEqual(int(labels[0, 0, 0].item()), VolumeMarker.UNKNOWN)
+
+    def test_free_kn_layers_not_collapsed_by_unknown(self):
+        # 回归：UNKNOWN 包围 FREE 时，FREE 不应被全部压成 FREE_1N，而应保留
+        # 到 VALID 的真实 2N/3N/4N 分层。
+        R = 6
+        visible = torch.zeros((R, R, R), dtype=torch.bool)
+        visible[0, 0, 0] = True
+        free_mask = torch.zeros((R, R, R), dtype=torch.bool)
+        for d in range(1, 5):
+            free_mask[d, 0, 0] = True  # 距 VALID = d
+
+        labels = VolumeMarker._mergeLabels(R, visible, free_mask, 'cpu')
+        for d in range(1, 5):
+            self.assertEqual(
+                int(labels[d, 0, 0].item()), VolumeMarker.freeLabelKN(d),
+                f'voxel ({d},0,0) 应为 FREE_{d}N',
+            )
+
+
+class TestDebugExports(unittest.TestCase):
+    """debug 中间结果四面体导出（纯逻辑 + open3d，CPU）。"""
+
+    def test_mask_to_label_field(self):
+        R = 3
+        mask = torch.zeros((R, R, R), dtype=torch.bool)
+        mask[0, 1, 2] = True
+        field = VolumeMarker._maskToLabelField(
+            mask, VolumeMarker.VALID, R, 'cpu',
+        )
+        self.assertEqual(int(field[0, 1, 2].item()), VolumeMarker.VALID)
+        self.assertEqual(int(field[0, 0, 0].item()), VolumeMarker.UNKNOWN)
+        self.assertEqual(int((field == VolumeMarker.VALID).sum().item()), 1)
+
+    def test_debug_export_stages_writes_plys(self):
+        R = 4
+        device = 'cpu'
+        candidate = torch.zeros((R, R, R), dtype=torch.bool)
+        candidate[1, 1, 1] = True
+        candidate[2, 1, 1] = True
+        visible = torch.zeros((R, R, R), dtype=torch.bool)
+        visible[1, 1, 1] = True  # 一个候选可见 -> VALID
+        free_mask = torch.zeros((R, R, R), dtype=torch.bool)
+        free_mask[0, 1, 1] = True  # 非候选 FREE
+        labels = VolumeMarker._mergeLabels(R, visible, free_mask, device)
+
+        per_camera = [{
+            'visible': visible,
+            'free_evidence': free_mask | candidate,
+        }]
+
+        with tempfile.TemporaryDirectory() as folder:
+            VolumeMarker._debugExportStages(
+                folder, 'unittest', R, device,
+                candidate, visible, free_mask, labels, per_camera,
+            )
+            for name in (
+                'unittest_candidate.ply', 'unittest_valid.ply',
+                'unittest_free.ply', 'unittest_labels.ply',
+                'unittest_cam0.ply',
+            ):
+                path = os.path.join(folder, name)
+                self.assertTrue(os.path.isfile(path), f'missing {name}')
+                self.assertGreater(os.path.getsize(path), 0, f'empty {name}')
 
 
 class TestObservationDomain(unittest.TestCase):
@@ -1266,20 +1446,20 @@ class TestMarkVisibleRender(unittest.TestCase):
 
         self.assertEqual(int(labels[idx].item()), VolumeMarker.VALID)
 
-    def test_voxels_closer_than_valid_are_free_by_eight_vertex_proof(self):
-        """核心回归（严格 8 顶点）：相机与可见 VALID 之间、被 VALID 表面完整
+    def test_voxels_closer_than_valid_are_free_by_nine_point_proof(self):
+        """核心回归（严格 9 点）：相机与可见 VALID 之间、被 VALID 表面完整
         包住的非候选 voxel 才是 FREE。
 
         相机在 +Z 看向 -Z，世界 z 越大越靠近相机。用一块远处的候选板（占据
         若干 i,j、固定小 z），渲染后其 silhouette 较宽；位于其前方（更大 z）
-        且 8 顶点都投影在该 silhouette 内的非候选 voxel 应为 FREE_KN（负值）。
-        紧贴 VALID 前表面的一层（共享平面，顶点深度等于渲染深度）按严格判据
-        不算严格前方，可能保持 UNKNOWN，因此只断言有明确间隙的体素。
+        且 9 点（中心+8角点）都投影在该 silhouette 内的非候选 voxel 应为
+        FREE_KN（负值）。紧贴 VALID 前表面的一层（共享平面，点深度等于渲染深度）
+        按严格判据不算严格前方，可能保持 UNKNOWN，因此只断言有明确间隙的体素。
         """
         R = 16
         device = 'cuda:0'
 
-        # 远处一块 3x3 候选板（z 索引 3），扩大 silhouette 让前方体素 8 顶点
+        # 远处一块 3x3 候选板（z 索引 3），扩大 silhouette 让前方体素 9 点
         # 稳定落在其投影轮廓内部。
         valid_k = 3
         slab = [
@@ -1294,7 +1474,7 @@ class TestMarkVisibleRender(unittest.TestCase):
         self.assertEqual(int(labels[8, 8, valid_k].item()), VolumeMarker.VALID)
 
         # 中心列上、与 VALID 板有明确间隙（z 索引 >= valid_k + 2）的非候选体素，
-        # 其 8 顶点完整落在板的 silhouette 内且严格在前方 -> FREE_KN(<0)。
+        # 其 9 点完整落在板的 silhouette 内且严格在前方 -> FREE_KN(<0)。
         for k in range(valid_k + 2, R):
             label = int(labels[8, 8, k].item())
             self.assertLess(
@@ -1333,15 +1513,17 @@ class TestMarkVisibleRender(unittest.TestCase):
             '无可见 VALID 阻挡的方向不应出现 FREE',
         )
 
-    def test_camera_mask_outside_stays_unknown(self):
-        """相机 mask 全 False 时，候选不被标 VALID、其前方不被标 FREE。
+    def test_camera_mask_all_false_frees_observed_frustum(self):
+        """相机 mask 全 False：候选不被标 VALID；视锥内非候选体素被释放为 FREE。
 
-        mask 是可信观测域：mask 外既不产生 VALID 也不产生 FREE。整幅 mask 为
-        False 时该相机不提供任何证据，单相机下整个空间保持 UNKNOWN。
+        新语义下 mask 外表示「相机在该方向未观测到物体 -> 整条射线空到无穷远」。
+        整幅 mask 全 False 时，该相机不提供任何 VALID 命中（候选保持非 VALID），
+        但其视锥内、9 点都落在 mask 外的非候选体素遮挡终点取 +inf -> FREE。无
+        VALID 作距离源 -> FREE_KN 取哨兵 -(3R)。候选体素自身被排除，保持 UNKNOWN。
         """
         R = 16
         device = 'cuda:0'
-        idx = (8, 8, 3)
+        idx = (8, 8, 3)  # 候选体素
         pts = torch.from_numpy(
             np.stack([_voxel_center(idx, R)]).astype(np.float32),
         ).to(device)
@@ -1350,9 +1532,17 @@ class TestMarkVisibleRender(unittest.TestCase):
         camera.loadMask(torch.zeros((128, 128), dtype=torch.bool, device=device))
         labels = VolumeMarker.markVisible([camera], R, geometry=pts)
 
-        self.assertTrue(
-            bool((labels == VolumeMarker.UNKNOWN).all().item()),
-            'mask 全 False 时不应产生任何 VALID/FREE',
+        # mask 外不产生命中证据 -> 没有任何 VALID。
+        self.assertEqual(int((labels == VolumeMarker.VALID).sum().item()), 0)
+        # 候选体素被排除，不会变 FREE，保持 UNKNOWN。
+        self.assertEqual(int(labels[idx].item()), VolumeMarker.UNKNOWN)
+        # 视锥中心、靠近相机的非候选体素 9 点都在 mask 外 -> FREE 哨兵 -(3R)。
+        self.assertEqual(
+            int(labels[8, 8, 8].item()), VolumeMarker.freeLabelInf(R),
+        )
+        self.assertGreater(
+            int((labels < 0).sum().item()), 0,
+            'mask 全 False 时视锥内非候选体素应被释放为 FREE',
         )
 
     def test_no_candidate_means_all_unknown(self):
@@ -1454,8 +1644,9 @@ class TestMarkVisibleRender(unittest.TestCase):
 
         复现 bug：从坐标原点上半球各角度观察点云时，底座内部（非候选、被顶面
         遮挡）与底部未观测空间此前会因 background / 未观测被错误标 FREE。严格
-        8 顶点重构后，FREE 只来自「整个 voxel 被夹在相机与可见 VALID 表面之间」，
-        被顶面遮挡的内部体素在表面后方（不在前方）-> 不满足证明 -> UNKNOWN。
+        9 点重构后，FREE 只来自「整个 voxel 被夹在相机与遮挡终点之间」，被顶面
+        遮挡的内部体素在表面后方（不在前方）-> 不满足证明 -> UNKNOWN。
+        这些相机未加载 mask，FREE 只能走候选渲染命中通道（无 mask 外通道）。
         """
         R = 16
         device = 'cuda:0'

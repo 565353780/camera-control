@@ -267,6 +267,9 @@ def toVisibleVolumeMesh(
     labels: Union[torch.Tensor, np.ndarray],
     tetra_radius_ratio: float = 0.25,
     max_free_k: Optional[int] = None,
+    show_valid: bool = True,
+    show_unknown: bool = True,
+    show_free: bool = True,
 ) -> o3d.geometry.TriangleMesh:
     """
     将 VolumeMarker.markVisible 输出的 (R, R, R) 标签可视化为单个 TriangleMesh。
@@ -285,6 +288,10 @@ def toVisibleVolumeMesh(
         tetra_radius_ratio: 基准四面体外接球半径相对 voxel 边长的比例。
         max_free_k: 只绘制 K <= max_free_k 的 FREE 层（None 表示全画）；
             用于避免全空间 R^3 个四面体导出过大。
+        show_valid / show_unknown / show_free: 分别控制是否绘制 VALID /
+            UNKNOWN / FREE_KN 三类 voxel（默认全画，保持向后兼容）。调试
+            单类中间结果（如只看候选或只看 FREE）时可关闭其余类，避免被
+            外围 UNKNOWN 灰色四面体淹没。
 
     Returns:
         合并后的单个 o3d.geometry.TriangleMesh。
@@ -314,11 +321,13 @@ def toVisibleVolumeMesh(
     all_radii = []
     all_colors = []
 
-    # --- VALID / UNKNOWN：固定颜色与尺寸 ---
-    for label_value, color, radius_scale in (
-        (VISIBLE_LABEL_VALID, VISIBLE_COLOR_VALID, 1.0),
-        (VISIBLE_LABEL_UNKNOWN, VISIBLE_COLOR_UNKNOWN, 0.7),
+    # --- VALID / UNKNOWN：固定颜色与尺寸（按开关过滤）---
+    for label_value, color, radius_scale, enabled in (
+        (VISIBLE_LABEL_VALID, VISIBLE_COLOR_VALID, 1.0, show_valid),
+        (VISIBLE_LABEL_UNKNOWN, VISIBLE_COLOR_UNKNOWN, 0.7, show_unknown),
     ):
+        if not enabled:
+            continue
         centers = _centersOf(labels == label_value)
         M = centers.shape[0]
         if M == 0:
@@ -331,6 +340,8 @@ def toVisibleVolumeMesh(
     free_mask = labels < 0
     if max_free_k is not None:
         free_mask &= labels >= -int(max_free_k)
+    if not show_free:
+        free_mask = np.zeros_like(free_mask)
 
     if bool(free_mask.any()):
         k_values = -labels[free_mask].astype(np.int64)  # (M,) K >= 1
