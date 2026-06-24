@@ -137,6 +137,70 @@ def sampleFillRatio(spec) -> float:
     return float(np.random.uniform(float(seg[0]), float(seg[1])))
 
 
+def azimuthWedgeMask(
+    directions: np.ndarray,
+    up_direction,
+    *,
+    apply_prob: float = 0.0,
+    wedge_fractions: List[float] = [0.5, 0.25],
+    generator: Optional[random.Random] = None,
+) -> Optional[np.ndarray]:
+    """随机把候选相机方向限制到绕 up 轴的一个方位角扇区(wedge), 模拟"贴墙/墙角拍摄"。
+
+    现训练默认相机分布在整个上半球(用户绕物体转一整圈), 但贴着墙拍只能绕半圈
+    (方位角 ~180°), 墙角只能绕 1/4 圈(~90°)。本原子在「候选方向」层面按 first-
+    principles 过滤(而非采样后丢弃)::
+
+      * 以概率 ``1 - apply_prob`` 不做限制, 返回 ``None``(无操作, 调用方按全 360° 处理);
+      * 以概率 ``apply_prob`` 等概率从 ``wedge_fractions`` 选一个扇宽占比 ``frac``
+        (0.5=半圈/贴墙, 0.25=四分之一圈/墙角), 选一个随机中心方位角 ``θ0∈[0,2π)``,
+        返回布尔 mask: 候选方向绕 up 轴的方位角落在 ``[θ0−w/2, θ0+w/2]`` (mod 2π,
+        ``w = frac·2π``) 内为 True。
+
+    方位角在「垂直于 up 轴的平面」里度量, 与天顶角/俯仰角解耦, 因此扇区只压缩"绕物体
+    转的水平角度", 不限制俯仰——正是贴墙/墙角场景的几何。中心 ``θ0`` 随机, 所以平面内
+    参考轴的选取无关紧要。
+
+    与 :func:`flux_mv...random_valid_to_unknown` 同构: 关键字 tunables + 早退无操作 +
+    每次调用独立随机 + 纯函数(无副作用)。``None`` 表示"本次不限制"(让调用方原样处理),
+    否则返回 ``(N,)`` 的 bool mask。
+
+    Args:
+        directions:        (N, 3) 候选相机方向(单位向量, 全球面 Fibonacci 候选)。
+        up_direction:      绕之度量方位角的竖直轴(= 上半球过滤的 up 轴), shape (3,)。
+        apply_prob:        本次调用施加扇区限制的概率。
+        wedge_fractions:   可选扇宽占比集合(占整个 360° 的比例), 施加时等概率选一个。
+        generator:         可选 ``random.Random`` 复现实例(默认用全局 ``random``)。
+    Returns:
+        ``None``(不限制) 或 (N,) bool mask(扇区内为 True)。
+    """
+    if apply_prob <= 0.0 or not wedge_fractions:
+        return None
+    rng = generator if generator is not None else random
+    if rng.random() > apply_prob:
+        return None
+
+    up = np.asarray(up_direction, dtype=np.float64)
+    up_norm = np.linalg.norm(up)
+    if up.shape != (3,) or up_norm == 0.0:
+        return None
+    up = up / up_norm
+
+    # 在垂直于 up 的平面里取一组正交基 (e1, e2) 作为方位角的参考系。
+    ref = np.array([1.0, 0.0, 0.0]) if abs(up[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    e1 = ref - np.dot(ref, up) * up
+    e1 = e1 / np.linalg.norm(e1)
+    e2 = np.cross(up, e1)
+
+    azimuth = np.arctan2(directions @ e2, directions @ e1)   # (N,) ∈ (-π, π]
+    frac = float(rng.choice(list(wedge_fractions)))
+    half_width = np.pi * frac                                # 半扇宽 = (frac·2π)/2
+    center = rng.uniform(0.0, 2.0 * np.pi)
+    # 角差 wrap 到 [-π, π]; |Δ| ≤ half_width 即落在扇区内。
+    delta = np.abs((azimuth - center + np.pi) % (2.0 * np.pi) - np.pi)
+    return delta <= half_width
+
+
 def sampleCameras(
     mesh: trimesh.Trimesh,
     candidate_camera_num: int=720,
@@ -152,6 +216,8 @@ def sampleCameras(
     all_camera_upper_ratio: float=0.0,
     all_camera_upper_direction: List[float] = [0, 0, 1],
     fov_fill_ratio_range: Optional[List[float]] = None,
+    azimuth_wedge_prob: float = 0.0,
+    azimuth_wedge_fractions: List[float] = [0.5, 0.25],
 ) -> List[Camera]:
     """
     创建围绕mesh均匀分布的相机和深度数据
@@ -190,16 +256,27 @@ def sampleCameras(
     upper_dir_norm = np.linalg.norm(upper_dir)
     filter_by_upper = upper_dir.shape == (3,) and upper_dir_norm > 0
 
+    # 候选方向掩码: 先全 True, 再按各自概率与"上半球"、"方位角扇区"求交。两个增强独立,
+    # 默认(azimuth_wedge_prob=0)时退化为原始的上半球/全球面逻辑——逐分支语义不变。
+    candidate_mask = np.ones(candidate_camera_num, dtype=bool)
+
+    # 上半球过滤(原逻辑): 以 all_camera_upper_ratio 概率限制到 dir·up ≥ 0。
     if filter_by_upper and all_camera_upper_ratio > 0 and random.random() <= all_camera_upper_ratio:
-        upper_dir = upper_dir / upper_dir_norm
-        projections = camera_directions @ upper_dir
-        upper_mask = projections >= 0
-        upper_indices = np.where(upper_mask)[0]
-        if len(upper_indices) >= camera_num:
-            sampled_indices = random.sample(upper_indices.tolist(), camera_num)
-        else:
-            sampled_indices = random.sample(range(candidate_camera_num), camera_num)
+        candidate_mask &= (camera_directions @ (upper_dir / upper_dir_norm)) >= 0
+
+    # 方位角扇区过滤(贴墙/墙角增强): 绕 up 轴限制到半圈/四分之一圈, 见 azimuthWedgeMask。
+    wedge_mask = azimuthWedgeMask(
+        camera_directions, all_camera_upper_direction,
+        apply_prob=azimuth_wedge_prob, wedge_fractions=azimuth_wedge_fractions,
+    )
+    if wedge_mask is not None:
+        candidate_mask &= wedge_mask
+
+    candidate_indices = np.where(candidate_mask)[0]
+    if len(candidate_indices) >= camera_num:
+        sampled_indices = random.sample(candidate_indices.tolist(), camera_num)
     else:
+        # 限制后候选不足(极窄扇区/候选过少): 回退全 360° 池, 保证能取到 camera_num 个。
         sampled_indices = random.sample(range(candidate_camera_num), camera_num)
 
     sampled_camera_directions = camera_directions[sampled_indices]
