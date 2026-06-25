@@ -95,8 +95,12 @@ class MaskChannel(object):
         Mh, Mw = mask.shape[0], mask.shape[1]
         u = uv_grid[..., 0]
         v = uv_grid[..., 1]
-        idx_w = (u * Mw).long().clamp(0, Mw - 1)
-        idx_h = ((1.0 - v) * Mh).long().clamp(0, Mh - 1)
+        # 像素中心约定 pixel = uv * N - 0.5，再 round 取最近邻；必须与
+        # sampleRGBAtUV / _sample_normal_at_uv 完全一致，否则 createDepthPcd 里同一
+        # 归一化 UV 在 mask 与 image/normal 上会错位约半个~一个像素，导致点云几何与
+        # 颜色/法线在物体边缘错配（depth 与 image 分辨率不同时尤为明显）。
+        idx_w = (u * Mw - 0.5).round().long().clamp(0, Mw - 1)
+        idx_h = ((1.0 - v) * Mh - 0.5).round().long().clamp(0, Mh - 1)
         return mask[idx_h, idx_w]
 
     def sampleMaskWithSize(self, width: int, height: int, mask_smaller_pixel_num: int = 0) -> torch.Tensor:
