@@ -13,7 +13,11 @@ from concurrent.futures import ThreadPoolExecutor
 
 from camera_control.Method.pcd import toPcd, toTrimeshPcd
 from camera_control.Method.data import toNumpy, toTensor
-from camera_control.Method.rotate import decompose_similarity_from_T, invert_similarity
+from camera_control.Method.rotate import (
+    decompose_similarity_from_T,
+    estimate_similarity_transform_from_points,
+    invert_similarity,
+)
 from camera_control.Module.camera import Camera
 
 
@@ -82,6 +86,73 @@ class CameraConvertor(object):
                 cam.normal_world = cam.normal_world / (torch.linalg.norm(cam.normal_world, dim=-1, keepdim=True) + 1e-8)
 
         return transformed_list
+
+    @staticmethod
+    def getCameraListSimilarityTransform(
+        source_camera_list: List[Camera],
+        target_camera_list: List[Camera],
+        allow_rotation: bool=True,
+        allow_scale: bool=True,
+        check_image_id: bool=False,
+    ) -> Optional[torch.Tensor]:
+        """求把 ``source_camera_list`` 对齐到 ``target_camera_list`` 的 Sim(3) 变换。
+
+        以两组**有序、一一对应**相机的相机中心 ``camera.pos`` 作为点集, 用 Umeyama
+        最小二乘求严格相似变换 (旋转 + 各向同性缩放 + 平移)。典型用途: 求 BA 前后
+        相机轨迹之间的 gauge 变换, 其 scale 即 depth 应同步缩放的精确尺度。
+
+        返回的 ``world_transform`` 为 **行向量右乘** 约定 (与 Open3D ICP 矩阵转置一致),
+        可直接传入 ``transformCameras``; 外部也可用
+        ``decompose_similarity_from_T(world_transform.T)`` 反求 (R, scale, t)。
+
+        Args:
+            source_camera_list: 源相机列表 (变换前)。
+            target_camera_list: 目标相机列表 (变换后), 顺序与 source 一一对应。
+            allow_rotation: 是否估计旋转, 否则只估缩放 + 平移。
+            allow_scale: 是否估计各向同性缩放, 否则只估旋转 + 平移。
+            check_image_id: 为 True 时校验两侧 ``image_id`` 顺序一致, 不一致返回 None。
+
+        Returns:
+            (4, 4) torch.Tensor 行向量右乘约定; 数量不一致 / 退化 / image_id 不匹配时 None。
+        """
+        if len(source_camera_list) != len(target_camera_list):
+            print('[ERROR][CameraConvertor::getCameraListSimilarityTransform]')
+            print('\t source / target camera count mismatch:',
+                  len(source_camera_list), len(target_camera_list))
+            return None
+        if len(source_camera_list) == 0:
+            print('[ERROR][CameraConvertor::getCameraListSimilarityTransform]')
+            print('\t empty camera list.')
+            return None
+
+        if check_image_id:
+            source_ids = [getattr(c, 'image_id', None) for c in source_camera_list]
+            target_ids = [getattr(c, 'image_id', None) for c in target_camera_list]
+            if source_ids != target_ids:
+                print('[ERROR][CameraConvertor::getCameraListSimilarityTransform]')
+                print('\t image_id order mismatch between source and target.')
+                return None
+
+        device = source_camera_list[0].device
+        dtype = source_camera_list[0].dtype
+
+        source_pos = torch.stack([
+            camera.pos.reshape(3).to(dtype=torch.float64) for camera in source_camera_list
+        ], dim=0)
+        target_pos = torch.stack([
+            camera.pos.reshape(3).to(dtype=torch.float64) for camera in target_camera_list
+        ], dim=0)
+
+        world_transform = estimate_similarity_transform_from_points(
+            source_points=source_pos,
+            target_points=target_pos,
+            allow_rotation=allow_rotation,
+            allow_scale=allow_scale,
+        )
+        if world_transform is None:
+            return None
+
+        return world_transform.to(dtype=dtype, device=device)
 
     @staticmethod
     def getZAxisNormalizeTransform(
