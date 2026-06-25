@@ -1645,6 +1645,75 @@ class VolumeMarker(object):
         return VolumeMarker._makeIjkGrid(coords)
 
     # ------------------------------------------------------------------
+    # mark-unknown 点云：把「不完整 geometry 漏采」的表面位置从 FREE 救回 UNKNOWN
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _loadMarkUnknownPcdPoints(
+        mark_unknown_pcd_file_path: str,
+        dtype,
+        device: str,
+    ) -> Optional[torch.Tensor]:
+        """加载 mark-unknown 点云文件为 (N, 3) 点张量；无效输入返回 None。
+
+        第一性原理：mark-unknown 点云只用于在 FREE_KN 标注前，把「物体表面真实
+        经过但 geometry 未采样到点」的位置从 FREE 救回 UNKNOWN，避免这些薄表面被
+        误标成自由空间。因此它只关心顶点坐标，不关心拓扑——mesh / 点云 / scene
+        都只取顶点。复用 _loadGeometryFile（含面取顶点、scene 合并）+ _normalizePoints
+        （列截断到前 3 维、迁移到目标 device），不重复造轮子。
+
+        ``None`` / 空串 / 文件不存在 / 解析后无任何点 -> 返回 None（按「无该参数」
+        处理，不影响原始 markVisible 逻辑），不抛错。
+        """
+        if mark_unknown_pcd_file_path is None:
+            return None
+        if not isinstance(mark_unknown_pcd_file_path, str):
+            return None
+        if not mark_unknown_pcd_file_path or not os.path.isfile(
+                mark_unknown_pcd_file_path):
+            return None
+
+        loaded = VolumeMarker._loadGeometryFile(mark_unknown_pcd_file_path)
+        if VolumeMarker._isTriangleMesh(loaded):
+            points, _ = VolumeMarker._meshVerticesFaces(loaded, dtype, device)
+        else:
+            points = VolumeMarker._geometryToPoints(loaded, dtype, device)
+
+        if points.numel() == 0:
+            return None
+        return points
+
+    @staticmethod
+    def _unknownPointOccupancy(
+        points: torch.Tensor,
+        R: int,
+        device: str,
+    ) -> torch.Tensor:
+        """把 mark-unknown 点云体素化为 (R, R, R) bool 占据 mask。
+
+        与候选点体素化完全同一坐标约定（_voxelizePoints：voxel index =
+        floor((point + 0.5) * R)），保证 unknown 占据与 candidate / free 在同一
+        体素网格上对齐。域外点被 _voxelizePoints 内的 _finiteInBounds 静默过滤。
+        """
+        return VolumeMarker._voxelizePoints(points, R, device)
+
+    @staticmethod
+    def _suppressFreeByUnknownPointOccupancy(
+        free_mask: torch.Tensor,
+        unknown_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """把 unknown 点云占据到的 voxel 从 free_mask 中移除，返回新 free_mask。
+
+        第一性原理：mark-unknown 点云标记的体素是「物体表面真实经过」的位置，
+        哪怕 geometry 未在该处采到点导致它被 9 点证据判为 FREE，也应保持 UNKNOWN
+        而非自由空间。被移除的 voxel 因此在 _mergeLabels 中保持 UNKNOWN(0)，并作为
+        FREE_KN 距离场的非 FREE 锚点参与后续 K 计算。
+
+        只做 free_mask & ~unknown_mask 的纯布尔减法，不触碰 VALID（visible_candidate
+        与 free_mask 不相交，VALID 不在 free_mask 内、自然不受影响）。
+        """
+        return free_mask & (~unknown_mask)
+
+    # ------------------------------------------------------------------
     # 标签合并原子
     # ------------------------------------------------------------------
     @staticmethod
@@ -1707,6 +1776,7 @@ class VolumeMarker(object):
         np.ndarray,
         torch.Tensor,
     ]] = None,
+        mark_unknown_pcd_file_path: Optional[str] = None,
     ) -> torch.Tensor:
         """基于候选占据 + 单次候选立方体渲染对空间体素打严格可信标签。
 
@@ -1734,6 +1804,13 @@ class VolumeMarker(object):
              对该体素的 FREE 判定。跨视角并集得到 free_evidence，排除候选后即 FREE。
           e. 把所有 FREE 按到最近非 FREE 锚点（VALID∪UNKNOWN）的 L1 距离 K
              写为 FREE_KN = -K。
+
+        ``mark_unknown_pcd_file_path`` (可选)：在阶段 e（写 FREE_KN）之前，用该点云
+        体素化得到的占据 mask 把对应 FREE voxel 从 free_mask 救回 UNKNOWN，用于修复
+        geometry 不完整的问题——物体表面真实经过、但 geometry 未采样到点的位置不会
+        被误标成 FREE_KN。该点云只取顶点坐标（mesh / 点云 / 文件均可），路径为 None /
+        不存在 / 解析后无点时按「无该参数」处理，不改变原始逻辑。被救回的 voxel 保持
+        UNKNOWN 并作为 FREE_KN 距离场的非 FREE 锚点参与 K 计算。
 
         c + d 共用同一次候选立方体渲染（_renderVisibilityEvidence），不再做
         visible-VALID 的二次重建渲染。
@@ -1777,6 +1854,18 @@ class VolumeMarker(object):
 
         # --- FREE = 非候选 且 9 点严格前方证明（VALID 固定不被改写） ---
         free_mask = VolumeMarker._deriveStrictFreeMask(candidate, free_evidence)
+
+        # --- mark-unknown 点云：FREE_KN 标注前把表面经过但漏采的 FREE voxel 救回 UNKNOWN ---
+        unknown_points = VolumeMarker._loadMarkUnknownPcdPoints(
+            mark_unknown_pcd_file_path, dtype, device,
+        )
+        if unknown_points is not None:
+            unknown_mask = VolumeMarker._unknownPointOccupancy(
+                unknown_points, R, device,
+            )
+            free_mask = VolumeMarker._suppressFreeByUnknownPointOccupancy(
+                free_mask, unknown_mask,
+            )
 
         # --- e. VALID / FREE_KN / UNKNOWN 合并（FREE_KN = 到最近非 FREE 锚点的 L1 距离） ---
         return VolumeMarker._mergeLabels(R, visible_candidate, free_mask, device)

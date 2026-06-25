@@ -1245,6 +1245,103 @@ class TestMergeLabels(unittest.TestCase):
         self.assertEqual(int(labels[3, 3, 3].item()), VolumeMarker.freeLabelKN(3))
 
 
+class TestMarkUnknownPcd(unittest.TestCase):
+    """mark-unknown 点云把漏采表面经过的 FREE voxel 救回 UNKNOWN（纯逻辑，CPU）。"""
+
+    def _write_ply(self, points_np):
+        """把 (N,3) 点写到临时 .ply 文件，返回路径（调用方负责删除）。"""
+        import trimesh
+
+        fd, path = tempfile.mkstemp(suffix='.ply')
+        os.close(fd)
+        trimesh.points.PointCloud(points_np.astype(np.float64)).export(path)
+        return path
+
+    def test_load_none_or_missing_returns_none(self):
+        # None / 空串 / 不存在的路径 / 非 str 都按「无该参数」处理，返回 None。
+        self.assertIsNone(
+            VolumeMarker._loadMarkUnknownPcdPoints(None, torch.float32, 'cpu'))
+        self.assertIsNone(
+            VolumeMarker._loadMarkUnknownPcdPoints('', torch.float32, 'cpu'))
+        self.assertIsNone(
+            VolumeMarker._loadMarkUnknownPcdPoints(
+                '/no/such/file.ply', torch.float32, 'cpu'))
+        self.assertIsNone(
+            VolumeMarker._loadMarkUnknownPcdPoints(123, torch.float32, 'cpu'))
+
+    def test_load_ply_returns_points(self):
+        R = 8
+        pts_np = np.stack([
+            _voxel_center((2, 3, 5), R),
+            _voxel_center((4, 4, 4), R),
+        ]).astype(np.float32)
+        path = self._write_ply(pts_np)
+        try:
+            loaded = VolumeMarker._loadMarkUnknownPcdPoints(
+                path, torch.float32, 'cpu')
+        finally:
+            os.remove(path)
+        self.assertIsNotNone(loaded)
+        self.assertEqual(tuple(loaded.shape), (2, 3))
+
+    def test_occupancy_matches_voxelize_points(self):
+        R = 8
+        pts = torch.from_numpy(
+            np.stack([_voxel_center((2, 3, 5), R)]).astype(np.float32))
+        occ = VolumeMarker._unknownPointOccupancy(pts, R, 'cpu')
+        self.assertEqual(occ.shape, (R, R, R))
+        self.assertTrue(bool(occ[2, 3, 5]))
+        self.assertEqual(int(occ.sum().item()), 1)
+
+    def test_suppress_removes_only_unknown_occupied_free(self):
+        R = 3
+        free_mask = torch.zeros((R, R, R), dtype=torch.bool)
+        free_mask[1, 1, 1] = True
+        free_mask[2, 2, 2] = True
+        unknown_mask = torch.zeros((R, R, R), dtype=torch.bool)
+        unknown_mask[1, 1, 1] = True   # 命中 FREE -> 应移除
+        unknown_mask[0, 0, 0] = True   # 非 FREE -> 无影响
+
+        out = VolumeMarker._suppressFreeByUnknownPointOccupancy(
+            free_mask, unknown_mask)
+        self.assertFalse(bool(out[1, 1, 1]))  # 被救回（移出 free_mask）
+        self.assertTrue(bool(out[2, 2, 2]))   # 未被点云占据，仍 FREE
+        # 原 free_mask 不被原地改写。
+        self.assertTrue(bool(free_mask[1, 1, 1]))
+
+    def test_merge_after_suppress_marks_unknown_and_recomputes_k(self):
+        # 端到端（不渲染）：FREE 块中被 unknown 点云占据的 voxel 在合并后为
+        # UNKNOWN，且作为新锚点让邻近 FREE 的 K 变小。
+        R = 5
+        visible = torch.zeros((R, R, R), dtype=torch.bool)  # 无 VALID
+        free_mask = torch.zeros((R, R, R), dtype=torch.bool)
+        free_mask[1:4, 1:4, 1:4] = True  # 居中 3x3x3 FREE 块
+
+        # 基线：中心 (2,2,2) 到最近 UNKNOWN 锚点 L1 距离 2 -> FREE_2N。
+        base = VolumeMarker._mergeLabels(R, visible, free_mask, 'cpu')
+        self.assertEqual(int(base[2, 2, 2].item()), VolumeMarker.freeLabelKN(2))
+
+        # unknown 点云占据 FREE 块表面体素 (1,2,2)。
+        unknown_mask = torch.zeros((R, R, R), dtype=torch.bool)
+        unknown_mask[1, 2, 2] = True
+        suppressed = VolumeMarker._suppressFreeByUnknownPointOccupancy(
+            free_mask, unknown_mask)
+        labels = VolumeMarker._mergeLabels(R, visible, suppressed, 'cpu')
+
+        # 被占据的 voxel 救回 UNKNOWN。
+        self.assertEqual(int(labels[1, 2, 2].item()), VolumeMarker.UNKNOWN)
+        # 它成为新的非 FREE 锚点：中心 (2,2,2) 到 (1,2,2) L1 距离 1 -> FREE_1N。
+        self.assertEqual(int(labels[2, 2, 2].item()), VolumeMarker.freeLabelKN(1))
+
+    def test_markvisible_no_param_unchanged_no_camera(self):
+        # 无相机时不论是否传 mark_unknown_pcd 都全 UNKNOWN（不改变早退行为）。
+        R = 4
+        labels = VolumeMarker.markVisible(
+            [], R, mark_unknown_pcd_file_path='/no/such/file.ply')
+        self.assertEqual(labels.shape, (R, R, R))
+        self.assertTrue(bool((labels == VolumeMarker.UNKNOWN).all().item()))
+
+
 class TestObservationDomain(unittest.TestCase):
     """相机 mask 观测域门控（纯逻辑，CPU）。"""
 
