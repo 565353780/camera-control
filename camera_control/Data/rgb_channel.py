@@ -119,23 +119,6 @@ class RGBChannel(object):
             mask_smaller_pixel_num=mask_smaller_pixel_num,
         ) * 255.0, np.uint8)[..., ::-1]
 
-    def toImageVisCV(
-        self,
-        background_color: List[float] = [255, 255, 255],
-        use_mask: bool = True,
-        mask_smaller_pixel_num: int = 0,
-    ) -> np.ndarray:
-        """RGB 的可视化 CV 图（BGR uint8），与其它通道的 ``to*VisCV``（toDepthVisCV /
-        toCCMVisCV / toNormalWorldVisCV ...）接口对齐，便于跨模态统一调用。RGB 本身已是
-        可直接显示的颜色、无需 colormap，因此「vis」== 按 mask 合成背景后的 image
-        （``use_mask`` 缺省 True，与兄弟通道一致：前景外填 ``background_color``），等价
-        于 :func:`toImageCV`，仅做命名/接口对齐，不重复 mask 合成逻辑。"""
-        return self.toImageCV(
-            background_color=background_color,
-            use_mask=use_mask,
-            mask_smaller_pixel_num=mask_smaller_pixel_num,
-        )
-
     def sampleRGBAtUV(self, uv_grid: Union[torch.Tensor, np.ndarray]) -> torch.Tensor:
         """
         按归一化 UV 在 self.image 上做最近邻采样，供各模态按自身 UV 对齐 image，节省重复计算。
