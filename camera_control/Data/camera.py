@@ -1,13 +1,14 @@
 import os
 import math
 import torch
+import trimesh
 import numpy as np
 import open3d as o3d
 from copy import deepcopy
 from typing import Union, Optional
 
 from camera_control.Method.data import toNumpy, toTensor
-from camera_control.Method.mesh import createAxisMesh
+from camera_control.Method.mesh import createAxisMesh, toTrimesh
 from camera_control.Method.rotate import rotmat2qvec, qvec2rotmat
 from camera_control.Method.path import removeFile, createFileFolder
 
@@ -765,13 +766,14 @@ class CameraData(object):
         self.setT(t)
         return True
 
-    def toO3DMesh(
+    def toMesh(
         self,
         far: float = 1.0,
         color: list = [0, 1, 0],
         radius: float = 0.01,
         resolution: int = 20,
-    ) -> o3d.geometry.TriangleMesh:
+        mesh_type: str = 'open3d',
+    ) -> Union[o3d.geometry.TriangleMesh, trimesh.Trimesh]:
         """
         创建相机视锥的可视化三角面网格
 
@@ -780,7 +782,15 @@ class CameraData(object):
 
         四个角点方向由当前相机的宽高与 fovx_degree 决定，far 表示每个角点
         到相机位置的欧氏距离（而非沿 -Z 轴的深度）。
+
+        ``mesh_type`` 控制返回类型：``'open3d'``（默认）返回
+        ``open3d.geometry.TriangleMesh``；``'trimesh'`` 则通过
+        ``toTrimesh`` 完整继承 v/f/color 后返回 ``trimesh.Trimesh``。
         """
+        assert mesh_type in ('open3d', 'trimesh'), (
+            f'[ERROR][Camera::toMesh] unsupported mesh_type={mesh_type}, '
+            "expected one of ['open3d', 'trimesh']"
+        )
         import open3d as o3d
         # 由水平 FOV 推出水平半角正切，再按宽高比推出垂直半角正切。
         tan_half_x = math.tan(math.radians(self.fovx_degree) / 2.0)
@@ -849,12 +859,27 @@ class CameraData(object):
             cylinder.translate((p0 + p1) / 2.0)
             mesh_all += cylinder
 
+        if mesh_type == 'trimesh':
+            return toTrimesh(mesh_all)
+
         return mesh_all
 
-    def toO3DAxisMesh(self, length: float=1.0) -> o3d.geometry.TriangleMesh:
+    def toAxisMesh(
+        self,
+        length: float = 1.0,
+        mesh_type: str = 'open3d',
+    ) -> Union[o3d.geometry.TriangleMesh, trimesh.Trimesh]:
+        assert mesh_type in ('open3d', 'trimesh'), (
+            f'[ERROR][Camera::toAxisMesh] unsupported mesh_type={mesh_type}, '
+            "expected one of ['open3d', 'trimesh']"
+        )
         axis_mesh = createAxisMesh(self.axis)
         resized_axis_mesh = axis_mesh.scale(float(length), center=(0.0, 0.0, 0.0))
         resized_axis_mesh.translate(self.pos.cpu().numpy())
+
+        if mesh_type == 'trimesh':
+            return toTrimesh(resized_axis_mesh)
+
         return resized_axis_mesh
 
     def getWorld2NVDiffRast(

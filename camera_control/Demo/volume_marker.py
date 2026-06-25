@@ -37,7 +37,7 @@ def _add_camera_meshes(
     combined_mesh += mesh
 
     for camera in camera_list:
-        combined_mesh += camera.toO3DMesh(far=0.2)
+        combined_mesh += camera.toMesh(far=0.2)
 
     combined_mesh.compute_vertex_normals()
     return combined_mesh

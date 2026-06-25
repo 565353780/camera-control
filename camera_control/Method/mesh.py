@@ -8,6 +8,35 @@ from typing import Union, Optional
 from camera_control.Method.data import toNumpy
 
 
+def toTrimesh(o3d_mesh: o3d.geometry.TriangleMesh) -> trimesh.Trimesh:
+    """将 open3d ``TriangleMesh`` 完整转换为 ``trimesh.Trimesh``。
+
+    继承 o3d_mesh 的顶点（v）、三角面（f）与顶点颜色（color，转为 RGBA uint8），
+    若无顶点颜色则保持 trimesh 默认外观。空网格（无顶点或无面）返回一个空的
+    ``trimesh.Trimesh``，保证返回类型恒定为 ``trimesh.Trimesh``。
+    """
+    vertices = np.asarray(o3d_mesh.vertices)
+    triangles = np.asarray(o3d_mesh.triangles)
+
+    if vertices.shape[0] == 0 or triangles.shape[0] == 0:
+        return trimesh.Trimesh(process=False)
+
+    tri_mesh = trimesh.Trimesh(vertices=vertices, faces=triangles, process=False)
+
+    if o3d_mesh.has_vertex_colors():
+        vertex_colors = np.asarray(o3d_mesh.vertex_colors)
+        vertex_colors_uint8 = np.clip(vertex_colors * 255.0, 0, 255).astype(np.uint8)
+        rgba = np.concatenate(
+            [
+                vertex_colors_uint8,
+                np.full((vertex_colors_uint8.shape[0], 1), 255, dtype=np.uint8),
+            ],
+            axis=1,
+        )
+        tri_mesh.visual.vertex_colors = rgba
+
+    return tri_mesh
+
 def normalizeMesh(mesh: trimesh.Trimesh, target_length: float = 0.99) -> trimesh.Trimesh:
     """
     将mesh通过平移和缩放，归一化到原点为bbox中心，bbox最长边为target_length

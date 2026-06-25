@@ -42,7 +42,7 @@ def test():
     if render:
         pcd = toPcd(points, [0, 1, 0])
         pcd_camera = toPcd(points_camera, [1, 0, 0])
-        camera_mesh = camera.toO3DMesh(0.5, [0, 0, 1])
+        camera_mesh = camera.toMesh(0.5, [0, 0, 1])
 
         # 使用LineSet画三条不同颜色的轴线
         points_axis = np.array([

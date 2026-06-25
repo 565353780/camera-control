@@ -1728,11 +1728,20 @@ class CameraConvertor(object):
     def toCamerasMesh(
         camera_list: List[Camera],
         scale: float=0.1,
-    ) -> o3d.geometry.TriangleMesh:
+        mesh_type: str='open3d',
+    ) -> Union[o3d.geometry.TriangleMesh, trimesh.Trimesh]:
+        assert mesh_type in ('open3d', 'trimesh'), (
+            f'[ERROR][CameraConvertor::toCamerasMesh] unsupported mesh_type={mesh_type}, '
+            "expected one of ['open3d', 'trimesh']"
+        )
         cameras_mesh = o3d.geometry.TriangleMesh()
 
         for camera in camera_list:
-            cameras_mesh += camera.toO3DMesh(far=scale)
-            cameras_mesh += camera.toO3DAxisMesh(length=scale)
+            cameras_mesh += camera.toMesh(far=scale)
+            cameras_mesh += camera.toAxisMesh(length=scale)
+
+        if mesh_type == 'trimesh':
+            from camera_control.Method.mesh import toTrimesh
+            return toTrimesh(cameras_mesh)
 
         return cameras_mesh

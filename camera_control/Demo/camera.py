@@ -89,9 +89,9 @@ def demo():
 
     # 相机视锥
     # 原始相机（绿色）
-    geometry_list.append(camera.toO3DMesh(far=1.0, color=[0, 1, 0]))
+    geometry_list.append(camera.toMesh(far=1.0, color=[0, 1, 0]))
     # 估计相机（蓝色）
-    geometry_list.append(estimated_camera.toO3DMesh(far=1.0, color=[0, 0, 1]))
+    geometry_list.append(estimated_camera.toMesh(far=1.0, color=[0, 0, 1]))
 
     # 添加坐标轴
     coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=1.0, origin=[0, 0, 0])

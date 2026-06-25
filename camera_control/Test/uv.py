@@ -64,7 +64,7 @@ def visualize_with_open3d_animated(mesh, points_xyz, camera_base, n_frames=360):
     valid_points_np = points_xyz_np[valid_mask.cpu().numpy()]
 
     # 创建相机视锥体
-    camera_frustum = vis_camera.toO3DMesh()
+    camera_frustum = vis_camera.toMesh()
     vis.add_geometry(camera_frustum)
 
     # 创建图像平面
@@ -301,7 +301,7 @@ def visualize_with_open3d_animated(mesh, points_xyz, camera_base, n_frames=360):
                   f"可见点: {valid_count}/{len(points_xyz_tensor)} ({100*valid_count/len(points_xyz_tensor):.1f}%)")
 
         # 更新相机视锥体
-        new_frustum = vis_camera.toO3DMesh()
+        new_frustum = vis_camera.toMesh()
         camera_frustum.points = new_frustum.points
         camera_frustum.lines = new_frustum.lines
         vis.update_geometry(camera_frustum)

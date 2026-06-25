@@ -76,7 +76,7 @@ def test():
         if len(valid_points) < 6:
             print(f"  警告: 相机 {i+1} 有效点不足，跳过求解")
 
-            camera_mesh = camera.toO3DMesh()
+            camera_mesh = camera.toMesh()
             pcd = toPcd(points)
             o3d.visualization.draw_geometries([camera_mesh, pcd])
             continue
@@ -122,7 +122,7 @@ def test():
         cam_pos = camera.pos.numpy()
         
         # 添加当前相机（绿色）
-        mesh = camera.toO3DMesh(far=1.0, color=[0, 1, 0])
+        mesh = camera.toMesh(far=1.0, color=[0, 1, 0])
         geometries.append(mesh)
         
         # 添加所有采样点云（浅灰色）
@@ -143,7 +143,7 @@ def test():
     # 添加估计的相机（蓝色）和连接线（红色）
     for estimated_camera, orig_idx in estimated_cameras:
         # 添加估计的相机
-        est_mesh = estimated_camera.toO3DMesh(far=1.0, color=[0, 0, 1])
+        est_mesh = estimated_camera.toMesh(far=1.0, color=[0, 0, 1])
         geometries.append(est_mesh)
         
         # 添加连接线（红色），显示位置误差

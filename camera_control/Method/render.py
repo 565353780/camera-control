@@ -1,4 +1,5 @@
 import torch
+import trimesh
 import numpy as np
 import open3d as o3d
 from typing import Optional, Tuple, Union
@@ -270,7 +271,8 @@ def toVisibleVolumeMesh(
     show_valid: bool = True,
     show_unknown: bool = True,
     show_free: bool = True,
-) -> o3d.geometry.TriangleMesh:
+    mesh_type: str = 'open3d',
+) -> Union[o3d.geometry.TriangleMesh, trimesh.Trimesh]:
     """
     将 VolumeMarker.markVisible 输出的 (R, R, R) 标签可视化为单个 TriangleMesh。
 
@@ -293,9 +295,18 @@ def toVisibleVolumeMesh(
             单类中间结果（如只看候选或只看 FREE）时可关闭其余类，避免被
             外围 UNKNOWN 灰色四面体淹没。
 
+        mesh_type: 返回类型，``'open3d'``（默认）返回
+            ``open3d.geometry.TriangleMesh``；``'trimesh'`` 经 ``toTrimesh``
+            完整继承 v/f/color 后返回 ``trimesh.Trimesh``。
+
     Returns:
-        合并后的单个 o3d.geometry.TriangleMesh。
+        合并后的单个网格（类型由 ``mesh_type`` 决定）。
     """
+    assert mesh_type in ('open3d', 'trimesh'), (
+        f'[ERROR][render::toVisibleVolumeMesh] unsupported mesh_type={mesh_type}, '
+        "expected one of ['open3d', 'trimesh']"
+    )
+
     if isinstance(labels, torch.Tensor):
         labels = labels.detach().cpu().numpy()
     labels = np.asarray(labels)
@@ -357,6 +368,9 @@ def toVisibleVolumeMesh(
 
     mesh = o3d.geometry.TriangleMesh()
     if len(all_centers) == 0:
+        if mesh_type == 'trimesh':
+            from camera_control.Method.mesh import toTrimesh
+            return toTrimesh(mesh)
         return mesh
 
     vertices, faces, vertex_colors = _batchTetraMesh(
@@ -369,4 +383,9 @@ def toVisibleVolumeMesh(
     mesh.triangles = o3d.utility.Vector3iVector(faces)
     mesh.vertex_colors = o3d.utility.Vector3dVector(vertex_colors)
     mesh.compute_vertex_normals()
+
+    if mesh_type == 'trimesh':
+        from camera_control.Method.mesh import toTrimesh
+        return toTrimesh(mesh)
+
     return mesh
